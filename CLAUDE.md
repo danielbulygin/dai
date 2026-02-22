@@ -22,6 +22,13 @@ Multi-agent Slack system powered by Claude. Agents live in Slack, respond to @me
 - Pino for logging
 - Files use kebab-case
 - Sub-agents and agent teams are explicitly allowed
+- **Use sub-agents and agent teams** for complex, multi-step, or parallelizable tasks. Prefer launching multiple agents concurrently for independent work streams.
+
+## Related Systems
+- **BMAD repo** (`/Users/danielbulygin/dev/bmad`) - Performance Marketing Agency dashboard (Next.js + Supabase + Python)
+- DAI connects to BMAD's Supabase for client data, ad performance, alerts, learnings
+- BMAD analysis instructions live in `pma/docs/account-analysis-playbook.md` and `pma/docs/opus-analysis-architecture.md`
+- Analysis prompts stored in Supabase `analysis_prompts` table (orchestrator, pre-click, post-click, learning synthesizer)
 
 ## Key Paths
 - `src/` - Application source code

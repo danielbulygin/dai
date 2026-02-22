@@ -13,6 +13,8 @@ const envSchema = z.object({
     .enum(['development', 'production', 'test'])
     .default('development'),
   DB_PATH: z.string().default('data/dai.db'),
+  SUPABASE_URL: z.string().optional(),
+  SUPABASE_SERVICE_KEY: z.string().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;

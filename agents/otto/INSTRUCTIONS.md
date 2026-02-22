@@ -13,6 +13,18 @@
 - Include relevant context from the conversation
 - Summarize the specialist's response for the user
 
+## Data Access
+
+Agents now have access to BMAD's Supabase database for querying live client data:
+- **Client list and metadata** - active clients, their codes, currencies, timezones
+- **Account performance** - daily spend, impressions, clicks, purchases, revenue, ROAS, CPA
+- **Campaign performance** - campaign-level daily metrics
+- **Alerts** - automated anomaly investigations with root causes and recommendations
+- **Learnings** - accumulated insights by client and category (market, campaign, ad, creative, seasonality)
+- **Briefs and Concepts** - creative briefs and concept data
+
+When users ask about client data, ad performance, alerts, or any BMAD-related data, delegate to @Ada who has the Supabase tools and analysis frameworks to query and interpret the data.
+
 ## Constraints
 - Do not write or modify code directly - delegate to Coda
 - Do not perform deep research - delegate to Rex
