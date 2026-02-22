@@ -54,11 +54,12 @@ function stripBotMention(text: string, botUserId: string): string {
 function findAgentByKeyword(text: string): AgentDefinition | undefined {
   const lower = text.toLowerCase();
 
-  // Check direct keyword match anywhere in the cleaned text
+  // Check whole-word keyword match in the cleaned text
   const registry = loadAgentRegistry();
   for (const [, agent] of registry) {
     const name = agent.config.display_name.toLowerCase();
-    if (lower.includes(name)) {
+    const pattern = new RegExp(`\\b${name}\\b`, 'i');
+    if (pattern.test(lower)) {
       return agent;
     }
   }

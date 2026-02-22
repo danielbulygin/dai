@@ -1,28 +1,41 @@
-import { z } from "zod";
+import { z } from 'zod';
 
 const envSchema = z.object({
-  SLACK_BOT_TOKEN: z.string().min(1, "SLACK_BOT_TOKEN is required"),
-  SLACK_APP_TOKEN: z.string().min(1, "SLACK_APP_TOKEN is required"),
-  SLACK_SIGNING_SECRET: z.string().min(1, "SLACK_SIGNING_SECRET is required"),
-  ANTHROPIC_API_KEY: z.string().min(1, "ANTHROPIC_API_KEY is required"),
-  SLACK_OWNER_USER_ID: z.string().min(1, "SLACK_OWNER_USER_ID is required"),
+  SLACK_BOT_TOKEN: z.string().min(1, 'SLACK_BOT_TOKEN is required'),
+  SLACK_APP_TOKEN: z.string().min(1, 'SLACK_APP_TOKEN is required'),
+  SLACK_SIGNING_SECRET: z.string().min(1, 'SLACK_SIGNING_SECRET is required'),
+  ANTHROPIC_API_KEY: z.string().min(1, 'ANTHROPIC_API_KEY is required'),
+  SLACK_OWNER_USER_ID: z.string().min(1, 'SLACK_OWNER_USER_ID is required'),
   LOG_LEVEL: z
-    .enum(["fatal", "error", "warn", "info", "debug", "trace"])
-    .default("info"),
+    .enum(['silent', 'fatal', 'error', 'warn', 'info', 'debug', 'trace'])
+    .default('info'),
   NODE_ENV: z
-    .enum(["development", "production", "test"])
-    .default("development"),
-  DB_PATH: z.string().default("data/dai.db"),
+    .enum(['development', 'production', 'test'])
+    .default('development'),
+  DB_PATH: z.string().default('data/dai.db'),
 });
 
 export type Env = z.infer<typeof envSchema>;
 
-const parsed = envSchema.safeParse(process.env);
+let _env: Env | null = null;
 
-if (!parsed.success) {
-  console.error("Invalid environment variables:");
-  console.error(parsed.error.issues.map((i) => `  ${i.path.join(".")}: ${i.message}`).join("\n"));
-  process.exit(1);
+function loadEnv(): Env {
+  if (_env) return _env;
+
+  const parsed = envSchema.safeParse(process.env);
+  if (!parsed.success) {
+    const msg = parsed.error.issues
+      .map((i) => `  ${i.path.join('.')}: ${i.message}`)
+      .join('\n');
+    console.error('Invalid environment variables:\n' + msg);
+    process.exit(1);
+  }
+  _env = parsed.data;
+  return _env;
 }
 
-export const env: Env = parsed.data;
+export const env: Env = new Proxy({} as Env, {
+  get(_target, prop: string) {
+    return loadEnv()[prop as keyof Env];
+  },
+});
