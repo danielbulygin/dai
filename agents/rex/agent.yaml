@@ -1,0 +1,8 @@
+id: rex
+display_name: Rex
+model: claude-sonnet-4-20250514
+icon: ":mag:"
+profile: readonly
+max_turns: 15
+channels: []
+sub_agents: []

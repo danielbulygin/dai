@@ -1,0 +1,8 @@
+id: sage
+display_name: Sage
+model: claude-sonnet-4-20250514
+icon: ":owl:"
+profile: readonly
+max_turns: 15
+channels: []
+sub_agents: []

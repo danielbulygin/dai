@@ -1,0 +1,25 @@
+agents:
+  - id: otto
+    path: otto
+    display_name: Otto
+    icon: ":robot_face:"
+    description: "Team orchestrator - routes requests, coordinates agents"
+    tags: [orchestrator, default]
+  - id: coda
+    path: coda
+    display_name: Coda
+    icon: ":technologist:"
+    description: "Senior developer - writes code, reviews PRs, debugs"
+    tags: [developer, coding]
+  - id: rex
+    path: rex
+    display_name: Rex
+    icon: ":mag:"
+    description: "Research specialist - web search, analysis, summaries"
+    tags: [research, analysis]
+  - id: sage
+    path: sage
+    display_name: Sage
+    icon: ":owl:"
+    description: "Quality reviewer - code review, best practices, feedback"
+    tags: [reviewer, quality]
