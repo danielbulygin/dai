@@ -1,0 +1,55 @@
+{
+  "display_information": {
+    "name": "DAI",
+    "description": "Daniel's AI - Multi-Agent Slack System",
+    "background_color": "#1a1a2e"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "DAI",
+      "always_online": true
+    },
+    "slash_commands": [
+      {
+        "command": "/dai",
+        "description": "Interact with DAI agents",
+        "usage_hint": "[help|feedback|status|agents]",
+        "should_escape": false
+      }
+    ]
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "app_mentions:read",
+        "channels:history",
+        "channels:read",
+        "chat:write",
+        "commands",
+        "groups:history",
+        "groups:read",
+        "im:history",
+        "im:read",
+        "im:write",
+        "reactions:read",
+        "users:read"
+      ]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "bot_events": [
+        "app_mention",
+        "message.im",
+        "reaction_added",
+        "reaction_removed"
+      ]
+    },
+    "interactivity": {
+      "is_enabled": false
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": true,
+    "token_rotation_enabled": false
+  }
+}

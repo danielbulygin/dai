@@ -1,15 +1,26 @@
-import { query, type Message } from "@anthropic-ai/claude-code";
-import { getAgent, getDefaultAgent } from "./registry.js";
-import { toolProfiles } from "./profiles/index.js";
+import Anthropic from '@anthropic-ai/sdk';
+import { getAgent, getDefaultAgent } from './registry.js';
 import {
   createSession,
   findSession,
   updateSession,
-} from "../memory/sessions.js";
-import { getQuickContext } from "../memory/search.js";
-import { logger } from "../utils/logger.js";
-import type { Session } from "../memory/sessions.js";
-import type { QuickContext } from "../memory/search.js";
+} from '../memory/sessions.js';
+import { getQuickContext } from '../memory/search.js';
+import { addMessage, getMessages } from '../memory/messages.js';
+import { logger } from '../utils/logger.js';
+import { env } from '../env.js';
+import type { Session } from '../memory/sessions.js';
+import type { QuickContext } from '../memory/search.js';
+import type { ChatMessage } from '../memory/messages.js';
+
+let client: Anthropic | null = null;
+
+function getClient(): Anthropic {
+  if (!client) {
+    client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+  }
+  return client;
+}
 
 export interface RunOptions {
   agentId: string;
@@ -21,16 +32,18 @@ export interface RunOptions {
   onText?: (text: string) => void;
 }
 
+export interface TokenUsage {
+  input: number;
+  output: number;
+}
+
 export interface RunResult {
   sessionId: string;
   response: string;
   turns: number;
+  usage: TokenUsage;
 }
 
-/**
- * Build a system prompt from the agent's persona, instructions, and
- * memory context.  Keeps it compact so we stay within token budgets.
- */
 function buildSystemPrompt(
   persona: string,
   instructions: string,
@@ -41,7 +54,6 @@ function buildSystemPrompt(
   parts.push(persona);
   parts.push(instructions);
 
-  // Layer 1 quick-context injection
   if (context.lastSessionSummary) {
     parts.push(`## Previous Session\n${context.lastSessionSummary}`);
   }
@@ -49,23 +61,20 @@ function buildSystemPrompt(
   if (context.topLearnings.length > 0) {
     const items = context.topLearnings
       .map((l) => `- ${l.content}`)
-      .join("\n");
+      .join('\n');
     parts.push(`## Key Learnings\n${items}`);
   }
 
   if (context.userLearnings.length > 0) {
     const items = context.userLearnings
       .map((l) => `- ${l.content}`)
-      .join("\n");
+      .join('\n');
     parts.push(`## User Preferences\n${items}`);
   }
 
-  return parts.join("\n\n");
+  return parts.join('\n\n');
 }
 
-/**
- * Resolve or create the session that this run should use.
- */
 function resolveSession(
   agentId: string,
   channelId: string,
@@ -73,7 +82,6 @@ function resolveSession(
   threadTs?: string,
   existingSessionId?: string,
 ): Session {
-  // If a specific sessionId was provided, look it up first
   if (existingSessionId) {
     const existing = findSession(channelId, threadTs ?? null, agentId);
     if (existing && existing.id === existingSessionId) {
@@ -81,13 +89,11 @@ function resolveSession(
     }
   }
 
-  // Try to find an active session for the same channel+thread+agent
   const found = findSession(channelId, threadTs ?? null, agentId);
   if (found) {
     return found;
   }
 
-  // Create a new session
   return createSession({
     agent_id: agentId,
     channel_id: channelId,
@@ -96,28 +102,6 @@ function resolveSession(
   });
 }
 
-/**
- * Extract text content from a message's content field.
- * The content can be either a plain string or an array of content blocks.
- */
-function extractText(content: string | Array<{ type: string; text?: string }>): string {
-  if (typeof content === "string") {
-    return content;
-  }
-
-  return content
-    .filter((block) => block.type === "text" && block.text)
-    .map((block) => block.text!)
-    .join("");
-}
-
-/**
- * Execute an agent using the Claude Code SDK.
- *
- * Looks up the agent definition, builds a system prompt with memory context,
- * calls `query()`, streams text chunks via the optional callback, and
- * persists the session in the database.
- */
 export async function runAgent(options: RunOptions): Promise<RunResult> {
   const {
     agentId,
@@ -129,7 +113,6 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
     onText,
   } = options;
 
-  // Resolve agent definition
   const agent = getAgent(agentId) ?? getDefaultAgent();
   const agentLabel = agent.config.display_name;
 
@@ -138,7 +121,6 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
     `Running agent ${agentLabel}`,
   );
 
-  // Resolve or create session
   const session = resolveSession(
     agent.config.id,
     channelId,
@@ -147,7 +129,6 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
     sessionId,
   );
 
-  // Build system prompt with memory context
   const context = getQuickContext(agent.config.id, userId);
   const systemPrompt = buildSystemPrompt(
     agent.persona,
@@ -155,42 +136,69 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
     context,
   );
 
-  // Determine allowed tools from the agent's profile
-  const allowedTools: string[] = [
-    ...toolProfiles[agent.config.profile],
-  ];
+  // Load prior conversation history from this session (last 20 messages)
+  const priorMessages = getMessages(session.id, 20);
+  const conversationMessages: Array<{ role: 'user' | 'assistant'; content: string }> =
+    priorMessages.map((msg: ChatMessage) => ({
+      role: msg.role,
+      content: msg.content,
+    }));
 
-  // Prepare messages
-  const messages: Message[] = [
-    { role: "user", content: userMessage },
-  ];
+  // Append the new user message
+  conversationMessages.push({ role: 'user', content: userMessage });
 
-  // Run the agent
-  const abortController = new AbortController();
-  let responseText = "";
-  let turns = 0;
+  logger.debug(
+    { sessionId: session.id, historyLength: priorMessages.length },
+    'Loaded conversation history',
+  );
+
+  let responseText = '';
 
   try {
-    const stream = query({
-      prompt: messages,
-      systemPrompt,
-      options: {
-        maxTurns: agent.config.max_turns,
-        allowedTools,
-      },
-      abortController,
+    const stream = getClient().messages.stream({
+      model: agent.config.model,
+      max_tokens: 4096,
+      system: systemPrompt,
+      messages: conversationMessages,
     });
 
-    for await (const message of stream) {
-      if (message.role === "assistant") {
-        const text = extractText(message.content);
-        if (text) {
-          responseText += text;
-          onText?.(text);
-        }
-        turns++;
-      }
-    }
+    stream.on('text', (text) => {
+      responseText += text;
+      onText?.(text);
+    });
+
+    const finalMessage = await stream.finalMessage();
+
+    // Persist the user message and assistant response
+    addMessage({ session_id: session.id, role: 'user', content: userMessage });
+    addMessage({ session_id: session.id, role: 'assistant', content: responseText });
+
+    // Update session in the database
+    updateSession(session.id, {
+      total_turns: session.total_turns + 1,
+    });
+
+    logger.info(
+      {
+        agentId: agent.config.id,
+        sessionId: session.id,
+        responseLength: responseText.length,
+        historyLength: priorMessages.length,
+        inputTokens: finalMessage.usage.input_tokens,
+        outputTokens: finalMessage.usage.output_tokens,
+      },
+      `Agent ${agentLabel} completed`,
+    );
+
+    return {
+      sessionId: session.id,
+      response: responseText,
+      turns: 1,
+      usage: {
+        input: finalMessage.usage.input_tokens,
+        output: finalMessage.usage.output_tokens,
+      },
+    };
   } catch (err) {
     logger.error(
       { err, agentId: agent.config.id, sessionId: session.id },
@@ -198,25 +206,4 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
     );
     throw err;
   }
-
-  // Update session in the database
-  updateSession(session.id, {
-    total_turns: session.total_turns + turns,
-  });
-
-  logger.info(
-    {
-      agentId: agent.config.id,
-      sessionId: session.id,
-      turns,
-      responseLength: responseText.length,
-    },
-    `Agent ${agentLabel} completed`,
-  );
-
-  return {
-    sessionId: session.id,
-    response: responseText,
-    turns,
-  };
 }

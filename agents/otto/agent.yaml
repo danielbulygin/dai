@@ -5,4 +5,4 @@ icon: ":robot_face:"
 profile: standard
 max_turns: 10
 channels: []  # all channels
-sub_agents: [coda, rex, sage]
+sub_agents: [coda, rex, sage, ada]

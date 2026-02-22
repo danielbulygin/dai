@@ -3,13 +3,14 @@ import { loadAgentRegistry, getAgent, getDefaultAgent } from '../src/agents/regi
 import { toolProfiles } from '../src/agents/profiles/index.js';
 
 describe('Agent Registry', () => {
-  it('loads all 4 agents from manifest', () => {
+  it('loads all 5 agents from manifest', () => {
     const registry = loadAgentRegistry();
-    expect(registry.size).toBe(4);
+    expect(registry.size).toBe(5);
     expect(registry.has('otto')).toBe(true);
     expect(registry.has('coda')).toBe(true);
     expect(registry.has('rex')).toBe(true);
     expect(registry.has('sage')).toBe(true);
+    expect(registry.has('ada')).toBe(true);
   });
 
   it('getAgent returns correct agent', () => {
@@ -42,7 +43,7 @@ describe('Agent Registry', () => {
 
   it('otto has sub_agents configured', () => {
     const otto = getAgent('otto');
-    expect(otto!.config.sub_agents).toEqual(['coda', 'rex', 'sage']);
+    expect(otto!.config.sub_agents).toEqual(['coda', 'rex', 'sage', 'ada']);
   });
 
   it('each agent has a valid tool profile', () => {

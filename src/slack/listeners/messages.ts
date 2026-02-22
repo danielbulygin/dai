@@ -2,7 +2,7 @@ import type { App } from '@slack/bolt';
 import { logger } from '../../utils/logger.js';
 import { runAgent } from '../../agents/runner.js';
 import { agentQueue } from '../../orchestrator/queue.js';
-import { chunkMessage, markdownToMrkdwn } from '../formatters/index.js';
+import { createStreamResponder } from '../stream-responder.js';
 
 export function registerMessageListener(app: App): void {
   app.message(async ({ message, client }) => {
@@ -14,21 +14,26 @@ export function registerMessageListener(app: App): void {
 
     const text = 'text' in message ? message.text : undefined;
     const userId = 'user' in message ? message.user : undefined;
+    const messageTs = 'ts' in message ? (message.ts as string) : undefined;
 
-    if (!text || !userId) return;
+    if (!text || !userId || !messageTs) return;
 
     logger.info(
       { channel: message.channel, user: userId, text },
       'Received DM',
     );
 
-    // Post a thinking indicator
-    const thinkingMsg = await client.chat.postMessage({
+    // DMs always go to Otto
+    const agentName = 'Otto';
+
+    // Set up the streaming responder
+    const responder = createStreamResponder({
+      client,
       channel: message.channel,
-      text: ':hourglass_flowing_sand: Thinking...',
+      userMessageTs: messageTs,
+      agentName,
     });
 
-    // DMs always go to Otto (default orchestrator)
     try {
       const result = await agentQueue.enqueue(message.channel, () =>
         runAgent({
@@ -36,33 +41,14 @@ export function registerMessageListener(app: App): void {
           userMessage: text,
           userId,
           channelId: message.channel,
+          onText: responder.onText,
         }),
       );
 
-      const mrkdwn = markdownToMrkdwn(result.response);
-      const chunks = chunkMessage(mrkdwn);
-
-      if (chunks[0]) {
-        await client.chat.update({
-          channel: message.channel,
-          ts: thinkingMsg.ts as string,
-          text: chunks[0],
-        });
-      }
-
-      for (let i = 1; i < chunks.length; i++) {
-        await client.chat.postMessage({
-          channel: message.channel,
-          text: chunks[i]!,
-        });
-      }
+      await responder.finalize(result.response, result.usage);
     } catch (err) {
       logger.error({ err, channel: message.channel, user: userId }, 'Agent run failed');
-      await client.chat.update({
-        channel: message.channel,
-        ts: thinkingMsg.ts as string,
-        text: ':x: Sorry, something went wrong. Please try again.',
-      });
+      await responder.onError(err);
     }
   });
 }

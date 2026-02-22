@@ -23,3 +23,9 @@ agents:
     icon: ":owl:"
     description: "Quality reviewer - code review, best practices, feedback"
     tags: [reviewer, quality]
+  - id: ada
+    path: ada
+    display_name: Ada
+    icon: ":chart_with_upwards_trend:"
+    description: "Advertising & growth specialist - Meta ads strategy, creative briefs, performance analysis"
+    tags: [advertising, marketing, meta, performance]

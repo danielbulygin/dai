@@ -54,6 +54,15 @@ CREATE TABLE IF NOT EXISTS learnings (
   updated_at TEXT DEFAULT (datetime('now'))
 );
 
+-- Chat messages for conversation history
+CREATE TABLE IF NOT EXISTS messages (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id),
+  role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+  content TEXT NOT NULL,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
 -- User feedback: reactions, commands, implicit signals
 CREATE TABLE IF NOT EXISTS feedback (
   id TEXT PRIMARY KEY,
@@ -74,6 +83,7 @@ CREATE INDEX IF NOT EXISTS idx_sessions_channel_thread ON sessions(channel_id, t
 CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent_id);
 CREATE INDEX IF NOT EXISTS idx_observations_session ON observations(session_id);
 CREATE INDEX IF NOT EXISTS idx_learnings_agent ON learnings(agent_id);
+CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_feedback_session ON feedback(session_id);
 CREATE INDEX IF NOT EXISTS idx_feedback_processed ON feedback(processed);
 `;
