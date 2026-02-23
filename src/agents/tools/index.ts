@@ -23,4 +23,4 @@ export {
   addTaskComment,
   searchNotion,
 } from "./notion-tools.js";
-export { getChannelInsights, getRecentMentions } from "./monitoring-tools.js";
+export { getChannelInsights, getRecentMentions, getMonitoringHistory, generateBriefing } from "./monitoring-tools.js";

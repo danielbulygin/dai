@@ -1,6 +1,7 @@
 import { logger } from "../../utils/logger.js";
 import { analyzeBufferedMessages } from "../../monitoring/analyzer.js";
 import { getRecentMessages } from "../../monitoring/buffer.js";
+import { getDaiSupabase } from "../../integrations/dai-supabase.js";
 import { env } from "../../env.js";
 
 export async function getChannelInsights(): Promise<{
@@ -88,5 +89,75 @@ export async function getRecentMentions(params?: {
   } catch (error) {
     logger.error({ error }, "Failed to get recent mentions");
     return { mentions: [], count: 0 };
+  }
+}
+
+export async function getMonitoringHistory(params?: {
+  hours?: number;
+  highPriorityOnly?: boolean;
+  limit?: number;
+}): Promise<string> {
+  try {
+    const hours = params?.hours ?? 24;
+    const highPriorityOnly = params?.highPriorityOnly ?? false;
+    const limit = params?.limit ?? 10;
+
+    const since = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+
+    logger.debug(
+      { hours, highPriorityOnly, limit },
+      "Querying monitoring history from Supabase",
+    );
+
+    const supabase = getDaiSupabase();
+
+    let query = supabase
+      .from("monitoring_insights")
+      .select(
+        "id, analyzed_at, message_count, blockers, urgent, notable, suggested_actions, has_high_priority",
+      )
+      .gte("analyzed_at", since)
+      .order("analyzed_at", { ascending: false })
+      .limit(limit);
+
+    if (highPriorityOnly) {
+      query = query.eq("has_high_priority", true);
+    }
+
+    const { data, error } = await query;
+
+    if (error) {
+      logger.error({ error }, "Failed to query monitoring history");
+      return JSON.stringify({ error: error.message });
+    }
+
+    logger.debug({ count: data?.length }, "Got monitoring history");
+    return JSON.stringify(data);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ error: msg }, "getMonitoringHistory failed");
+    return JSON.stringify({ error: msg });
+  }
+}
+
+export async function generateBriefing(params?: {
+  type?: "morning" | "eod";
+}): Promise<string> {
+  try {
+    const type = params?.type ?? "morning";
+    logger.info({ type }, "Generating on-demand briefing");
+
+    const { generateMorningBriefing, generateEodBriefing } = await import(
+      "../../scheduler/briefings.js"
+    );
+
+    if (type === "eod") {
+      return await generateEodBriefing();
+    }
+    return await generateMorningBriefing();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ error: msg }, "Failed to generate on-demand briefing");
+    return `Failed to generate briefing: ${msg}`;
   }
 }

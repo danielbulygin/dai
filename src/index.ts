@@ -5,6 +5,8 @@ import { registerAllListeners } from './slack/listeners/index.js';
 import { loadAgentRegistry } from './agents/registry.js';
 import { getDb, closeDb } from './memory/db.js';
 import { startMonitoringLoop, stopMonitoringLoop } from './monitoring/analyzer.js';
+import { setupScheduledJobs } from './scheduler/setup.js';
+import { startScheduler, stopScheduler } from './scheduler/index.js';
 
 async function start(): Promise<void> {
   // Initialize database (runs migrations)
@@ -24,6 +26,10 @@ async function start(): Promise<void> {
   // Start the channel monitoring loop (analyzes buffered messages every 15 minutes)
   startMonitoringLoop(15);
 
+  // Set up and start scheduled jobs (briefings, etc.)
+  setupScheduledJobs();
+  startScheduler();
+
   logger.info(
     { env: env.NODE_ENV, logLevel: env.LOG_LEVEL },
     'DAI is running in Socket Mode',
@@ -32,6 +38,7 @@ async function start(): Promise<void> {
 
 function shutdown(signal: string): void {
   logger.info({ signal }, 'Shutting down gracefully');
+  stopScheduler();
   stopMonitoringLoop();
   closeDb();
   slackApp

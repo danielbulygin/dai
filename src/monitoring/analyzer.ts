@@ -6,6 +6,7 @@ import {
   type MonitoredMessage,
 } from "./buffer.js";
 import { postMessage } from "../agents/tools/slack-tools.js";
+import { getDaiSupabase } from "../integrations/dai-supabase.js";
 import { env } from "../env.js";
 import { logger } from "../utils/logger.js";
 
@@ -176,6 +177,34 @@ function formatDmSummary(result: AnalysisResult): string {
   return parts.join("\n");
 }
 
+async function persistInsight(result: AnalysisResult): Promise<void> {
+  try {
+    const supabase = getDaiSupabase();
+
+    const { error } = await supabase.from("monitoring_insights").insert({
+      message_count: result.messageCount,
+      blockers: result.blockers,
+      urgent: result.urgent,
+      notable: result.notable,
+      suggested_actions: result.suggestedActions,
+      has_high_priority:
+        result.blockers.length > 0 || result.urgent.length > 0,
+    });
+
+    if (error) {
+      logger.error({ error }, "Failed to persist monitoring insight to Supabase");
+      return;
+    }
+
+    logger.info(
+      { messageCount: result.messageCount },
+      "Persisted monitoring insight to Supabase",
+    );
+  } catch (err) {
+    logger.error({ err }, "Failed to persist monitoring insight to Supabase");
+  }
+}
+
 export async function analyzeBufferedMessages(): Promise<AnalysisResult | null> {
   const messages = getUnanalyzedMessages(100);
 
@@ -210,6 +239,9 @@ export async function analyzeBufferedMessages(): Promise<AnalysisResult | null> 
     // Mark all messages as analyzed
     const ids = messages.map((m) => m.id);
     markAnalyzed(ids);
+
+    // Persist analysis results to Supabase (best-effort)
+    await persistInsight(result);
 
     logger.info(
       {

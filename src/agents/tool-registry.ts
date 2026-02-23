@@ -802,6 +802,61 @@ register({
   },
 });
 
+register({
+  definition: {
+    name: 'get_monitoring_history',
+    description:
+      'Get historical channel monitoring insights from the last N hours. Shows blockers, urgent items, and suggested actions from past analyses.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        hours: {
+          type: 'number',
+          description: 'Number of hours to look back (default 24)',
+        },
+        highPriorityOnly: {
+          type: 'boolean',
+          description: 'Only return insights with blockers or urgent items (default false)',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum number of results (default 10)',
+        },
+      },
+    },
+  },
+  async execute(input) {
+    return await monitoringTools.getMonitoringHistory({
+      hours: input.hours as number | undefined,
+      highPriorityOnly: input.highPriorityOnly as boolean | undefined,
+      limit: input.limit as number | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'generate_briefing',
+    description:
+      'Generate a briefing on demand. Gathers data from channel monitoring, Notion tasks, recent meetings, and mentions, then produces a formatted summary. Returns the briefing text (also DMs it to Daniel).',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        type: {
+          type: 'string',
+          enum: ['morning', 'eod'],
+          description: 'Type of briefing: "morning" for start-of-day overview, "eod" for end-of-day summary (default: morning)',
+        },
+      },
+    },
+  },
+  async execute(input) {
+    return await monitoringTools.generateBriefing({
+      type: input.type as 'morning' | 'eod' | undefined,
+    });
+  },
+});
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
