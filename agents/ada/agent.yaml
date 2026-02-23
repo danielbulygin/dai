@@ -1,6 +1,6 @@
 id: ada
 display_name: Ada
-model: claude-sonnet-4-20250514
+model: claude-opus-4-6
 icon: ":chart_with_upwards_trend:"
 profile: standard
 max_turns: 20

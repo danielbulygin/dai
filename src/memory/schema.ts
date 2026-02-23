@@ -76,6 +76,22 @@ CREATE TABLE IF NOT EXISTS feedback (
   processed INTEGER DEFAULT 0,
   created_at TEXT DEFAULT (datetime('now'))
 );
+
+-- Channel monitoring buffer for passive message tracking
+CREATE TABLE IF NOT EXISTS channel_monitor (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  channel_id TEXT NOT NULL,
+  channel_name TEXT,
+  user_id TEXT NOT NULL,
+  user_name TEXT,
+  message_ts TEXT NOT NULL UNIQUE,
+  thread_ts TEXT,
+  text TEXT NOT NULL,
+  matched_keywords TEXT,
+  priority TEXT DEFAULT 'normal',
+  analyzed INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now'))
+);
 `;
 
 const INDEXES_SQL = `
@@ -86,6 +102,8 @@ CREATE INDEX IF NOT EXISTS idx_learnings_agent ON learnings(agent_id);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_feedback_session ON feedback(session_id);
 CREATE INDEX IF NOT EXISTS idx_feedback_processed ON feedback(processed);
+CREATE INDEX IF NOT EXISTS idx_channel_monitor_analyzed ON channel_monitor(analyzed);
+CREATE INDEX IF NOT EXISTS idx_channel_monitor_created ON channel_monitor(created_at);
 `;
 
 const FTS_SQL = `

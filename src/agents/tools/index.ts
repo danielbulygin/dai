@@ -10,3 +10,17 @@ export {
   getBriefs,
   getConcepts,
 } from "./supabase-tools.js";
+export {
+  searchMeetings,
+  getMeetingSummary,
+  getMeetingTranscript,
+  listRecentMeetings,
+} from "./fireflies-tools.js";
+export {
+  queryTasks,
+  createTask,
+  updateTask,
+  addTaskComment,
+  searchNotion,
+} from "./notion-tools.js";
+export { getChannelInsights, getRecentMentions } from "./monitoring-tools.js";

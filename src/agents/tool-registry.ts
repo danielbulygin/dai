@@ -1,0 +1,854 @@
+import type Anthropic from '@anthropic-ai/sdk';
+import { toolProfiles, type ToolProfile } from './profiles/index.js';
+import * as memoryTools from './tools/memory-tools.js';
+import * as agentTools from './tools/agent-tools.js';
+import * as slackTools from './tools/slack-tools.js';
+import * as supabaseTools from './tools/supabase-tools.js';
+import * as firefliesTools from './tools/fireflies-tools.js';
+import * as notionTools from './tools/notion-tools.js';
+import * as monitoringTools from './tools/monitoring-tools.js';
+import { logger } from '../utils/logger.js';
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+export interface ToolContext {
+  agentId: string;
+  channelId: string;
+  userId: string;
+  threadTs?: string;
+}
+
+export interface RegisteredTool {
+  definition: Anthropic.Tool;
+  execute: (
+    input: Record<string, unknown>,
+    context: ToolContext,
+  ) => Promise<string>;
+}
+
+// ---------------------------------------------------------------------------
+// Registry
+// ---------------------------------------------------------------------------
+
+const REGISTRY = new Map<string, RegisteredTool>();
+
+function register(tool: RegisteredTool): void {
+  REGISTRY.set(tool.definition.name, tool);
+}
+
+// ---------------------------------------------------------------------------
+// Memory tools
+// ---------------------------------------------------------------------------
+
+register({
+  definition: {
+    name: 'recall',
+    description:
+      'Search memory for past observations and learnings relevant to a query. Returns ranked results from conversation history and accumulated knowledge.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        query: {
+          type: 'string',
+          description: 'What to search for in memory',
+        },
+      },
+      required: ['query'],
+    },
+  },
+  async execute(input, context) {
+    const result = await memoryTools.recall({
+      query: input.query as string,
+      agent_id: context.agentId,
+    });
+    return JSON.stringify(result);
+  },
+});
+
+register({
+  definition: {
+    name: 'remember',
+    description:
+      'Save an important observation, preference, or learning to long-term memory. Use for information worth recalling in future conversations.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        content: {
+          type: 'string',
+          description: 'The information to remember',
+        },
+        category: {
+          type: 'string',
+          description:
+            'Category for the memory (e.g. "user_preference", "decision", "observation", "workflow")',
+        },
+      },
+      required: ['content', 'category'],
+    },
+  },
+  async execute(input, context) {
+    const result = await memoryTools.remember({
+      content: input.content as string,
+      category: input.category as string,
+      agent_id: context.agentId,
+    });
+    return JSON.stringify(result);
+  },
+});
+
+register({
+  definition: {
+    name: 'search_memories',
+    description:
+      'Search accumulated learnings by topic. Returns memories with confidence scores.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        topic: {
+          type: 'string',
+          description: 'Topic to search for',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum number of results (default 10)',
+        },
+      },
+      required: ['topic'],
+    },
+  },
+  async execute(input) {
+    const result = await memoryTools.searchMemories({
+      topic: input.topic as string,
+      limit: input.limit as number | undefined,
+    });
+    return JSON.stringify(result);
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Agent delegation tools
+// ---------------------------------------------------------------------------
+
+register({
+  definition: {
+    name: 'ask_agent',
+    description:
+      'Ask another AI agent a question and get their response. Use this to delegate tasks to specialists: otto (orchestrator), coda (developer), rex (researcher), sage (reviewer), ada (advertising).',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        agent_id: {
+          type: 'string',
+          description:
+            'ID of the agent to ask (otto, coda, rex, sage, ada)',
+        },
+        question: {
+          type: 'string',
+          description: 'The question or task for the agent',
+        },
+        context: {
+          type: 'string',
+          description: 'Additional context to help the agent (optional)',
+        },
+      },
+      required: ['agent_id', 'question'],
+    },
+  },
+  async execute(input) {
+    const result = await agentTools.askAgent({
+      agent_id: input.agent_id as string,
+      question: input.question as string,
+      context: input.context as string | undefined,
+    });
+    return JSON.stringify(result);
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Slack tools
+// ---------------------------------------------------------------------------
+
+register({
+  definition: {
+    name: 'post_message',
+    description:
+      'Post a message to a Slack channel. Use for proactive communication like notifications, reminders, or follow-ups.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        channel: {
+          type: 'string',
+          description: 'Slack channel ID to post to',
+        },
+        text: {
+          type: 'string',
+          description: 'Message text (supports Slack mrkdwn formatting)',
+        },
+        thread_ts: {
+          type: 'string',
+          description: 'Thread timestamp to reply in (optional)',
+        },
+      },
+      required: ['channel', 'text'],
+    },
+  },
+  async execute(input) {
+    const result = await slackTools.postMessage({
+      channel: input.channel as string,
+      text: input.text as string,
+      thread_ts: input.thread_ts as string | undefined,
+    });
+    return JSON.stringify(result);
+  },
+});
+
+register({
+  definition: {
+    name: 'reply_in_thread',
+    description: 'Reply to a specific Slack thread.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        channel: {
+          type: 'string',
+          description: 'Slack channel ID',
+        },
+        thread_ts: {
+          type: 'string',
+          description: 'Thread timestamp to reply to',
+        },
+        text: {
+          type: 'string',
+          description: 'Reply text (supports Slack mrkdwn formatting)',
+        },
+      },
+      required: ['channel', 'thread_ts', 'text'],
+    },
+  },
+  async execute(input) {
+    const result = await slackTools.replyInThread({
+      channel: input.channel as string,
+      thread_ts: input.thread_ts as string,
+      text: input.text as string,
+    });
+    return JSON.stringify(result);
+  },
+});
+
+register({
+  definition: {
+    name: 'add_reaction',
+    description: 'Add an emoji reaction to a Slack message.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        channel: {
+          type: 'string',
+          description: 'Slack channel ID',
+        },
+        timestamp: {
+          type: 'string',
+          description: 'Message timestamp to react to',
+        },
+        name: {
+          type: 'string',
+          description: 'Emoji name without colons (e.g. "thumbsup")',
+        },
+      },
+      required: ['channel', 'timestamp', 'name'],
+    },
+  },
+  async execute(input) {
+    const result = await slackTools.addReaction({
+      channel: input.channel as string,
+      timestamp: input.timestamp as string,
+      name: input.name as string,
+    });
+    return JSON.stringify(result);
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Supabase tools (BMAD data)
+// ---------------------------------------------------------------------------
+
+register({
+  definition: {
+    name: 'list_clients',
+    description:
+      'List all active advertising clients with their codes, currencies, and conversion goals.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {},
+    },
+  },
+  async execute() {
+    return await supabaseTools.listClients();
+  },
+});
+
+register({
+  definition: {
+    name: 'get_client_performance',
+    description:
+      'Get account-level daily ad performance metrics (spend, impressions, clicks, purchases, revenue, ROAS, CPA) for a client.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        clientCode: {
+          type: 'string',
+          description: 'Client code (e.g. "ninepine", "press_london")',
+        },
+        days: {
+          type: 'number',
+          description: 'Number of days to look back (default 7)',
+        },
+      },
+      required: ['clientCode'],
+    },
+  },
+  async execute(input) {
+    return await supabaseTools.getClientPerformance({
+      clientCode: input.clientCode as string,
+      days: input.days as number | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'get_campaign_performance',
+    description:
+      'Get campaign-level daily ad performance breakdown for a client.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        clientCode: {
+          type: 'string',
+          description: 'Client code',
+        },
+        days: {
+          type: 'number',
+          description: 'Number of days to look back (default 7)',
+        },
+      },
+      required: ['clientCode'],
+    },
+  },
+  async execute(input) {
+    return await supabaseTools.getCampaignPerformance({
+      clientCode: input.clientCode as string,
+      days: input.days as number | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'get_alerts',
+    description:
+      'Get anomaly alerts and automated investigations for ad accounts. Includes root causes and recommended actions.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        clientCode: {
+          type: 'string',
+          description: 'Client code (optional — omit for all clients)',
+        },
+        severity: {
+          type: 'string',
+          description: 'Filter by severity: critical, warning, or insight',
+        },
+        days: {
+          type: 'number',
+          description: 'Number of days to look back (default 7)',
+        },
+      },
+    },
+  },
+  async execute(input) {
+    return await supabaseTools.getAlerts({
+      clientCode: input.clientCode as string | undefined,
+      severity: input.severity as string | undefined,
+      days: input.days as number | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'get_learnings',
+    description:
+      'Get accumulated ad performance learnings by client and category (market, campaign, ad, creative, seasonality).',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        clientCode: {
+          type: 'string',
+          description: 'Client code (optional)',
+        },
+        category: {
+          type: 'string',
+          description:
+            'Category filter: market, campaign, ad, creative, seasonality',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum results (default 20)',
+        },
+      },
+    },
+  },
+  async execute(input) {
+    return await supabaseTools.getLearnings({
+      clientCode: input.clientCode as string | undefined,
+      category: input.category as string | undefined,
+      limit: input.limit as number | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'get_briefs',
+    description: 'Get creative briefs for a client, optionally filtered by status.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        clientCode: {
+          type: 'string',
+          description: 'Client code',
+        },
+        status: {
+          type: 'string',
+          description:
+            'Filter by status: draft, review, approved, in_production, completed',
+        },
+      },
+      required: ['clientCode'],
+    },
+  },
+  async execute(input) {
+    return await supabaseTools.getBriefs({
+      clientCode: input.clientCode as string,
+      status: input.status as string | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'get_concepts',
+    description:
+      'Get creative concepts with dial settings for a client, optionally filtered by status.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        clientCode: {
+          type: 'string',
+          description: 'Client code',
+        },
+        status: {
+          type: 'string',
+          description: 'Filter by status (optional)',
+        },
+      },
+      required: ['clientCode'],
+    },
+  },
+  async execute(input) {
+    return await supabaseTools.getConcepts({
+      clientCode: input.clientCode as string,
+      status: input.status as string | undefined,
+    });
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Fireflies meeting tools (DAI Supabase)
+// ---------------------------------------------------------------------------
+
+register({
+  definition: {
+    name: 'search_meetings',
+    description:
+      'Search meeting transcripts by keyword. Returns ranked results across titles, summaries, and full transcripts. Supports date range and speaker filters.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Search query (keywords to find in meeting content)',
+        },
+        fromDate: {
+          type: 'string',
+          description: 'Start date filter (ISO 8601, e.g. "2025-01-01")',
+        },
+        toDate: {
+          type: 'string',
+          description: 'End date filter (ISO 8601)',
+        },
+        speaker: {
+          type: 'string',
+          description: 'Filter by speaker name',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum results (default 20)',
+        },
+      },
+      required: ['query'],
+    },
+  },
+  async execute(input) {
+    return await firefliesTools.searchMeetings({
+      query: input.query as string,
+      fromDate: input.fromDate as string | undefined,
+      toDate: input.toDate as string | undefined,
+      speaker: input.speaker as string | undefined,
+      limit: input.limit as number | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'get_meeting_summary',
+    description:
+      'Get the full summary, action items, and metadata for a specific meeting by its Fireflies ID.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        meetingId: {
+          type: 'string',
+          description: 'Fireflies meeting ID',
+        },
+      },
+      required: ['meetingId'],
+    },
+  },
+  async execute(input) {
+    return await firefliesTools.getMeetingSummary({
+      meetingId: input.meetingId as string,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'get_meeting_transcript',
+    description:
+      'Get the sentence-level transcript of a meeting. Optionally filter by speaker name.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        meetingId: {
+          type: 'string',
+          description: 'Fireflies meeting ID',
+        },
+        speaker: {
+          type: 'string',
+          description: 'Filter sentences by speaker name (partial match)',
+        },
+      },
+      required: ['meetingId'],
+    },
+  },
+  async execute(input) {
+    return await firefliesTools.getMeetingTranscript({
+      meetingId: input.meetingId as string,
+      speaker: input.speaker as string | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'list_recent_meetings',
+    description:
+      'List recent meetings in chronological order. Useful for "what meetings did I have this week?" queries.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        days: {
+          type: 'number',
+          description: 'Number of days to look back (default 7)',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum results (default 20)',
+        },
+        speaker: {
+          type: 'string',
+          description: 'Filter by speaker name',
+        },
+      },
+    },
+  },
+  async execute(input) {
+    return await firefliesTools.listRecentMeetings({
+      days: input.days as number | undefined,
+      limit: input.limit as number | undefined,
+      speaker: input.speaker as string | undefined,
+    });
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Notion tools
+// ---------------------------------------------------------------------------
+
+register({
+  definition: {
+    name: 'query_tasks',
+    description:
+      'Query tasks from the Notion kanban board. Filter by status, assignee, and/or priority.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        status: {
+          type: 'string',
+          description: 'Filter by task status: Backlog, To Do, In Progress, Review, Done',
+        },
+        assignee: {
+          type: 'string',
+          description: 'Filter by assignee name (e.g. Daniel, Jasmin, Otto, Franzi, Mikel)',
+        },
+        priority: {
+          type: 'string',
+          description: 'Filter by priority: Critical, High, Medium, Low',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum number of tasks to return (default 20)',
+        },
+      },
+    },
+  },
+  async execute(input) {
+    return await notionTools.queryTasks({
+      status: input.status as string | undefined,
+      assignee: input.assignee as string | undefined,
+      priority: input.priority as string | undefined,
+      limit: input.limit as number | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'create_task',
+    description: 'Create a new task on the Notion kanban board.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        title: { type: 'string', description: 'The task title' },
+        status: {
+          type: 'string',
+          description: 'Task status (default: To Do)',
+        },
+        assignee: { type: 'string', description: 'Who to assign the task to' },
+        priority: {
+          type: 'string',
+          description: 'Task priority: Critical, High, Medium, Low (default: Medium)',
+        },
+        dueDate: {
+          type: 'string',
+          description: 'Due date in ISO format (e.g. 2025-01-15)',
+        },
+        description: {
+          type: 'string',
+          description: 'Task description (added as page content)',
+        },
+        labels: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Labels: Bug, Feature, Research, Creative, Admin, Personal',
+        },
+      },
+      required: ['title'],
+    },
+  },
+  async execute(input) {
+    return await notionTools.createTask({
+      title: input.title as string,
+      status: input.status as string | undefined,
+      assignee: input.assignee as string | undefined,
+      priority: input.priority as string | undefined,
+      dueDate: input.dueDate as string | undefined,
+      description: input.description as string | undefined,
+      labels: input.labels as string[] | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'update_task',
+    description: 'Update an existing task on the Notion kanban board.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        pageId: { type: 'string', description: 'The Notion page ID of the task to update' },
+        status: { type: 'string', description: 'New status' },
+        assignee: { type: 'string', description: 'New assignee' },
+        priority: { type: 'string', description: 'New priority' },
+        dueDate: { type: 'string', description: 'New due date (ISO format)' },
+        labels: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'New labels (replaces existing)',
+        },
+      },
+      required: ['pageId'],
+    },
+  },
+  async execute(input) {
+    return await notionTools.updateTask({
+      pageId: input.pageId as string,
+      status: input.status as string | undefined,
+      assignee: input.assignee as string | undefined,
+      priority: input.priority as string | undefined,
+      dueDate: input.dueDate as string | undefined,
+      labels: input.labels as string[] | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'add_task_comment',
+    description: 'Add a comment to a Notion task page.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        pageId: { type: 'string', description: 'The Notion page ID to comment on' },
+        comment: { type: 'string', description: 'The comment text to add' },
+      },
+      required: ['pageId', 'comment'],
+    },
+  },
+  async execute(input) {
+    return await notionTools.addTaskComment({
+      pageId: input.pageId as string,
+      comment: input.comment as string,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'search_notion',
+    description: 'Search across the entire Notion workspace for pages matching a query.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        query: { type: 'string', description: 'The search query' },
+        limit: { type: 'number', description: 'Maximum results (default 10)' },
+      },
+      required: ['query'],
+    },
+  },
+  async execute(input) {
+    return await notionTools.searchNotion({
+      query: input.query as string,
+      limit: input.limit as number | undefined,
+    });
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Channel monitoring tools
+// ---------------------------------------------------------------------------
+
+register({
+  definition: {
+    name: 'get_channel_insights',
+    description:
+      'Analyze buffered Slack channel messages on demand. Returns structured triage: blockers on Daniel, urgent items, notable updates, and suggested actions.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {},
+    },
+  },
+  async execute() {
+    const result = await monitoringTools.getChannelInsights();
+    return JSON.stringify(result);
+  },
+});
+
+register({
+  definition: {
+    name: 'get_recent_mentions',
+    description:
+      'Get recent Slack messages that mention Daniel or are flagged as high priority. Useful for catching up on what needs attention.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        hours: {
+          type: 'number',
+          description: 'Number of hours to look back (default 24)',
+        },
+      },
+    },
+  },
+  async execute(input) {
+    const result = await monitoringTools.getRecentMentions({
+      hours: input.hours as number | undefined,
+    });
+    return JSON.stringify(result);
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/**
+ * Get Claude API tool definitions for an agent profile.
+ * Returns only tools whose names are listed in the profile.
+ */
+export function getToolsForProfile(
+  profile: ToolProfile,
+): { definitions: Anthropic.Tool[]; executors: Map<string, RegisteredTool['execute']> } {
+  const allowedNames = toolProfiles[profile] as readonly string[];
+  const definitions: Anthropic.Tool[] = [];
+  const executors = new Map<string, RegisteredTool['execute']>();
+
+  for (const name of allowedNames) {
+    const tool = REGISTRY.get(name);
+    if (tool) {
+      definitions.push(tool.definition);
+      executors.set(name, tool.execute);
+    }
+  }
+
+  return { definitions, executors };
+}
+
+/**
+ * Execute a tool by name.
+ */
+export async function executeTool(
+  name: string,
+  input: Record<string, unknown>,
+  context: ToolContext,
+): Promise<{ result: string; isError: boolean }> {
+  const tool = REGISTRY.get(name);
+  if (!tool) {
+    logger.warn({ toolName: name }, 'Unknown tool requested');
+    return { result: `Unknown tool: ${name}`, isError: true };
+  }
+
+  try {
+    const result = await tool.execute(input, context);
+    logger.debug({ toolName: name }, 'Tool executed successfully');
+    return { result, isError: false };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ toolName: name, error: msg }, 'Tool execution failed');
+    return { result: `Tool error: ${msg}`, isError: true };
+  }
+}

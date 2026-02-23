@@ -1,0 +1,8 @@
+id: jasmin
+display_name: Jasmin
+model: claude-opus-4-6
+icon: ":woman-tipping-hand:"
+profile: assistant
+max_turns: 30
+channels: []
+sub_agents: [otto]

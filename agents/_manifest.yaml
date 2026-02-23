@@ -29,3 +29,9 @@ agents:
     icon: ":chart_with_upwards_trend:"
     description: "Advertising & growth specialist - Meta ads strategy, creative briefs, performance analysis"
     tags: [advertising, marketing, meta, performance]
+  - id: jasmin
+    path: jasmin
+    display_name: Jasmin
+    icon: ":woman-tipping-hand:"
+    description: "Daniel's personal assistant - calendar, email, tasks, briefings"
+    tags: [assistant, personal, calendar, email, tasks]

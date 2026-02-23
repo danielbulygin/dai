@@ -11,7 +11,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc --noEmit",
-    "migrate": "tsx scripts/migrate.ts"
+    "migrate": "tsx scripts/migrate.ts",
+    "backfill:fireflies": "tsx --env-file=.env scripts/backfill-fireflies.ts"
   },
   "keywords": [
     "slack",
@@ -25,6 +26,7 @@
   "dependencies": {
     "@anthropic-ai/claude-code": "^2.1.50",
     "@anthropic-ai/sdk": "^0.78.0",
+    "@notionhq/client": "^5.9.0",
     "@slack/bolt": "^4.6.0",
     "@slack/web-api": "^7.14.1",
     "@supabase/supabase-js": "^2.97.0",

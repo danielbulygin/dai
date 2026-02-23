@@ -15,6 +15,11 @@ const envSchema = z.object({
   DB_PATH: z.string().default('data/dai.db'),
   SUPABASE_URL: z.string().optional(),
   SUPABASE_SERVICE_KEY: z.string().optional(),
+  DAI_SUPABASE_URL: z.string().optional(),
+  DAI_SUPABASE_SERVICE_KEY: z.string().optional(),
+  FIREFLIES_API_KEY: z.string().optional(),
+  NOTION_TOKEN: z.string().optional(),
+  NOTION_KANBAN_DB_ID: z.string().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;

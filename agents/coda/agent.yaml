@@ -1,6 +1,6 @@
 id: coda
 display_name: Coda
-model: claude-sonnet-4-20250514
+model: claude-opus-4-6
 icon: ":technologist:"
 profile: coding
 max_turns: 25

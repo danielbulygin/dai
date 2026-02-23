@@ -1,8 +1,8 @@
 id: otto
 display_name: Otto
-model: claude-sonnet-4-20250514
+model: claude-opus-4-6
 icon: ":robot_face:"
 profile: standard
 max_turns: 10
 channels: []  # all channels
-sub_agents: [coda, rex, sage, ada]
+sub_agents: [coda, rex, sage, ada, jasmin]
