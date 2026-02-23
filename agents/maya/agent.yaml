@@ -1,0 +1,9 @@
+id: maya
+display_name: Maya
+model: claude-opus-4-6
+icon: ":art:"
+profile: standard
+max_turns: 20
+status: backlog
+channels: []
+sub_agents: []

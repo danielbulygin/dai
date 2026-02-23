@@ -27,11 +27,18 @@ agents:
     path: ada
     display_name: Ada
     icon: ":chart_with_upwards_trend:"
-    description: "Advertising & growth specialist - Meta ads strategy, creative briefs, performance analysis"
-    tags: [advertising, marketing, meta, performance]
+    description: "Senior media buyer - ad account analysis, optimization decisions, per-account learnings"
+    tags: [media-buyer, advertising, meta, performance, analysis]
   - id: jasmin
     path: jasmin
     display_name: Jasmin
     icon: ":woman-tipping-hand:"
     description: "Daniel's personal assistant - calendar, email, tasks, briefings"
     tags: [assistant, personal, calendar, email, tasks]
+  - id: maya
+    path: maya
+    display_name: Maya
+    icon: ":art:"
+    description: "Creative strategist - ad creative briefs, concept development, creative QA (backlog)"
+    tags: [creative, advertising, briefs, strategy]
+    status: backlog

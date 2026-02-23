@@ -3,6 +3,6 @@ display_name: Ada
 model: claude-opus-4-6
 icon: ":chart_with_upwards_trend:"
 profile: standard
-max_turns: 20
+max_turns: 25
 channels: []
 sub_agents: []
