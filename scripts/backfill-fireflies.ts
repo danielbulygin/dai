@@ -1,8 +1,16 @@
 /**
  * Backfill Fireflies meeting transcripts into DAI Supabase.
  *
+ * Designed for Fireflies' strict rate limits:
+ *   - Free/Pro: 50 requests/day
+ *   - Business: 60 requests/min
+ *
+ * Strategy: newest-first, resumable, budget-aware.
+ * Each meeting costs 2 API calls (1 list + 1 detail fetch).
+ * Run daily until all meetings are synced.
+ *
  * Usage:
- *   pnpm backfill:fireflies [--from 2024-12-01] [--dry-run]
+ *   pnpm backfill:fireflies [--from 2024-12-01] [--budget 40] [--dry-run]
  */
 
 import { createClient } from "@supabase/supabase-js";
@@ -31,21 +39,31 @@ const supabase = createClient(DAI_SUPABASE_URL, DAI_SUPABASE_SERVICE_KEY);
 const args = process.argv.slice(2);
 const dryRun = args.includes("--dry-run");
 const fromIdx = args.indexOf("--from");
-const fromDate = fromIdx !== -1 && args[fromIdx + 1] ? args[fromIdx + 1] : null;
+const fromDate = fromIdx !== -1 && args[fromIdx + 1] ? args[fromIdx + 1] : "2024-12-01";
+const budgetIdx = args.indexOf("--budget");
+const API_BUDGET = budgetIdx !== -1 && args[budgetIdx + 1] ? parseInt(args[budgetIdx + 1]) : 40;
+
+let apiCalls = 0;
 
 if (dryRun) console.log("[DRY RUN] No data will be written.\n");
-if (fromDate) console.log(`Filtering meetings from: ${fromDate}\n`);
+console.log(`Config: from=${fromDate}, budget=${API_BUDGET} API calls, dry=${dryRun}\n`);
 
 // ---------------------------------------------------------------------------
-// Fireflies GraphQL helpers
+// Fireflies GraphQL
 // ---------------------------------------------------------------------------
 
 const FIREFLIES_API = "https://api.fireflies.ai/graphql";
-const PAGE_SIZE = 50;
-const PAGE_DELAY = 1500; // ms between list pages
-const DETAIL_DELAY = 1200; // ms between detail fetches
+const REQUEST_DELAY = 1500; // ms between all API calls
 
-async function firefliesQuery(query: string, variables?: Record<string, unknown>) {
+async function firefliesQuery(query: string, variables?: Record<string, unknown>): Promise<Record<string, unknown> | null> {
+  apiCalls++;
+  if (apiCalls > API_BUDGET) {
+    console.log(`\n[BUDGET] Hit ${API_BUDGET} API call limit. Run again tomorrow to continue.`);
+    return null;
+  }
+
+  await sleep(REQUEST_DELAY);
+
   const res = await fetch(FIREFLIES_API, {
     method: "POST",
     headers: {
@@ -56,68 +74,35 @@ async function firefliesQuery(query: string, variables?: Record<string, unknown>
   });
 
   if (!res.ok) {
-    throw new Error(`Fireflies API ${res.status}: ${await res.text()}`);
+    const text = await res.text();
+    if (res.status === 429) {
+      console.error(`\n[RATE LIMITED] HTTP 429. Stop and retry later.`);
+      return null;
+    }
+    throw new Error(`Fireflies API ${res.status}: ${text}`);
   }
 
-  const json = (await res.json()) as { data?: Record<string, unknown>; errors?: Array<{ message: string }> };
+  const json = (await res.json()) as { data?: Record<string, unknown>; errors?: Array<{ message: string; code?: string }> };
   if (json.errors?.length) {
-    throw new Error(`Fireflies GraphQL error: ${json.errors[0].message}`);
+    const code = (json.errors[0] as { code?: string; extensions?: { code?: string } }).extensions?.code ?? "";
+    if (code === "auth_failed") {
+      // Fireflies returns this for rate limits AND pagination overflow
+      console.error(`\n[RATE LIMITED] API returned auth_failed (likely rate limit). Stop.`);
+      return null;
+    }
+    throw new Error(`Fireflies GraphQL: ${json.errors[0].message}`);
   }
-  return json.data;
+
+  return json.data ?? null;
 }
 
-interface FirefliesMeetingListItem {
+interface TranscriptListItem {
   id: string;
   title: string;
   date: string;
-  duration: number;
-  organizer_email: string;
-  participants: string[];
 }
 
-async function listAllMeetings(): Promise<FirefliesMeetingListItem[]> {
-  const all: FirefliesMeetingListItem[] = [];
-  let skip = 0;
-
-  while (true) {
-    console.log(`  Fetching meetings page (skip=${skip})...`);
-    const data = await firefliesQuery(
-      `query($limit: Int, $skip: Int) {
-        transcripts(limit: $limit, skip: $skip) {
-          id
-          title
-          date
-          duration
-          organizer_email
-          participants
-        }
-      }`,
-      { limit: PAGE_SIZE, skip },
-    );
-
-    const transcripts = (data?.transcripts ?? []) as FirefliesMeetingListItem[];
-    if (transcripts.length === 0) break;
-
-    all.push(...transcripts);
-    skip += PAGE_SIZE;
-
-    if (transcripts.length < PAGE_SIZE) break;
-    await sleep(PAGE_DELAY);
-  }
-
-  return all;
-}
-
-interface FirefliesSentence {
-  index: number;
-  speaker_name: string;
-  text: string;
-  raw_text: string;
-  start_time: number;
-  end_time: number;
-}
-
-interface FirefliesMeetingDetail {
+interface MeetingDetail {
   id: string;
   title: string;
   date: string;
@@ -133,42 +118,82 @@ interface FirefliesMeetingDetail {
     gist: string;
     short_summary: string;
   };
-  sentences: FirefliesSentence[];
+  sentences: Array<{
+    index: number;
+    speaker_name: string;
+    text: string;
+    raw_text: string;
+    start_time: number;
+    end_time: number;
+  }>;
 }
 
-async function getMeetingDetail(id: string): Promise<FirefliesMeetingDetail> {
+/**
+ * List meetings newest-first using date-windowed pagination.
+ * Starts from now, works backwards to fromDate.
+ * Each page = 1 API call.
+ */
+async function listMeetings(since: string): Promise<TranscriptListItem[] | null> {
+  const all: TranscriptListItem[] = [];
+  let toDate: string | null = null; // null = from now
+  const sinceTs = new Date(since).getTime();
+
+  while (apiCalls < API_BUDGET) {
+    const vars: Record<string, unknown> = { limit: 50 };
+    if (toDate) vars.toDate = toDate;
+
+    const data = await firefliesQuery(
+      `query($limit: Int, $toDate: DateTime) {
+        transcripts(limit: $limit, toDate: $toDate) {
+          id title date
+        }
+      }`,
+      vars,
+    );
+
+    if (!data) return all.length > 0 ? all : null; // budget/rate exhausted
+    const page = (data.transcripts ?? []) as TranscriptListItem[];
+    if (page.length === 0) break;
+
+    // Filter and collect
+    let hitCutoff = false;
+    for (const t of page) {
+      const ts = parseInt(t.date);
+      if (ts < sinceTs) {
+        hitCutoff = true;
+        break;
+      }
+      all.push(t);
+    }
+
+    if (hitCutoff || page.length < 50) break;
+
+    // Move window: toDate = 1ms before oldest in this page
+    const oldestDate = Math.min(...page.map((t) => parseInt(t.date)));
+    toDate = new Date(oldestDate - 1).toISOString();
+
+    process.stdout.write(`  Listed ${all.length} meetings so far...\r`);
+  }
+
+  console.log(`  Listed ${all.length} meetings total.          `);
+  return all;
+}
+
+async function fetchDetail(id: string): Promise<MeetingDetail | null> {
   const data = await firefliesQuery(
     `query($id: String!) {
       transcript(id: $id) {
-        id
-        title
-        date
-        duration
-        organizer_email
-        participants
+        id title date duration organizer_email participants
         speakers { name }
-        summary {
-          keywords
-          action_items
-          overview
-          shorthand_bullet
-          gist
-          short_summary
-        }
-        sentences {
-          index
-          speaker_name
-          text
-          raw_text
-          start_time
-          end_time
-        }
+        summary { keywords action_items overview shorthand_bullet gist short_summary }
+        sentences { index speaker_name text raw_text start_time end_time }
       }
     }`,
     { id },
   );
 
-  return data!.transcript as FirefliesMeetingDetail;
+  if (!data) return null;
+  return data.transcript as MeetingDetail;
 }
 
 // ---------------------------------------------------------------------------
@@ -176,19 +201,14 @@ async function getMeetingDetail(id: string): Promise<FirefliesMeetingDetail> {
 // ---------------------------------------------------------------------------
 
 async function getExistingIds(): Promise<Set<string>> {
-  const { data, error } = await supabase
-    .from("meetings")
-    .select("id");
-
+  const { data, error } = await supabase.from("meetings").select("id");
   if (error) throw new Error(`Failed to fetch existing meetings: ${error.message}`);
   return new Set((data ?? []).map((r: { id: string }) => r.id));
 }
 
-async function upsertMeeting(meeting: FirefliesMeetingDetail): Promise<void> {
+async function upsertMeeting(meeting: MeetingDetail): Promise<void> {
   const speakers = meeting.speakers?.map((s) => s.name) ?? [];
-  const summary = meeting.summary ?? {};
-
-  // Build full_transcript from sentences
+  const summary = meeting.summary ?? ({} as MeetingDetail["summary"]);
   const fullTranscript = (meeting.sentences ?? [])
     .map((s) => `${s.speaker_name}: ${s.text}`)
     .join("\n");
@@ -210,23 +230,15 @@ async function upsertMeeting(meeting: FirefliesMeetingDetail): Promise<void> {
     full_transcript: fullTranscript || null,
   });
 
-  if (error) throw new Error(`Failed to upsert meeting ${meeting.id}: ${error.message}`);
+  if (error) throw new Error(`Upsert meeting ${meeting.id}: ${error.message}`);
 }
 
-async function insertSentences(
-  meetingId: string,
-  sentences: FirefliesSentence[],
-): Promise<void> {
+async function insertSentences(meetingId: string, sentences: MeetingDetail["sentences"]): Promise<void> {
   if (!sentences.length) return;
 
-  // Delete existing sentences for this meeting (clean upsert)
-  await supabase
-    .from("meeting_sentences")
-    .delete()
-    .eq("meeting_id", meetingId);
+  await supabase.from("meeting_sentences").delete().eq("meeting_id", meetingId);
 
-  // Insert in chunks of 100
-  const CHUNK = 100;
+  const CHUNK = 200;
   for (let i = 0; i < sentences.length; i += CHUNK) {
     const chunk = sentences.slice(i, i + CHUNK).map((s) => ({
       meeting_id: meetingId,
@@ -239,11 +251,7 @@ async function insertSentences(
     }));
 
     const { error } = await supabase.from("meeting_sentences").insert(chunk);
-    if (error) {
-      throw new Error(
-        `Failed to insert sentences for ${meetingId} (chunk ${i}): ${error.message}`,
-      );
-    }
+    if (error) throw new Error(`Insert sentences ${meetingId}: ${error.message}`);
   }
 }
 
@@ -269,77 +277,67 @@ function sleep(ms: number): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function main() {
+  const startTime = Date.now();
   console.log("=== Fireflies -> DAI Supabase Backfill ===\n");
 
-  // 1. List all meetings from Fireflies
-  console.log("Step 1: Listing all Fireflies meetings...");
-  const allMeetings = await listAllMeetings();
-  console.log(`  Found ${allMeetings.length} total meetings.\n`);
-
-  // 2. Filter by date if specified
-  let meetings = allMeetings;
-  if (fromDate) {
-    const fromTs = new Date(fromDate).getTime();
-    meetings = meetings.filter((m) => {
-      const meetingTs = parseInt(m.date);
-      return meetingTs >= fromTs;
-    });
-    console.log(`  After date filter: ${meetings.length} meetings.\n`);
+  // 1. List meetings (newest first, stops at fromDate)
+  console.log("Step 1: Listing meetings from Fireflies (newest first)...");
+  const meetings = await listMeetings(fromDate);
+  if (!meetings || meetings.length === 0) {
+    console.log("No meetings to sync (or budget exhausted on listing).");
+    return;
   }
+  console.log(`  API calls used for listing: ${apiCalls}\n`);
 
-  // 3. Deduplicate against existing
+  // 2. Deduplicate against existing DB
   console.log("Step 2: Checking existing meetings in Supabase...");
   const existingIds = dryRun ? new Set<string>() : await getExistingIds();
   const newMeetings = meetings.filter((m) => !existingIds.has(m.id));
-  console.log(
-    `  ${existingIds.size} already in DB, ${newMeetings.length} new to sync.\n`,
-  );
+  console.log(`  ${existingIds.size} already in DB, ${newMeetings.length} new to sync.`);
+  console.log(`  Remaining API budget: ${API_BUDGET - apiCalls} calls = ~${API_BUDGET - apiCalls} meetings\n`);
 
   if (newMeetings.length === 0) {
-    console.log("Nothing to sync. All meetings already in Supabase.");
+    console.log("All listed meetings already synced.");
     return;
   }
 
   if (dryRun) {
-    console.log("[DRY RUN] Would sync these meetings:");
-    for (const m of newMeetings) {
-      const date = m.date
-        ? new Date(parseInt(m.date)).toISOString().slice(0, 10)
-        : "unknown";
+    console.log("[DRY RUN] Would sync (newest first):");
+    for (const m of newMeetings.slice(0, 20)) {
+      const date = m.date ? new Date(parseInt(m.date)).toISOString().slice(0, 10) : "?";
       console.log(`  - ${m.title} (${date})`);
     }
+    if (newMeetings.length > 20) console.log(`  ... and ${newMeetings.length - 20} more`);
     return;
   }
 
-  // 4. Fetch details and sync each meeting
-  console.log("Step 3: Syncing meetings...\n");
+  // 3. Fetch details & sync (1 API call per meeting)
+  console.log("Step 3: Fetching details and syncing...\n");
   let synced = 0;
   let errors = 0;
   let lastError: string | undefined;
 
-  for (let i = 0; i < newMeetings.length; i++) {
-    const m = newMeetings[i];
-    const date = m.date
-      ? new Date(parseInt(m.date)).toISOString().slice(0, 10)
-      : "unknown";
+  for (const m of newMeetings) {
+    if (apiCalls >= API_BUDGET) {
+      console.log(`\n[BUDGET] Reached ${API_BUDGET} API calls. Run again tomorrow.`);
+      break;
+    }
+
+    const date = m.date ? new Date(parseInt(m.date)).toISOString().slice(0, 10) : "?";
 
     try {
-      // Fetch full detail
-      const detail = await getMeetingDetail(m.id);
+      const detail = await fetchDetail(m.id);
+      if (!detail) break; // budget or rate limited
 
-      // Upsert meeting
       await upsertMeeting(detail);
-
-      // Insert sentences
       await insertSentences(m.id, detail.sentences ?? []);
 
       synced++;
       console.log(
-        `  [${synced}/${newMeetings.length}] Synced: ${m.title} (${date}) — ${(detail.sentences ?? []).length} sentences`,
+        `  [${synced}/${newMeetings.length}] ${m.title} (${date}) — ${(detail.sentences ?? []).length} sentences`,
       );
 
-      // Update sync state periodically
-      if (synced % 10 === 0) {
+      if (synced % 5 === 0) {
         await updateSyncState(existingIds.size + synced);
       }
     } catch (err) {
@@ -347,19 +345,19 @@ async function main() {
       lastError = err instanceof Error ? err.message : String(err);
       console.error(`  [ERROR] ${m.title} (${date}): ${lastError}`);
     }
-
-    // Rate limit
-    if (i < newMeetings.length - 1) {
-      await sleep(DETAIL_DELAY);
-    }
   }
 
-  // 5. Final sync state update
   await updateSyncState(existingIds.size + synced, lastError);
 
+  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+  const remaining = newMeetings.length - synced;
   console.log(
-    `\n=== Done! Synced ${synced} meetings, ${errors} errors. Total in DB: ${existingIds.size + synced} ===`,
+    `\n=== Done in ${elapsed}s! Synced: ${synced}, Errors: ${errors}, API calls: ${apiCalls}/${API_BUDGET} ===`,
   );
+  console.log(`DB total: ${existingIds.size + synced}. Remaining: ${remaining > 0 ? remaining : 0}.`);
+  if (remaining > 0) {
+    console.log(`Run again tomorrow to continue (resumable — skips already-synced meetings).`);
+  }
 }
 
 main().catch((err) => {

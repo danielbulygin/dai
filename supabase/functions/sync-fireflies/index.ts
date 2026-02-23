@@ -1,10 +1,12 @@
 // Supabase Edge Function: sync-fireflies
-// Runs on a 15-minute cron to sync new Fireflies meetings into DAI Supabase.
+// Syncs new Fireflies meetings into DAI Supabase.
+// Budget-aware: uses max ~10 API calls per invocation to stay within
+// Fireflies rate limits (50/day on Pro, 60/min on Business).
 //
 // Deploy:
 //   supabase functions deploy sync-fireflies
-// Schedule (run in SQL Editor):
-//   SELECT cron.schedule('sync-fireflies', '*/15 * * * *',
+// Schedule (run in SQL Editor — every 6 hours on Pro, every 15 min on Business):
+//   SELECT cron.schedule('sync-fireflies', '0 */6 * * *',
 //     $$SELECT net.http_post(
 //       url := '<SUPABASE_URL>/functions/v1/sync-fireflies',
 //       headers := '{"Authorization": "Bearer <ANON_KEY>"}'::jsonb
@@ -63,6 +65,8 @@ async function firefliesQuery(
 
   const json = await res.json();
   if (json.errors?.length) {
+    const code = json.errors[0]?.extensions?.code ?? "";
+    if (code === "auth_failed") return null; // rate limited
     throw new Error(`Fireflies GraphQL: ${json.errors[0].message}`);
   }
   return json.data;
