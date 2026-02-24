@@ -330,7 +330,6 @@ async function main() {
       if (!detail) break; // budget or rate limited
 
       await upsertMeeting(detail);
-      await insertSentences(m.id, detail.sentences ?? []);
 
       synced++;
       console.log(
