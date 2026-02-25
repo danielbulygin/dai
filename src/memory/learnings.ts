@@ -82,6 +82,18 @@ export function incrementApplied(id: string): void {
   stmt.run(id);
 }
 
+export function updateLearningConfidence(id: string, confidence: number): void {
+  const db = getDb();
+  db.prepare(
+    "UPDATE learnings SET confidence = ?, updated_at = datetime('now') WHERE id = ?",
+  ).run(confidence, id);
+}
+
+export function deleteLearning(id: string): void {
+  const db = getDb();
+  db.prepare("DELETE FROM learnings WHERE id = ?").run(id);
+}
+
 export function getTopLearnings(agentId: string, limit = 10): Learning[] {
   const db = getDb();
   const stmt = db.prepare(

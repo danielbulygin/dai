@@ -124,6 +124,32 @@ export function endSession(id: string, summary?: string): void {
   stmt.run(summary ?? null, id);
 }
 
+/**
+ * Find the most recent session for a channel, optionally matching a thread_ts.
+ * Used by the reaction listener to resolve which agent wrote a message.
+ */
+export function findRecentSessionForChannel(
+  channelId: string,
+  threadTs?: string | null,
+): Session | undefined {
+  const db = getDb();
+
+  // If we have a thread_ts, try exact match first
+  if (threadTs) {
+    const stmt = db.prepare(
+      "SELECT * FROM sessions WHERE channel_id = ? AND thread_ts = ? ORDER BY created_at DESC LIMIT 1",
+    );
+    const session = stmt.get(channelId, threadTs) as Session | undefined;
+    if (session) return session;
+  }
+
+  // Fall back to most recent session in this channel
+  const stmt = db.prepare(
+    "SELECT * FROM sessions WHERE channel_id = ? ORDER BY created_at DESC LIMIT 1",
+  );
+  return stmt.get(channelId) as Session | undefined;
+}
+
 export function getRecentSessions(agentId: string, limit = 10): Session[] {
   const db = getDb();
   const stmt = db.prepare(

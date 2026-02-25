@@ -7,6 +7,7 @@ import * as supabaseTools from './tools/supabase-tools.js';
 import * as firefliesTools from './tools/fireflies-tools.js';
 import * as notionTools from './tools/notion-tools.js';
 import * as monitoringTools from './tools/monitoring-tools.js';
+import * as decisionTools from './tools/decision-tools.js';
 import { logger } from '../utils/logger.js';
 
 // ---------------------------------------------------------------------------
@@ -854,6 +855,56 @@ register({
     return await monitoringTools.generateBriefing({
       type: input.type as 'morning' | 'eod' | undefined,
     });
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Decision tracking tools
+// ---------------------------------------------------------------------------
+
+register({
+  definition: {
+    name: 'log_decision',
+    description:
+      'Log a media buying decision (kill, scale, pause, iterate, launch) for outcome tracking. The system will automatically evaluate the decision after a few days by comparing metrics.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        account_code: {
+          type: 'string',
+          description: 'Client/account code (e.g. "ninepine", "press_london")',
+        },
+        decision_type: {
+          type: 'string',
+          enum: ['kill', 'scale', 'pause', 'iterate', 'launch'],
+          description: 'Type of decision made',
+        },
+        target: {
+          type: 'string',
+          description: 'What was acted on (ad set name, campaign name, etc.)',
+        },
+        rationale: {
+          type: 'string',
+          description: 'Why this decision was made — key metrics and reasoning',
+        },
+        metrics_snapshot: {
+          type: 'object',
+          description: 'Current metrics at time of decision (spend, ROAS, CPA, etc.)',
+        },
+      },
+      required: ['account_code', 'decision_type', 'target', 'rationale'],
+    },
+  },
+  async execute(input, context) {
+    const result = await decisionTools.logDecisionTool({
+      account_code: input.account_code as string,
+      decision_type: input.decision_type as string,
+      target: input.target as string,
+      rationale: input.rationale as string,
+      metrics_snapshot: input.metrics_snapshot as Record<string, unknown> | undefined,
+      agent_id: context.agentId,
+    });
+    return JSON.stringify(result);
   },
 });
 

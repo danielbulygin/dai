@@ -77,6 +77,32 @@ CREATE TABLE IF NOT EXISTS feedback (
   created_at TEXT DEFAULT (datetime('now'))
 );
 
+-- Decisions logged by agents for outcome tracking
+CREATE TABLE IF NOT EXISTS decisions (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL,
+  account_code TEXT NOT NULL,
+  decision_type TEXT NOT NULL,
+  target TEXT NOT NULL,
+  rationale TEXT NOT NULL,
+  metrics_snapshot TEXT,
+  outcome TEXT,
+  outcome_metrics TEXT,
+  evaluated_at TEXT,
+  session_id TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Transcript ingestion tracking for learning extraction
+CREATE TABLE IF NOT EXISTS transcript_ingestion_log (
+  id TEXT PRIMARY KEY,
+  meeting_id TEXT NOT NULL UNIQUE,
+  meeting_title TEXT,
+  pattern_id TEXT,
+  insights_extracted INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
 -- Channel monitoring buffer for passive message tracking
 CREATE TABLE IF NOT EXISTS channel_monitor (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -102,6 +128,9 @@ CREATE INDEX IF NOT EXISTS idx_learnings_agent ON learnings(agent_id);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_feedback_session ON feedback(session_id);
 CREATE INDEX IF NOT EXISTS idx_feedback_processed ON feedback(processed);
+CREATE INDEX IF NOT EXISTS idx_decisions_agent ON decisions(agent_id);
+CREATE INDEX IF NOT EXISTS idx_decisions_pending ON decisions(outcome) WHERE outcome IS NULL;
+CREATE INDEX IF NOT EXISTS idx_transcript_ingestion_meeting ON transcript_ingestion_log(meeting_id);
 CREATE INDEX IF NOT EXISTS idx_channel_monitor_analyzed ON channel_monitor(analyzed);
 CREATE INDEX IF NOT EXISTS idx_channel_monitor_created ON channel_monitor(created_at);
 `;

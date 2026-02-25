@@ -1,6 +1,7 @@
 import type { App } from "@slack/bolt";
 import { logger } from "../../utils/logger.js";
 import { addFeedback } from "../../memory/feedback.js";
+import { findRecentSessionForChannel } from "../../memory/sessions.js";
 
 /**
  * Map of Slack reaction names to feedback sentiment.
@@ -45,6 +46,7 @@ export function registerReactionListener(app: App): void {
 
       // Fetch the reacted-to message to confirm it's a bot message
       let isBotMsg = false;
+      let messageThreadTs: string | undefined;
       try {
         const result = await client.conversations.history({
           channel,
@@ -56,6 +58,9 @@ export function registerReactionListener(app: App): void {
         const msg = result.messages?.[0];
         if (msg && ("bot_id" in msg || msg.subtype === "bot_message")) {
           isBotMsg = true;
+        }
+        if (msg && "thread_ts" in msg) {
+          messageThreadTs = msg.thread_ts as string;
         }
       } catch (fetchErr) {
         logger.warn(
@@ -70,8 +75,13 @@ export function registerReactionListener(app: App): void {
         return;
       }
 
+      // Resolve agent_id from the session that produced this message
+      const session = findRecentSessionForChannel(channel, messageThreadTs ?? itemTs);
+      const agentId = session?.agent_id ?? "unknown";
+
       addFeedback({
-        agent_id: "unknown", // Will be resolved by session lookup in future
+        agent_id: agentId,
+        session_id: session?.id ?? undefined,
         user_id: userId,
         type: "reaction",
         sentiment,

@@ -4,6 +4,14 @@ export const toolProfiles = {
   coding: ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'Bash', 'Write', 'Edit'],
   full: ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'Bash', 'Write', 'Edit', 'NotebookEdit'],
   assistant: ['recall', 'remember', 'search_memories', 'ask_agent', 'post_message', 'reply_in_thread', 'search_meetings', 'get_meeting_summary', 'get_meeting_transcript', 'list_recent_meetings', 'query_tasks', 'create_task', 'update_task', 'add_task_comment', 'search_notion', 'get_channel_insights', 'get_recent_mentions', 'get_monitoring_history', 'generate_briefing'],
+  media_buyer: [
+    'recall', 'remember', 'search_memories',
+    'list_clients', 'get_client_performance', 'get_campaign_performance',
+    'get_alerts', 'get_learnings', 'get_briefs', 'get_concepts',
+    'search_meetings', 'get_meeting_summary', 'get_meeting_transcript', 'list_recent_meetings',
+    'post_message', 'reply_in_thread',
+    'log_decision',
+  ],
 } as const;
 
 export type ToolProfile = keyof typeof toolProfiles;

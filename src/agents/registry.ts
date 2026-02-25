@@ -37,7 +37,7 @@ const AgentConfigSchema = z.object({
   display_name: z.string(),
   model: z.string(),
   icon: z.string(),
-  profile: z.enum(['readonly', 'standard', 'coding', 'full', 'assistant']) satisfies z.ZodType<ToolProfile>,
+  profile: z.enum(['readonly', 'standard', 'coding', 'full', 'assistant', 'media_buyer']) satisfies z.ZodType<ToolProfile>,
   max_turns: z.number().int().positive(),
   channels: z.array(z.string()),
   sub_agents: z.array(z.string()),
