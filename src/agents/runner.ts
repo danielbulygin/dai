@@ -37,6 +37,8 @@ export interface RunOptions {
 export interface TokenUsage {
   input: number;
   output: number;
+  cacheRead?: number;
+  cacheCreation?: number;
 }
 
 export interface RunResult {
@@ -155,12 +157,15 @@ async function runSimple(
   });
 
   const finalMessage = await stream.finalMessage();
+  const cacheUsage = finalMessage.usage as Record<string, number>;
 
   return {
     responseText,
     usage: {
       input: finalMessage.usage.input_tokens,
       output: finalMessage.usage.output_tokens,
+      cacheRead: cacheUsage.cache_read_input_tokens ?? 0,
+      cacheCreation: cacheUsage.cache_creation_input_tokens ?? 0,
     },
   };
 }
@@ -183,6 +188,8 @@ async function runWithTools(
   let responseText = '';
   let totalInput = 0;
   let totalOutput = 0;
+  let totalCacheRead = 0;
+  let totalCacheCreation = 0;
 
   // Prepare cached system prompt and tools — static across all turns
   const cachedSystem: Anthropic.TextBlockParam[] = [
@@ -200,6 +207,9 @@ async function runWithTools(
       : tool,
   );
 
+  /** Threshold: intermediate turn text shorter than this is "reasoning" and gets skipped */
+  const REASONING_THRESHOLD = 200;
+
   for (let turn = 0; turn < maxTurns; turn++) {
     let turnText = '';
     const turnChunks: string[] = [];
@@ -212,8 +222,7 @@ async function runWithTools(
       tools: cachedTools,
     });
 
-    // Buffer text chunks — we only flush to onText if this is the final turn
-    // to avoid leaking intermediate "thinking" text to Slack
+    // Buffer text chunks — we decide after the turn whether to show them
     stream.on('text', (text) => {
       turnText += text;
       turnChunks.push(text);
@@ -222,19 +231,32 @@ async function runWithTools(
     const msg = await stream.finalMessage();
     totalInput += msg.usage.input_tokens;
     totalOutput += msg.usage.output_tokens;
+    const cacheUsage = msg.usage as Record<string, number>;
+    totalCacheRead += cacheUsage.cache_read_input_tokens ?? 0;
+    totalCacheCreation += cacheUsage.cache_creation_input_tokens ?? 0;
 
-    // If the model finished without requesting tools, this is the final turn
     if (msg.stop_reason !== 'tool_use') {
-      // Replay buffered chunks to onText for progressive Slack display
+      // Final turn — replay buffered chunks for progressive Slack display
       for (const chunk of turnChunks) {
         onText?.(chunk);
       }
-      responseText = turnText;
+      if (turnText.trim()) {
+        responseText += (responseText ? '\n\n' : '') + turnText;
+      }
       return {
         responseText,
         turns: turn + 1,
-        usage: { input: totalInput, output: totalOutput },
+        usage: { input: totalInput, output: totalOutput, cacheRead: totalCacheRead, cacheCreation: totalCacheCreation },
       };
+    }
+
+    // Intermediate tool-use turn — accumulate substantial text, skip short reasoning
+    if (turnText.trim().length >= REASONING_THRESHOLD) {
+      // Substantial text (analysis, etc.) — stream it and accumulate
+      for (const chunk of turnChunks) {
+        onText?.(chunk);
+      }
+      responseText += (responseText ? '\n\n' : '') + turnText;
     }
 
     // Append the full assistant message (text + tool_use blocks)
@@ -278,7 +300,7 @@ async function runWithTools(
   return {
     responseText,
     turns: maxTurns,
-    usage: { input: totalInput, output: totalOutput },
+    usage: { input: totalInput, output: totalOutput, cacheRead: totalCacheRead, cacheCreation: totalCacheCreation },
   };
 }
 

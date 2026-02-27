@@ -20,7 +20,7 @@ export interface StreamResponderHandle {
   /** Called once the agent finishes successfully. Posts the final response. */
   finalize: (
     fullText: string,
-    tokenInfo?: { input: number; output: number },
+    tokenInfo?: { input: number; output: number; cacheRead?: number; cacheCreation?: number },
   ) => Promise<void>;
   /** Called when the agent errors out. Updates the thinking message with the error. */
   onError: (err: unknown) => Promise<void>;
@@ -37,12 +37,23 @@ const STREAM_UPDATE_THRESHOLD = 1500;
 const MIN_UPDATE_INTERVAL_MS = 1200;
 
 // ---------------------------------------------------------------------------
-// Cost estimation (Claude Opus 4.6 pricing: $5/M input, $25/M output)
+// Cost estimation (Claude Opus 4.6 pricing)
+// Input: $5/M, Output: $25/M, Cache read: $0.50/M, Cache write: $6.25/M
 // ---------------------------------------------------------------------------
 
-function estimateCost(inputTokens: number, outputTokens: number): string {
+function estimateCost(
+  inputTokens: number,
+  outputTokens: number,
+  cacheRead = 0,
+  cacheCreation = 0,
+): string {
+  // Non-cached input = total input - cache read - cache creation
+  const freshInput = Math.max(0, inputTokens - cacheRead - cacheCreation);
   const cost =
-    (inputTokens * 5) / 1_000_000 + (outputTokens * 25) / 1_000_000;
+    (freshInput * 5) / 1_000_000 +
+    (cacheRead * 0.5) / 1_000_000 +
+    (cacheCreation * 6.25) / 1_000_000 +
+    (outputTokens * 25) / 1_000_000;
   return cost < 0.01 ? cost.toFixed(3) : cost.toFixed(2);
 }
 
@@ -177,14 +188,14 @@ export function createStreamResponder(
 
   const finalize = async (
     fullText: string,
-    tokenInfo?: { input: number; output: number },
+    tokenInfo?: { input: number; output: number; cacheRead?: number; cacheCreation?: number },
   ): Promise<void> => {
     await setupPromise;
 
     const mrkdwn = markdownToMrkdwn(fullText);
     const totalTokens = tokenInfo ? tokenInfo.input + tokenInfo.output : undefined;
     const costEstimate = tokenInfo
-      ? estimateCost(tokenInfo.input, tokenInfo.output)
+      ? estimateCost(tokenInfo.input, tokenInfo.output, tokenInfo.cacheRead, tokenInfo.cacheCreation)
       : undefined;
     const footer =
       totalTokens !== undefined
