@@ -9,6 +9,7 @@ export interface Learning {
   confidence: number;
   applied_count: number;
   source_session_id: string | null;
+  client_code: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -19,6 +20,7 @@ export interface AddLearningParams {
   content: string;
   confidence?: number;
   source_session_id?: string | null;
+  client_code?: string | null;
 }
 
 export function addLearning(params: AddLearningParams): Learning {
@@ -26,8 +28,8 @@ export function addLearning(params: AddLearningParams): Learning {
   const id = nanoid();
 
   const stmt = db.prepare(`
-    INSERT INTO learnings (id, agent_id, category, content, confidence, source_session_id)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO learnings (id, agent_id, category, content, confidence, source_session_id, client_code)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
   `);
 
   stmt.run(
@@ -37,6 +39,7 @@ export function addLearning(params: AddLearningParams): Learning {
     params.content,
     params.confidence ?? 0.5,
     params.source_session_id ?? null,
+    params.client_code ?? null,
   );
 
   return db.prepare("SELECT * FROM learnings WHERE id = ?").get(id) as Learning;
@@ -46,24 +49,45 @@ export function getLearnings(
   agentId: string,
   category?: string,
   limit = 20,
+  clientCode?: string | null,
 ): Learning[] {
   const db = getDb();
 
+  const conditions = ["agent_id = ?"];
+  const params: unknown[] = [agentId];
+
   if (category) {
-    const stmt = db.prepare(
-      "SELECT * FROM learnings WHERE agent_id = ? AND category = ? ORDER BY updated_at DESC LIMIT ?",
-    );
-    return stmt.all(agentId, category, limit) as Learning[];
+    conditions.push("category = ?");
+    params.push(category);
   }
 
+  if (clientCode) {
+    conditions.push("client_code = ?");
+    params.push(clientCode);
+  }
+
+  params.push(limit);
   const stmt = db.prepare(
-    "SELECT * FROM learnings WHERE agent_id = ? ORDER BY updated_at DESC LIMIT ?",
+    `SELECT * FROM learnings WHERE ${conditions.join(" AND ")} ORDER BY updated_at DESC LIMIT ?`,
   );
-  return stmt.all(agentId, limit) as Learning[];
+  return stmt.all(...params) as Learning[];
 }
 
-export function searchLearnings(query: string): Learning[] {
+export function searchLearnings(query: string, clientCode?: string): Learning[] {
   const db = getDb();
+
+  if (clientCode) {
+    // Sort client-specific results first via CASE expression
+    const stmt = db.prepare(`
+      SELECT l.*
+      FROM learnings_fts fts
+      JOIN learnings l ON l.rowid = fts.rowid
+      WHERE learnings_fts MATCH ?
+      ORDER BY CASE WHEN l.client_code = ? THEN 0 ELSE 1 END, rank
+    `);
+    return stmt.all(query, clientCode) as Learning[];
+  }
+
   const stmt = db.prepare(`
     SELECT l.*
     FROM learnings_fts fts

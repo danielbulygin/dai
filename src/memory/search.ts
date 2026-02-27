@@ -66,12 +66,13 @@ export function getQuickContext(agentId: string, userId: string): QuickContext {
 /**
  * Layer 2: FTS5 recall search across observations and learnings.
  * Used when the agent needs to remember something specific.
+ * When clientCode is provided, client-specific learnings are boosted (rank × 0.5).
  */
-export function recall(query: string, agentId?: string): RecallResult[] {
+export function recall(query: string, agentId?: string, clientCode?: string): RecallResult[] {
   const db = getDb();
   const results: RecallResult[] = [];
 
-  // Search observations
+  // Search observations (unchanged — no client_code on observations)
   const obsStmt = agentId
     ? db.prepare(`
         SELECT o.id, o.input_summary, o.output_summary, fts.rank
@@ -107,38 +108,90 @@ export function recall(query: string, agentId?: string): RecallResult[] {
     });
   }
 
-  // Search learnings
-  const learnStmt = agentId
-    ? db.prepare(`
-        SELECT l.id, l.content, fts.rank
-        FROM learnings_fts fts
-        JOIN learnings l ON l.rowid = fts.rowid
-        WHERE learnings_fts MATCH ? AND l.agent_id = ?
-        ORDER BY fts.rank
-        LIMIT 10
-      `)
-    : db.prepare(`
-        SELECT l.id, l.content, fts.rank
-        FROM learnings_fts fts
-        JOIN learnings l ON l.rowid = fts.rowid
-        WHERE learnings_fts MATCH ?
-        ORDER BY fts.rank
-        LIMIT 10
-      `);
+  // Search learnings — boost client-specific results when clientCode provided
+  if (clientCode && agentId) {
+    // Client-specific learnings (boosted rank)
+    const clientStmt = db.prepare(`
+      SELECT l.id, l.content, l.client_code, fts.rank
+      FROM learnings_fts fts
+      JOIN learnings l ON l.rowid = fts.rowid
+      WHERE learnings_fts MATCH ? AND l.agent_id = ? AND l.client_code = ?
+      ORDER BY fts.rank
+      LIMIT 10
+    `);
+    const clientRows = clientStmt.all(query, agentId, clientCode) as Array<{
+      id: string;
+      content: string;
+      client_code: string | null;
+      rank: number;
+    }>;
+    for (const row of clientRows) {
+      results.push({
+        source: "learning",
+        id: row.id,
+        content: row.content,
+        rank: row.rank * 0.5, // Boost client-specific results
+      });
+    }
 
-  const learnRows = (agentId ? learnStmt.all(query, agentId) : learnStmt.all(query)) as Array<{
-    id: string;
-    content: string;
-    rank: number;
-  }>;
+    // General learnings (non-client or different client)
+    const generalStmt = db.prepare(`
+      SELECT l.id, l.content, l.client_code, fts.rank
+      FROM learnings_fts fts
+      JOIN learnings l ON l.rowid = fts.rowid
+      WHERE learnings_fts MATCH ? AND l.agent_id = ?
+        AND (l.client_code IS NULL OR l.client_code != ?)
+      ORDER BY fts.rank
+      LIMIT 10
+    `);
+    const generalRows = generalStmt.all(query, agentId, clientCode) as Array<{
+      id: string;
+      content: string;
+      client_code: string | null;
+      rank: number;
+    }>;
+    for (const row of generalRows) {
+      results.push({
+        source: "learning",
+        id: row.id,
+        content: row.content,
+        rank: row.rank,
+      });
+    }
+  } else {
+    // No clientCode — original behavior
+    const learnStmt = agentId
+      ? db.prepare(`
+          SELECT l.id, l.content, fts.rank
+          FROM learnings_fts fts
+          JOIN learnings l ON l.rowid = fts.rowid
+          WHERE learnings_fts MATCH ? AND l.agent_id = ?
+          ORDER BY fts.rank
+          LIMIT 10
+        `)
+      : db.prepare(`
+          SELECT l.id, l.content, fts.rank
+          FROM learnings_fts fts
+          JOIN learnings l ON l.rowid = fts.rowid
+          WHERE learnings_fts MATCH ?
+          ORDER BY fts.rank
+          LIMIT 10
+        `);
 
-  for (const row of learnRows) {
-    results.push({
-      source: "learning",
-      id: row.id,
-      content: row.content,
-      rank: row.rank,
-    });
+    const learnRows = (agentId ? learnStmt.all(query, agentId) : learnStmt.all(query)) as Array<{
+      id: string;
+      content: string;
+      rank: number;
+    }>;
+
+    for (const row of learnRows) {
+      results.push({
+        source: "learning",
+        id: row.id,
+        content: row.content,
+        rank: row.rank,
+      });
+    }
   }
 
   // Sort combined results by FTS rank (lower = better match)

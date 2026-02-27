@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS learnings (
   confidence REAL DEFAULT 0.5,
   applied_count INTEGER DEFAULT 0,
   source_session_id TEXT,
+  client_code TEXT DEFAULT NULL,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );
@@ -125,6 +126,7 @@ CREATE INDEX IF NOT EXISTS idx_sessions_channel_thread ON sessions(channel_id, t
 CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent_id);
 CREATE INDEX IF NOT EXISTS idx_observations_session ON observations(session_id);
 CREATE INDEX IF NOT EXISTS idx_learnings_agent ON learnings(agent_id);
+CREATE INDEX IF NOT EXISTS idx_learnings_client_code ON learnings(client_code);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_feedback_session ON feedback(session_id);
 CREATE INDEX IF NOT EXISTS idx_feedback_processed ON feedback(processed);
@@ -190,6 +192,14 @@ export function runMigrations(db: BetterSqlite3.Database): void {
 
   db.exec(TRIGGERS_SQL);
   logger.debug("Triggers created");
+
+  // Incremental migrations for existing databases
+  try {
+    db.exec("ALTER TABLE learnings ADD COLUMN client_code TEXT DEFAULT NULL");
+    logger.debug("Added client_code column to learnings");
+  } catch {
+    // Column already exists — expected on subsequent runs
+  }
 
   logger.info("Database migrations complete");
 }

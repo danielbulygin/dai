@@ -209,16 +209,20 @@ const ACCOUNT_CODE_ALIASES: Record<string, string> = {
   lowry: "laori",
   laurie: "laori",
   lori: "laori",
+  lauri: "laori",
+  loris: "laori",
   // URVI (BMAD: URV)
   irvy: "urvi",
   irvie: "urvi",
   irvi: "urvi",
+  orvi: "urvi",
   // Teethlovers (BMAD: TL)
   tea_lovers: "teethlovers",
   teeth_lovers: "teethlovers",
   // Vi Lifestyle (BMAD: VL)
   v_lifestyle: "vi_lifestyle",
   vlifestyle: "vi_lifestyle",
+  vlive: "vi_lifestyle",
   // JV Academy (BMAD: JVA)
   jv: "jva",
   jv_academy: "jva",
@@ -233,6 +237,18 @@ const ACCOUNT_CODE_ALIASES: Record<string, string> = {
   press: "press_london",
   // Nothings Something (BMAD: NOSO)
   nothings_something: "noso",
+  // Hausmed (former client, phonetic variants)
+  housemade: "hausmed",
+  housemate: "hausmed",
+  // Stella = Laori founder, insights belong to Laori
+  stella: "laori",
+  // Tillman = URVI founder, insights belong to URVI
+  tillman: "urvi",
+  // AOT Academy = Ads on Tap's own academy (also "online_course")
+  aot_academy: "aot_academy",
+  online_course: "aot_academy",
+  // Kid Lovers → Teethlovers (phonetic confusion in transcript)
+  kid_lovers: "teethlovers",
 };
 
 /** Normalize an account code to its canonical form */

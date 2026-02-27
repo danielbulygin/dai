@@ -6,11 +6,12 @@ import { addLearning, searchLearnings } from "../../memory/learnings.js";
 export async function recall(params: {
   query: string;
   agent_id?: string;
+  client_code?: string;
 }): Promise<{
   results: Array<{ type: string; content: string; relevance: number }>;
 }> {
   try {
-    const raw = memoryRecall(params.query, params.agent_id);
+    const raw = memoryRecall(params.query, params.agent_id, params.client_code);
 
     const results = raw.map((r) => ({
       type: r.source,
@@ -35,6 +36,7 @@ export async function remember(params: {
   content: string;
   category: string;
   agent_id: string;
+  client_code?: string;
 }): Promise<{ id: string; saved: boolean }> {
   try {
     const learning = addLearning({
@@ -42,6 +44,7 @@ export async function remember(params: {
       category: params.category,
       content: params.content,
       confidence: 0.5,
+      client_code: params.client_code ?? null,
     });
 
     logger.debug(
@@ -59,12 +62,13 @@ export async function remember(params: {
 export async function searchMemories(params: {
   topic: string;
   limit?: number;
+  client_code?: string;
 }): Promise<{
   memories: Array<{ content: string; category: string; confidence: number }>;
 }> {
   try {
     const limit = params.limit ?? 10;
-    const raw = searchLearnings(params.topic);
+    const raw = searchLearnings(params.topic, params.client_code);
 
     const memories = raw.slice(0, limit).map((l) => ({
       content: l.content,

@@ -42,15 +42,16 @@ export async function synthesizeLearnings(): Promise<void> {
     return;
   }
 
-  // Group by category
-  const categories = groupByCategory(allLearnings);
+  // Group by (category, client_code) so client learnings don't merge with global ones
+  const groups = groupByCategoryAndClient(allLearnings);
 
   let totalMerged = 0;
   let totalDeprecated = 0;
   let totalUpdated = 0;
 
-  for (const [category, learnings] of categories) {
+  for (const [groupKey, learnings] of groups) {
     if (learnings.length < 3) continue;
+    const category = groupKey.split('::')[0];
 
     try {
       // Process in batches to keep prompt manageable
@@ -74,6 +75,7 @@ export async function synthesizeLearnings(): Promise<void> {
               content: merge.merged_content,
               confidence: kept.confidence,
               source_session_id: kept.source_session_id,
+              client_code: kept.client_code,
             });
             totalMerged++;
           } catch (err) {
@@ -176,14 +178,20 @@ async function runTeamAggregation(): Promise<void> {
   }
 }
 
-function groupByCategory(learnings: Learning[]): Map<string, Learning[]> {
+/**
+ * Group learnings by (category, client_code) so that client-specific
+ * learnings are only merged/deduplicated within the same client scope.
+ * Key format: "category::client_code" or "category::" for global.
+ */
+function groupByCategoryAndClient(learnings: Learning[]): Map<string, Learning[]> {
   const groups = new Map<string, Learning[]>();
   for (const l of learnings) {
-    const existing = groups.get(l.category);
+    const key = `${l.category}::${l.client_code ?? ''}`;
+    const existing = groups.get(key);
     if (existing) {
       existing.push(l);
     } else {
-      groups.set(l.category, [l]);
+      groups.set(key, [l]);
     }
   }
   return groups;

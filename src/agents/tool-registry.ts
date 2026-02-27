@@ -47,13 +47,17 @@ register({
   definition: {
     name: 'recall',
     description:
-      'Search memory for past observations and learnings relevant to a query. Returns ranked results from conversation history and accumulated knowledge.',
+      'Search memory for past observations and learnings relevant to a query. Returns ranked results from conversation history and accumulated knowledge. When client_code is provided, client-specific learnings are boosted to the top.',
     input_schema: {
       type: 'object' as const,
       properties: {
         query: {
           type: 'string',
           description: 'What to search for in memory',
+        },
+        client_code: {
+          type: 'string',
+          description: 'Client code to boost client-specific results (e.g. "press_london", "ninepine")',
         },
       },
       required: ['query'],
@@ -63,6 +67,7 @@ register({
     const result = await memoryTools.recall({
       query: input.query as string,
       agent_id: context.agentId,
+      client_code: input.client_code as string | undefined,
     });
     return JSON.stringify(result);
   },
@@ -72,7 +77,7 @@ register({
   definition: {
     name: 'remember',
     description:
-      'Save an important observation, preference, or learning to long-term memory. Use for information worth recalling in future conversations.',
+      'Save an important observation, preference, or learning to long-term memory. Use for information worth recalling in future conversations. Use client_code to tag account-specific knowledge.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -83,7 +88,11 @@ register({
         category: {
           type: 'string',
           description:
-            'Category for the memory (e.g. "user_preference", "decision", "observation", "workflow")',
+            'Category for the memory (e.g. "user_preference", "decision", "observation", "workflow", "account_knowledge")',
+        },
+        client_code: {
+          type: 'string',
+          description: 'Client code if this learning is account-specific (e.g. "press_london", "ninepine"). Omit for global learnings.',
         },
       },
       required: ['content', 'category'],
@@ -94,6 +103,7 @@ register({
       content: input.content as string,
       category: input.category as string,
       agent_id: context.agentId,
+      client_code: input.client_code as string | undefined,
     });
     return JSON.stringify(result);
   },
@@ -103,7 +113,7 @@ register({
   definition: {
     name: 'search_memories',
     description:
-      'Search accumulated learnings by topic. Returns memories with confidence scores.',
+      'Search accumulated learnings by topic. Returns memories with confidence scores. When client_code is provided, client-specific results are sorted first.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -115,6 +125,10 @@ register({
           type: 'number',
           description: 'Maximum number of results (default 10)',
         },
+        client_code: {
+          type: 'string',
+          description: 'Client code to prioritize client-specific results (e.g. "press_london")',
+        },
       },
       required: ['topic'],
     },
@@ -123,6 +137,7 @@ register({
     const result = await memoryTools.searchMemories({
       topic: input.topic as string,
       limit: input.limit as number | undefined,
+      client_code: input.client_code as string | undefined,
     });
     return JSON.stringify(result);
   },
