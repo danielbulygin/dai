@@ -7,6 +7,21 @@ function daysAgoISO(days: number): string {
   return d.toISOString().slice(0, 10);
 }
 
+async function resolveClientId(
+  clientCode: string,
+): Promise<{ id: number } | { error: string }> {
+  const supabase = getSupabase();
+  const { data, error } = await supabase
+    .from("clients")
+    .select("id")
+    .eq("code", clientCode)
+    .single();
+  if (error || !data) {
+    return { error: `Client '${clientCode}' not found` };
+  }
+  return { id: data.id as number };
+}
+
 export async function listClients(): Promise<string> {
   try {
     logger.debug("Querying all active clients");
@@ -64,7 +79,7 @@ export async function getClientPerformance(params: {
     const { data, error } = await supabase
       .from("account_daily")
       .select(
-        "date, spend, impressions, reach, clicks, purchases, revenue, roas, cpa, cpm, ctr",
+        "date, spend, impressions, reach, frequency, clicks, link_clicks, content_views, add_to_carts, checkouts_initiated, purchases, purchase_value, roas, cpm, ctr, ctr_link, cpc, unique_link_clicks, results, cost_per_result, leads, complete_registrations, actions",
       )
       .eq("client_id", client.id)
       .gte("date", since)
@@ -209,7 +224,7 @@ export async function getCampaignPerformance(params: {
     const { data, error } = await supabase
       .from("campaign_daily")
       .select(
-        "date, campaign_id, campaign_name, spend, impressions, clicks, purchases, revenue, roas, cpa",
+        "date, campaign_id, campaign_name, status, objective, spend, impressions, reach, frequency, clicks, link_clicks, content_views, add_to_carts, checkouts_initiated, purchases, purchase_value, roas, cpm, ctr, ctr_link, cpc, unique_link_clicks, results, cost_per_result, leads, complete_registrations, actions",
       )
       .eq("client_id", client.id)
       .gte("date", since)
@@ -308,6 +323,264 @@ export async function getConcepts(params: {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.error({ error: msg }, "getConcepts failed");
+    return JSON.stringify({ error: msg });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1B: New granular tools
+// ---------------------------------------------------------------------------
+
+export async function getAdsetPerformance(params: {
+  clientCode: string;
+  campaignId?: string;
+  days?: number;
+}): Promise<string> {
+  try {
+    const days = params.days ?? 7;
+    const since = daysAgoISO(days);
+
+    logger.debug(
+      { clientCode: params.clientCode, campaignId: params.campaignId, days },
+      "Querying adset performance",
+    );
+
+    const resolved = await resolveClientId(params.clientCode);
+    if ("error" in resolved) return JSON.stringify(resolved);
+
+    const supabase = getSupabase();
+    let query = supabase
+      .from("adset_daily")
+      .select(
+        "date, campaign_id, adset_id, adset_name, status, targeting_audience_type, spend, impressions, reach, frequency, clicks, link_clicks, content_views, add_to_carts, checkouts_initiated, purchases, purchase_value, roas, cpm, ctr, ctr_link, cpc, unique_link_clicks, results, cost_per_result, actions",
+      )
+      .eq("client_id", resolved.id)
+      .gte("date", since);
+
+    if (params.campaignId) {
+      query = query.eq("campaign_id", params.campaignId);
+    }
+
+    const { data, error } = await query.order("date", { ascending: false });
+
+    if (error) {
+      logger.error({ error }, "Failed to get adset performance");
+      return JSON.stringify({ error: error.message });
+    }
+
+    logger.debug(
+      { clientCode: params.clientCode, rows: data?.length },
+      "Got adset performance data",
+    );
+    return JSON.stringify(data);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ error: msg }, "getAdsetPerformance failed");
+    return JSON.stringify({ error: msg });
+  }
+}
+
+export async function getAdPerformance(params: {
+  clientCode: string;
+  campaignId?: string;
+  adsetId?: string;
+  days?: number;
+}): Promise<string> {
+  try {
+    const days = params.days ?? 7;
+    const since = daysAgoISO(days);
+
+    logger.debug(
+      { clientCode: params.clientCode, campaignId: params.campaignId, adsetId: params.adsetId, days },
+      "Querying ad performance",
+    );
+
+    const resolved = await resolveClientId(params.clientCode);
+    if ("error" in resolved) return JSON.stringify(resolved);
+
+    const supabase = getSupabase();
+    let query = supabase
+      .from("ad_daily")
+      .select(
+        "date, campaign_id, adset_id, ad_id, ad_name, status, creative_id, spend, impressions, reach, frequency, clicks, link_clicks, unique_link_clicks, ctr, ctr_link, unique_ctr_link, cpm, cpc, video_plays, video_p25, video_p50, video_p75, video_p100, thruplays, video_avg_time, hook_rate, hold_rate, landing_page_views, content_views, add_to_carts, checkouts_initiated, pdp_view_rate, atc_on_pdp_rate, checkout_abandonment_rate, conversion_rate, revenue_per_click, purchases, purchase_value, roas, results, cost_per_result, actions",
+      )
+      .eq("client_id", resolved.id)
+      .gte("date", since);
+
+    if (params.campaignId) {
+      query = query.eq("campaign_id", params.campaignId);
+    }
+    if (params.adsetId) {
+      query = query.eq("adset_id", params.adsetId);
+    }
+
+    const { data, error } = await query.order("date", { ascending: false });
+
+    if (error) {
+      logger.error({ error }, "Failed to get ad performance");
+      return JSON.stringify({ error: error.message });
+    }
+
+    logger.debug(
+      { clientCode: params.clientCode, rows: data?.length },
+      "Got ad performance data",
+    );
+    return JSON.stringify(data);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ error: msg }, "getAdPerformance failed");
+    return JSON.stringify({ error: msg });
+  }
+}
+
+export async function getBreakdowns(params: {
+  clientCode: string;
+  breakdownType: string;
+  entityType?: string;
+  entityId?: string;
+  days?: number;
+}): Promise<string> {
+  try {
+    const days = params.days ?? 7;
+    const since = daysAgoISO(days);
+
+    logger.debug(
+      { clientCode: params.clientCode, breakdownType: params.breakdownType, entityType: params.entityType, days },
+      "Querying breakdowns",
+    );
+
+    const resolved = await resolveClientId(params.clientCode);
+    if ("error" in resolved) return JSON.stringify(resolved);
+
+    const supabase = getSupabase();
+    let query = supabase
+      .from("breakdowns")
+      .select(
+        "date, breakdown_type, breakdown_value, spend, impressions, clicks, link_clicks, results, cost_per_result, purchases, purchase_value",
+      )
+      .eq("client_id", resolved.id)
+      .eq("breakdown_type", params.breakdownType)
+      .gte("date", since);
+
+    const entityType = params.entityType ?? "account";
+    if (entityType !== "account" && params.entityId) {
+      query = query.eq("entity_type", entityType).eq("entity_id", params.entityId);
+    } else if (entityType !== "account") {
+      query = query.eq("entity_type", entityType);
+    }
+
+    const { data, error } = await query.order("date", { ascending: false });
+
+    if (error) {
+      logger.error({ error }, "Failed to get breakdowns");
+      return JSON.stringify({ error: error.message });
+    }
+
+    logger.debug(
+      { clientCode: params.clientCode, rows: data?.length },
+      "Got breakdown data",
+    );
+    return JSON.stringify(data);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ error: msg }, "getBreakdowns failed");
+    return JSON.stringify({ error: msg });
+  }
+}
+
+export async function getAccountChanges(params: {
+  clientCode: string;
+  days?: number;
+}): Promise<string> {
+  try {
+    const days = params.days ?? 7;
+    const since = daysAgoISO(days);
+
+    logger.debug(
+      { clientCode: params.clientCode, days },
+      "Querying account changes",
+    );
+
+    const resolved = await resolveClientId(params.clientCode);
+    if ("error" in resolved) return JSON.stringify(resolved);
+
+    const supabase = getSupabase();
+    const { data, error } = await supabase
+      .from("account_changes")
+      .select(
+        "event_time, event_type, object_type, object_id, object_name, actor_name, extra_data",
+      )
+      .eq("client_id", resolved.id)
+      .gte("event_time", since)
+      .order("event_time", { ascending: false });
+
+    if (error) {
+      logger.error({ error }, "Failed to get account changes");
+      return JSON.stringify({ error: error.message });
+    }
+
+    logger.debug(
+      { clientCode: params.clientCode, rows: data?.length },
+      "Got account changes",
+    );
+    return JSON.stringify(data);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ error: msg }, "getAccountChanges failed");
+    return JSON.stringify({ error: msg });
+  }
+}
+
+export async function getCreativeDetails(params: {
+  clientCode: string;
+  creativeId?: string;
+  adId?: string;
+  onlyFatigued?: boolean;
+}): Promise<string> {
+  try {
+    logger.debug(
+      { clientCode: params.clientCode, creativeId: params.creativeId, adId: params.adId, onlyFatigued: params.onlyFatigued },
+      "Querying creative details",
+    );
+
+    const resolved = await resolveClientId(params.clientCode);
+    if ("error" in resolved) return JSON.stringify(resolved);
+
+    const supabase = getSupabase();
+    let query = supabase
+      .from("creatives")
+      .select(
+        "creative_id, ad_id, ad_name, ad_type, status, format, primary_text, headline, description, call_to_action, link_url, video_duration_seconds, transcript, hook_score, watch_score, click_score, convert_score, is_fatigued, fatigue_detected_at, ai_tags, custom_tags, campaign_name, adset_name, last_active_at",
+      )
+      .eq("client_id", resolved.id);
+
+    if (params.creativeId) {
+      query = query.eq("creative_id", params.creativeId);
+    }
+    if (params.adId) {
+      query = query.eq("ad_id", params.adId);
+    }
+    if (params.onlyFatigued) {
+      query = query.eq("is_fatigued", true);
+    }
+
+    const { data, error } = await query.order("last_active_at", {
+      ascending: false,
+    });
+
+    if (error) {
+      logger.error({ error }, "Failed to get creative details");
+      return JSON.stringify({ error: error.message });
+    }
+
+    logger.debug(
+      { clientCode: params.clientCode, rows: data?.length },
+      "Got creative details",
+    );
+    return JSON.stringify(data);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ error: msg }, "getCreativeDetails failed");
     return JSON.stringify({ error: msg });
   }
 }

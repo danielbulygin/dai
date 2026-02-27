@@ -294,7 +294,7 @@ register({
   definition: {
     name: 'get_client_performance',
     description:
-      'Get account-level daily ad performance metrics (spend, impressions, clicks, purchases, revenue, ROAS, CPA) for a client.',
+      'Get account-level daily ad performance metrics for a client. Includes spend, impressions, reach, frequency, clicks, link_clicks, funnel stages (content_views, add_to_carts, checkouts_initiated), purchases, purchase_value, revenue, ROAS, CPA, CPM, CTR, and raw actions JSONB.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -322,7 +322,7 @@ register({
   definition: {
     name: 'get_campaign_performance',
     description:
-      'Get campaign-level daily ad performance breakdown for a client.',
+      'Get campaign-level daily ad performance for a client. Includes status, objective, spend, impressions, reach, frequency, clicks, link_clicks, funnel stages (content_views, add_to_carts, checkouts_initiated), purchases, purchase_value, ROAS, CPA, CPM, CTR, and raw actions JSONB.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -463,6 +463,188 @@ register({
     return await supabaseTools.getConcepts({
       clientCode: input.clientCode as string,
       status: input.status as string | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'get_adset_performance',
+    description:
+      'Get ad set level daily performance metrics for a client. Use to drill down from campaign level into ad sets for optimization decisions (kill/scale/pause).',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        clientCode: {
+          type: 'string',
+          description: 'Client code (e.g. "ninepine")',
+        },
+        campaignId: {
+          type: 'string',
+          description: 'Optional campaign ID to filter by',
+        },
+        days: {
+          type: 'number',
+          description: 'Number of days (default 7)',
+        },
+      },
+      required: ['clientCode'],
+    },
+  },
+  async execute(input) {
+    return await supabaseTools.getAdsetPerformance({
+      clientCode: input.clientCode as string,
+      campaignId: input.campaignId as string | undefined,
+      days: input.days as number | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'get_ad_performance',
+    description:
+      'Get ad-level daily performance with creative metrics (hook rate, hold rate, video completion). Use for creative analysis and identifying winning/losing ads.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        clientCode: {
+          type: 'string',
+          description: 'Client code',
+        },
+        campaignId: {
+          type: 'string',
+          description: 'Optional campaign ID filter',
+        },
+        adsetId: {
+          type: 'string',
+          description: 'Optional ad set ID filter',
+        },
+        days: {
+          type: 'number',
+          description: 'Number of days (default 7)',
+        },
+      },
+      required: ['clientCode'],
+    },
+  },
+  async execute(input) {
+    return await supabaseTools.getAdPerformance({
+      clientCode: input.clientCode as string,
+      campaignId: input.campaignId as string | undefined,
+      adsetId: input.adsetId as string | undefined,
+      days: input.days as number | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'get_breakdowns',
+    description:
+      'Get performance breakdowns by age, gender, country, placement, device, or platform. Use for device-level analysis (iOS vs Android), placement optimization, and audience insights.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        clientCode: {
+          type: 'string',
+          description: 'Client code',
+        },
+        breakdownType: {
+          type: 'string',
+          enum: ['age', 'gender', 'country', 'placement', 'device', 'platform'],
+          description: 'Type of breakdown',
+        },
+        entityType: {
+          type: 'string',
+          enum: ['account', 'campaign', 'adset', 'ad'],
+          description: 'Level of breakdown (default: account)',
+        },
+        entityId: {
+          type: 'string',
+          description: 'Optional campaign/adset/ad ID',
+        },
+        days: {
+          type: 'number',
+          description: 'Number of days (default 7)',
+        },
+      },
+      required: ['clientCode', 'breakdownType'],
+    },
+  },
+  async execute(input) {
+    return await supabaseTools.getBreakdowns({
+      clientCode: input.clientCode as string,
+      breakdownType: input.breakdownType as string,
+      entityType: input.entityType as string | undefined,
+      entityId: input.entityId as string | undefined,
+      days: input.days as number | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'get_account_changes',
+    description:
+      'Get recent account activity log — budget changes, ad creation, status changes. Use to understand "what changed" when diagnosing performance shifts (Root Cause: You).',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        clientCode: {
+          type: 'string',
+          description: 'Client code',
+        },
+        days: {
+          type: 'number',
+          description: 'Number of days (default 7)',
+        },
+      },
+      required: ['clientCode'],
+    },
+  },
+  async execute(input) {
+    return await supabaseTools.getAccountChanges({
+      clientCode: input.clientCode as string,
+      days: input.days as number | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'get_creative_details',
+    description:
+      'Get creative metadata — ad copy, headlines, video transcripts, AI tags, fatigue status, performance scores. Use for creative analysis without needing to see the actual media.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        clientCode: {
+          type: 'string',
+          description: 'Client code',
+        },
+        creativeId: {
+          type: 'string',
+          description: 'Optional specific creative ID',
+        },
+        adId: {
+          type: 'string',
+          description: 'Optional specific ad ID',
+        },
+        onlyFatigued: {
+          type: 'boolean',
+          description: 'Only return fatigued creatives',
+        },
+      },
+      required: ['clientCode'],
+    },
+  },
+  async execute(input) {
+    return await supabaseTools.getCreativeDetails({
+      clientCode: input.clientCode as string,
+      creativeId: input.creativeId as string | undefined,
+      adId: input.adId as string | undefined,
+      onlyFatigued: input.onlyFatigued as boolean | undefined,
     });
   },
 });

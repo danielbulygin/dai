@@ -7,6 +7,8 @@ export const toolProfiles = {
   media_buyer: [
     'recall', 'remember', 'search_memories',
     'list_clients', 'get_client_performance', 'get_campaign_performance',
+    'get_adset_performance', 'get_ad_performance', 'get_breakdowns',
+    'get_account_changes', 'get_creative_details',
     'get_alerts', 'get_learnings', 'get_briefs', 'get_concepts',
     'search_meetings', 'get_meeting_summary', 'get_meeting_transcript', 'list_recent_meetings',
     'post_message', 'reply_in_thread',
