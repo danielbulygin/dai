@@ -201,8 +201,8 @@ async function runWithTools(
   );
 
   for (let turn = 0; turn < maxTurns; turn++) {
-    // Reset per-turn text — only the final turn's text becomes the response
     let turnText = '';
+    const turnChunks: string[] = [];
 
     const stream = apiClient.messages.stream({
       model,
@@ -212,18 +212,23 @@ async function runWithTools(
       tools: cachedTools,
     });
 
-    // Stream ALL text for progressive UX (user sees thinking in real-time)
+    // Buffer text chunks — we only flush to onText if this is the final turn
+    // to avoid leaking intermediate "thinking" text to Slack
     stream.on('text', (text) => {
       turnText += text;
-      onText?.(text);
+      turnChunks.push(text);
     });
 
     const msg = await stream.finalMessage();
     totalInput += msg.usage.input_tokens;
     totalOutput += msg.usage.output_tokens;
 
-    // If the model finished without requesting tools, capture final answer
+    // If the model finished without requesting tools, this is the final turn
     if (msg.stop_reason !== 'tool_use') {
+      // Replay buffered chunks to onText for progressive Slack display
+      for (const chunk of turnChunks) {
+        onText?.(chunk);
+      }
       responseText = turnText;
       return {
         responseText,
