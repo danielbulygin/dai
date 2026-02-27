@@ -185,6 +185,10 @@ When an account needs new creative:
 5. Compile a data-driven creative brief with specific patterns to replicate and avoid
 6. Delegate to Creative Strategist (Maya) via `ask_agent` when available, providing the performance data
 
+## Metric Reference
+
+Refer to METRICS.md for the complete metric reference, custom metric formulas, anomaly signal patterns, and statistical significance thresholds. Always use the benchmarks and sample-size minimums defined there before flagging anomalies.
+
 ## Constraints
 
 - NEVER analyze without pulling real data first. No hypothetical analysis.

@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import matter from 'gray-matter';
@@ -56,6 +56,8 @@ export interface AgentDefinition {
   manifest: ManifestEntry;
   persona: string;
   instructions: string;
+  /** Additional .md files from the agent directory (e.g. METRICS.md, METHODOLOGY.md) */
+  extras: { name: string; content: string }[];
 }
 
 // ---------------------------------------------------------------------------
@@ -72,6 +74,34 @@ function readMarkdown(filePath: string): string {
   const raw = readFileSync(filePath, 'utf-8');
   const { content } = matter(raw);
   return content.trim();
+}
+
+/**
+ * Load additional .md files from an agent directory (excluding PERSONA.md,
+ * INSTRUCTIONS.md, and any .skill.md files which are handled separately).
+ */
+function loadExtras(agentDir: string): { name: string; content: string }[] {
+  const SKIP = new Set(['PERSONA.md', 'INSTRUCTIONS.md']);
+  const extras: { name: string; content: string }[] = [];
+
+  let entries: string[];
+  try {
+    entries = readdirSync(agentDir);
+  } catch {
+    return extras;
+  }
+
+  for (const file of entries) {
+    if (!file.endsWith('.md') || file.endsWith('.skill.md') || SKIP.has(file)) {
+      continue;
+    }
+    const content = readMarkdown(join(agentDir, file));
+    if (content) {
+      extras.push({ name: file, content });
+    }
+  }
+
+  return extras;
 }
 
 // ---------------------------------------------------------------------------
@@ -95,8 +125,9 @@ export function loadAgentRegistry(): Map<string, AgentDefinition> {
     const config = readYaml(join(agentDir, 'agent.yaml'), AgentConfigSchema);
     const persona = readMarkdown(join(agentDir, 'PERSONA.md'));
     const instructions = readMarkdown(join(agentDir, 'INSTRUCTIONS.md'));
+    const extras = loadExtras(agentDir);
 
-    map.set(entry.id, { config, manifest: entry, persona, instructions });
+    map.set(entry.id, { config, manifest: entry, persona, instructions, extras });
   }
 
   registry = map;

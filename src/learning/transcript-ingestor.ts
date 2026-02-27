@@ -67,6 +67,7 @@ export async function ingestNewTranscripts(): Promise<number> {
     const pattern = matchMeetingPattern(
       meeting.title ?? '',
       meeting.speakers ?? [],
+      meeting.short_summary ?? undefined,
     );
 
     if (!pattern) {

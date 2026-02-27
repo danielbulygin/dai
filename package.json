@@ -12,7 +12,8 @@
     "test:watch": "vitest",
     "lint": "tsc --noEmit",
     "migrate": "tsx scripts/migrate.ts",
-    "backfill:fireflies": "tsx --env-file=.env scripts/backfill-fireflies.ts"
+    "backfill:fireflies": "tsx --env-file=.env scripts/backfill-fireflies.ts",
+    "extract:methodology": "tsx --env-file=.env scripts/extract-methodology.ts"
   },
   "keywords": [
     "slack",

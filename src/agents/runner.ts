@@ -50,11 +50,18 @@ function buildSystemPrompt(
   persona: string,
   instructions: string,
   context: QuickContext,
+  extras?: { name: string; content: string }[],
 ): string {
   const parts: string[] = [];
 
   parts.push(persona);
   parts.push(instructions);
+
+  if (extras && extras.length > 0) {
+    for (const extra of extras) {
+      parts.push(extra.content);
+    }
+  }
 
   if (context.lastSessionSummary) {
     parts.push(`## Previous Session\n${context.lastSessionSummary}`);
@@ -268,6 +275,7 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
     agent.persona,
     agent.instructions,
     context,
+    agent.extras,
   );
 
   // Load prior conversation history from this session (last 20 messages)
