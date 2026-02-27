@@ -54,6 +54,18 @@ function buildSystemPrompt(
 ): string {
   const parts: string[] = [];
 
+  // Current date/time so the agent always knows "now"
+  const now = new Date().toLocaleString('en-GB', {
+    timeZone: 'Europe/Berlin',
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+  parts.push(`## Current Date & Time\n${now} (Europe/Berlin)`);
+
   parts.push(persona);
   parts.push(instructions);
 
@@ -127,7 +139,13 @@ async function runSimple(
   const stream = apiClient.messages.stream({
     model,
     max_tokens: 4096,
-    system: systemPrompt,
+    system: [
+      {
+        type: 'text' as const,
+        text: systemPrompt,
+        cache_control: { type: 'ephemeral' as const },
+      },
+    ],
     messages,
   });
 
@@ -166,18 +184,37 @@ async function runWithTools(
   let totalInput = 0;
   let totalOutput = 0;
 
+  // Prepare cached system prompt and tools — static across all turns
+  const cachedSystem: Anthropic.TextBlockParam[] = [
+    {
+      type: 'text' as const,
+      text: systemPrompt,
+      cache_control: { type: 'ephemeral' as const },
+    },
+  ];
+
+  // Add cache breakpoint to the last tool so tool definitions are cached too
+  const cachedTools: Anthropic.Tool[] = tools.map((tool, i) =>
+    i === tools.length - 1
+      ? { ...tool, cache_control: { type: 'ephemeral' as const } }
+      : tool,
+  );
+
   for (let turn = 0; turn < maxTurns; turn++) {
+    // Reset per-turn text — only the final turn's text becomes the response
+    let turnText = '';
+
     const stream = apiClient.messages.stream({
       model,
       max_tokens: 4096,
-      system: systemPrompt,
+      system: cachedSystem,
       messages,
-      tools,
+      tools: cachedTools,
     });
 
-    // Stream text blocks to the callback
+    // Stream ALL text for progressive UX (user sees thinking in real-time)
     stream.on('text', (text) => {
-      responseText += text;
+      turnText += text;
       onText?.(text);
     });
 
@@ -185,8 +222,9 @@ async function runWithTools(
     totalInput += msg.usage.input_tokens;
     totalOutput += msg.usage.output_tokens;
 
-    // If the model finished without requesting tools, we're done
+    // If the model finished without requesting tools, capture final answer
     if (msg.stop_reason !== 'tool_use') {
+      responseText = turnText;
       return {
         responseText,
         turns: turn + 1,

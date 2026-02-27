@@ -37,6 +37,16 @@ const STREAM_UPDATE_THRESHOLD = 1500;
 const MIN_UPDATE_INTERVAL_MS = 1200;
 
 // ---------------------------------------------------------------------------
+// Cost estimation (Claude Opus 4.6 pricing: $5/M input, $25/M output)
+// ---------------------------------------------------------------------------
+
+function estimateCost(inputTokens: number, outputTokens: number): string {
+  const cost =
+    (inputTokens * 5) / 1_000_000 + (outputTokens * 25) / 1_000_000;
+  return cost < 0.01 ? cost.toFixed(3) : cost.toFixed(2);
+}
+
+// ---------------------------------------------------------------------------
 // Error classification
 // ---------------------------------------------------------------------------
 
@@ -173,9 +183,12 @@ export function createStreamResponder(
 
     const mrkdwn = markdownToMrkdwn(fullText);
     const totalTokens = tokenInfo ? tokenInfo.input + tokenInfo.output : undefined;
+    const costEstimate = tokenInfo
+      ? estimateCost(tokenInfo.input, tokenInfo.output)
+      : undefined;
     const footer =
       totalTokens !== undefined
-        ? `\n_${agentName} · ${totalTokens.toLocaleString()} tokens_`
+        ? `\n_${agentName} · ${totalTokens.toLocaleString()} tokens${costEstimate ? ` (~$${costEstimate})` : ''}_`
         : '';
 
     const fullContent = `${mrkdwn}${footer}`;
