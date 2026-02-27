@@ -1,7 +1,51 @@
 import { nanoid } from "nanoid";
 import { logger } from "../../utils/logger.js";
 import { recall as memoryRecall } from "../../memory/search.js";
-import { addLearning, searchLearnings } from "../../memory/learnings.js";
+import { addLearning, searchLearnings, findDuplicateLearning } from "../../memory/learnings.js";
+
+/**
+ * Normalize client_code aliases to canonical Supabase codes (snake_case).
+ * Handles common abbreviations, display names, and alternate forms.
+ */
+const CLIENT_CODE_ALIASES: ReadonlyMap<string, string> = new Map([
+  // Press London
+  ["pl", "press_london"],
+  ["press", "press_london"],
+  ["presslondon", "press_london"],
+  ["press-london", "press_london"],
+  // Ninepine
+  ["np", "ninepine"],
+  ["nine_pine", "ninepine"],
+  // Brain.fm
+  ["brainfm", "brainfm"],
+  ["brain.fm", "brainfm"],
+  ["brain_fm", "brainfm"],
+  ["bfm", "brainfm"],
+  // Vi Lifestyle
+  ["vi", "vi_lifestyle"],
+  ["vi-lifestyle", "vi_lifestyle"],
+  ["vilifestyle", "vi_lifestyle"],
+  // JV Academy
+  ["jva", "jva"],
+  ["jv-academy", "jva"],
+  ["jv_academy", "jva"],
+  // Nothing's Something
+  ["noso", "noso"],
+  ["nothings-something", "noso"],
+  ["nothings_something", "noso"],
+  // Others with common aliases
+  ["getgoing", "getgoing"],
+  ["get-going", "getgoing"],
+  ["get_going", "getgoing"],
+  ["teeth_lovers", "teethlovers"],
+  ["teeth-lovers", "teethlovers"],
+]);
+
+function normalizeClientCode(code: string | undefined): string | undefined {
+  if (!code) return undefined;
+  const lower = code.toLowerCase().trim();
+  return CLIENT_CODE_ALIASES.get(lower) ?? lower;
+}
 
 export async function recall(params: {
   query: string;
@@ -11,7 +55,8 @@ export async function recall(params: {
   results: Array<{ type: string; content: string; relevance: number }>;
 }> {
   try {
-    const raw = memoryRecall(params.query, params.agent_id, params.client_code);
+    const clientCode = normalizeClientCode(params.client_code);
+    const raw = memoryRecall(params.query, params.agent_id, clientCode);
 
     const results = raw.map((r) => ({
       type: r.source,
@@ -37,18 +82,36 @@ export async function remember(params: {
   category: string;
   agent_id: string;
   client_code?: string;
-}): Promise<{ id: string; saved: boolean }> {
+}): Promise<{ id: string; saved: boolean; deduplicated?: boolean }> {
   try {
+    const clientCode = normalizeClientCode(params.client_code) ?? null;
+
+    // Check for duplicate/near-duplicate learnings before inserting
+    const existing = findDuplicateLearning(
+      params.agent_id,
+      params.category,
+      params.content,
+      clientCode,
+    );
+
+    if (existing) {
+      logger.debug(
+        { existingId: existing.id, category: params.category },
+        "Duplicate learning found, skipping insert",
+      );
+      return { id: existing.id, saved: true, deduplicated: true };
+    }
+
     const learning = addLearning({
       agent_id: params.agent_id,
       category: params.category,
       content: params.content,
       confidence: 0.5,
-      client_code: params.client_code ?? null,
+      client_code: clientCode,
     });
 
     logger.debug(
-      { id: learning.id, category: params.category },
+      { id: learning.id, category: params.category, clientCode },
       "Saved new memory",
     );
 
@@ -68,7 +131,8 @@ export async function searchMemories(params: {
 }> {
   try {
     const limit = params.limit ?? 10;
-    const raw = searchLearnings(params.topic, params.client_code);
+    const clientCode = normalizeClientCode(params.client_code);
+    const raw = searchLearnings(params.topic, clientCode);
 
     const memories = raw.slice(0, limit).map((l) => ({
       content: l.content,

@@ -98,6 +98,57 @@ export function searchLearnings(query: string, clientCode?: string): Learning[] 
   return stmt.all(query) as Learning[];
 }
 
+/**
+ * Check for an existing learning that is substantially similar.
+ * Uses FTS to find content matches within the same agent/category/client_code scope.
+ * Returns the first match if found, or undefined.
+ */
+export function findDuplicateLearning(
+  agentId: string,
+  category: string,
+  content: string,
+  clientCode: string | null,
+): Learning | undefined {
+  const db = getDb();
+
+  // Extract significant keywords for FTS matching (skip short/common words)
+  const keywords = content
+    .toLowerCase()
+    .replace(/[^\w\s]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 3)
+    .slice(0, 8)
+    .join(" ");
+
+  if (!keywords) return undefined;
+
+  try {
+    const rows = db
+      .prepare(
+        `SELECT l.*
+         FROM learnings_fts fts
+         JOIN learnings l ON l.rowid = fts.rowid
+         WHERE learnings_fts MATCH ?
+           AND l.agent_id = ?
+           AND l.category = ?
+         ORDER BY rank
+         LIMIT 5`,
+      )
+      .all(keywords, agentId, category) as Learning[];
+
+    // Check if any result is for the same client_code
+    for (const row of rows) {
+      if ((row.client_code ?? null) === clientCode) {
+        return row;
+      }
+    }
+  } catch {
+    // FTS query can fail on certain inputs — not critical
+  }
+
+  return undefined;
+}
+
 export function incrementApplied(id: string): void {
   const db = getDb();
   const stmt = db.prepare(

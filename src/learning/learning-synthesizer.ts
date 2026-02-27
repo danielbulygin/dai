@@ -51,13 +51,13 @@ export async function synthesizeLearnings(): Promise<void> {
 
   for (const [groupKey, learnings] of groups) {
     if (learnings.length < 3) continue;
-    const category = groupKey.split('::')[0];
+    const category = groupKey.split('::')[0] ?? groupKey;
 
     try {
       // Process in batches to keep prompt manageable
       for (let i = 0; i < learnings.length; i += BATCH_SIZE) {
         const batch = learnings.slice(i, i + BATCH_SIZE);
-        const result = await synthesizeBatch(category, batch);
+        const result = await synthesizeBatch(category!, batch);
 
         // Execute merges
         for (const merge of result.merge_pairs) {

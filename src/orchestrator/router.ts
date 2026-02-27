@@ -16,6 +16,7 @@ const AGENT_KEYWORDS: ReadonlyMap<string, string> = new Map([
   ["rex", "rex"],
   ["sage", "sage"],
   ["jasmin", "jasmin"],
+  ["ada", "ada"],
 ]);
 
 /**

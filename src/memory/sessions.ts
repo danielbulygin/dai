@@ -150,6 +150,22 @@ export function findRecentSessionForChannel(
   return stmt.get(channelId) as Session | undefined;
 }
 
+/**
+ * Find the agent that owns a thread (most recent active session).
+ * Used for thread continuity — follow-up messages go to the same agent.
+ */
+export function findThreadOwner(
+  channelId: string,
+  threadTs: string,
+): string | undefined {
+  const db = getDb();
+  const stmt = db.prepare(
+    "SELECT agent_id FROM sessions WHERE channel_id = ? AND thread_ts = ? AND status = 'active' ORDER BY updated_at DESC LIMIT 1",
+  );
+  const row = stmt.get(channelId, threadTs) as { agent_id: string } | undefined;
+  return row?.agent_id;
+}
+
 export function getRecentSessions(agentId: string, limit = 10): Session[] {
   const db = getDb();
   const stmt = db.prepare(

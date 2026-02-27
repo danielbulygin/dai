@@ -157,7 +157,7 @@ async function runSimple(
   });
 
   const finalMessage = await stream.finalMessage();
-  const cacheUsage = finalMessage.usage as Record<string, number>;
+  const cacheUsage = finalMessage.usage as unknown as Record<string, number>;
 
   return {
     responseText,
@@ -231,7 +231,7 @@ async function runWithTools(
     const msg = await stream.finalMessage();
     totalInput += msg.usage.input_tokens;
     totalOutput += msg.usage.output_tokens;
-    const cacheUsage = msg.usage as Record<string, number>;
+    const cacheUsage = msg.usage as unknown as Record<string, number>;
     totalCacheRead += cacheUsage.cache_read_input_tokens ?? 0;
     totalCacheCreation += cacheUsage.cache_creation_input_tokens ?? 0;
 
