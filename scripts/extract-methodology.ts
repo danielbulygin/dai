@@ -26,12 +26,15 @@
  *   pnpm extract:methodology -- --batch-size 20        # Meetings per batch
  *   pnpm extract:methodology -- --single-stage         # Skip Stage 1, send full transcript to Opus
  *   pnpm extract:methodology -- --reaggregate          # Re-aggregate raw files (e.g., after normalization changes)
+ *   pnpm extract:methodology -- --load                 # Load aggregated JSON into DAI Supabase + seed SQLite learnings
  */
 
 import Anthropic from "@anthropic-ai/sdk";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import Database from "better-sqlite3";
 import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { nanoid } from "nanoid";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -64,16 +67,24 @@ if (!DAI_SUPABASE_URL || !DAI_SUPABASE_SERVICE_KEY) {
   console.error("Missing DAI_SUPABASE_URL or DAI_SUPABASE_SERVICE_KEY");
   process.exit(1);
 }
-if (!ANTHROPIC_API_KEY) {
-  console.error("Missing ANTHROPIC_API_KEY");
-  process.exit(1);
-}
-
 const supabase: SupabaseClient = createClient(
   DAI_SUPABASE_URL,
   DAI_SUPABASE_SERVICE_KEY,
 );
-const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+
+// Anthropic client is only needed for extraction (not --load or --reaggregate)
+function getAnthropic(): Anthropic {
+  if (!ANTHROPIC_API_KEY) {
+    console.error("Missing ANTHROPIC_API_KEY");
+    process.exit(1);
+  }
+  return new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+}
+let _anthropic: Anthropic | null = null;
+function anthropic(): Anthropic {
+  if (!_anthropic) _anthropic = getAnthropic();
+  return _anthropic;
+}
 
 // ---------------------------------------------------------------------------
 // CLI args
@@ -104,6 +115,7 @@ const singleStage = args.includes("--single-stage");
 const titleMatch = getStringArg("--title-match", "");
 const titleRegex = titleMatch ? new RegExp(titleMatch, "i") : null;
 const reaggregate = args.includes("--reaggregate");
+const loadFlag = args.includes("--load");
 
 // ---------------------------------------------------------------------------
 // Types
@@ -370,7 +382,7 @@ async function filterSnippets(m: MeetingRow): Promise<string | null> {
 
   const date = m.date ? new Date(m.date).toISOString().slice(0, 10) : "unknown";
 
-  const response = await anthropic.messages.create({
+  const response = await anthropic().messages.create({
     model: FILTER_MODEL,
     max_tokens: 16384,
     system: FILTER_SYSTEM,
@@ -495,7 +507,7 @@ async function extractTwoStage(m: MeetingRow): Promise<StageResult> {
   const date = m.date ? new Date(m.date).toISOString().slice(0, 10) : "unknown";
   const speakers = (m.speakers ?? []).join(", ") || "unknown";
 
-  const response = await anthropic.messages.create({
+  const response = await anthropic().messages.create({
     model: EXTRACTION_MODEL,
     max_tokens: 8192,
     system: EXTRACTION_SYSTEM,
@@ -540,7 +552,7 @@ async function extractSingleStage(m: MeetingRow): Promise<StageResult> {
   const date = m.date ? new Date(m.date).toISOString().slice(0, 10) : "unknown";
   const speakers = (m.speakers ?? []).join(", ") || "unknown";
 
-  const response = await anthropic.messages.create({
+  const response = await anthropic().messages.create({
     model: EXTRACTION_MODEL,
     max_tokens: 8192,
     system: EXTRACTION_SYSTEM,
@@ -908,12 +920,270 @@ async function processBatch(
 }
 
 // ---------------------------------------------------------------------------
+// Load to Supabase + seed SQLite learnings (--load)
+// ---------------------------------------------------------------------------
+
+interface MethodologyRow {
+  type: string;
+  title: string;
+  body: Record<string, unknown>;
+  account_code: string | null;
+  category: string | null;
+  confidence: string | null;
+  source_meeting: string;
+  source_date: string;
+  extraction_run: string;
+}
+
+function mapGlobalRules(rules: GlobalRule[], run: string): MethodologyRow[] {
+  return rules.map((r) => ({
+    type: "rule",
+    title: r.rule,
+    body: { rationale: r.rationale, source_quote: r.source_quote },
+    account_code: null,
+    category: null,
+    confidence: r.confidence,
+    source_meeting: r.source_meeting,
+    source_date: r.source_date,
+    extraction_run: run,
+  }));
+}
+
+function mapAccountInsights(
+  insightsByAccount: Map<string, AccountInsight[]>,
+  run: string,
+): MethodologyRow[] {
+  const rows: MethodologyRow[] = [];
+  for (const [code, insights] of insightsByAccount) {
+    for (const i of insights) {
+      rows.push({
+        type: "insight",
+        title: i.insight,
+        body: {},
+        account_code: code,
+        category: i.category,
+        confidence: i.confidence,
+        source_meeting: i.source_meeting,
+        source_date: i.source_date,
+        extraction_run: run,
+      });
+    }
+  }
+  return rows;
+}
+
+function mapDecisionExamples(decisions: DecisionExample[], run: string): MethodologyRow[] {
+  return decisions.map((d) => ({
+    type: "decision",
+    title: `${d.decision_type}: ${d.target}`,
+    body: { reasoning: d.reasoning, outcome_if_known: d.outcome_if_known },
+    account_code: d.account_code,
+    category: d.decision_type,
+    confidence: null,
+    source_meeting: d.source_meeting,
+    source_date: d.source_date,
+    extraction_run: run,
+  }));
+}
+
+function mapCreativePatterns(patterns: CreativePattern[], run: string): MethodologyRow[] {
+  return patterns.map((p) => ({
+    type: "creative_pattern",
+    title: p.pattern,
+    body: { evidence: p.evidence },
+    account_code: p.account_code_if_specific,
+    category: null,
+    confidence: p.confidence,
+    source_meeting: p.source_meeting,
+    source_date: p.source_date,
+    extraction_run: run,
+  }));
+}
+
+function mapMethodologySteps(steps: MethodologyStep[], run: string): MethodologyRow[] {
+  return steps.map((s) => ({
+    type: "methodology",
+    title: s.step,
+    body: { description: s.description, when_to_use: s.when_to_use },
+    account_code: null,
+    category: null,
+    confidence: null,
+    source_meeting: s.source_meeting,
+    source_date: s.source_date,
+    extraction_run: run,
+  }));
+}
+
+async function loadToSupabase(): Promise<void> {
+  console.log("=== Loading methodology knowledge into DAI Supabase ===\n");
+
+  const extractionRun = `phase3-${new Date().toISOString().slice(0, 10)}`;
+
+  // 1. Read aggregated JSON files
+  const globalRulesPath = join(OUTPUT_DIR, "global-rules.json");
+  const decisionExamplesPath = join(OUTPUT_DIR, "decision-examples.json");
+  const creativePatternsPath = join(OUTPUT_DIR, "creative-patterns.json");
+  const methodologyStepsPath = join(OUTPUT_DIR, "methodology-steps.json");
+  const accountInsightsDir = join(OUTPUT_DIR, "account-insights");
+
+  if (!existsSync(globalRulesPath)) {
+    console.error("No aggregated files found. Run extraction first (without --load).");
+    process.exit(1);
+  }
+
+  const globalRules = JSON.parse(readFileSync(globalRulesPath, "utf-8")) as GlobalRule[];
+  const decisionExamples = JSON.parse(readFileSync(decisionExamplesPath, "utf-8")) as DecisionExample[];
+  const creativePatterns = JSON.parse(readFileSync(creativePatternsPath, "utf-8")) as CreativePattern[];
+  const methodologySteps = JSON.parse(readFileSync(methodologyStepsPath, "utf-8")) as MethodologyStep[];
+
+  // Load per-account insight files
+  const accountInsights = new Map<string, AccountInsight[]>();
+  if (existsSync(accountInsightsDir)) {
+    for (const file of readdirSync(accountInsightsDir).filter((f) => f.endsWith(".json"))) {
+      const code = file.replace(".json", "");
+      const insights = JSON.parse(readFileSync(join(accountInsightsDir, file), "utf-8")) as AccountInsight[];
+      accountInsights.set(code, insights);
+    }
+  }
+
+  const insightCount = [...accountInsights.values()].reduce((sum, a) => sum + a.length, 0);
+  console.log(`  Loaded from JSON files:`);
+  console.log(`    Global rules: ${globalRules.length}`);
+  console.log(`    Account insights: ${insightCount} across ${accountInsights.size} accounts`);
+  console.log(`    Decision examples: ${decisionExamples.length}`);
+  console.log(`    Creative patterns: ${creativePatterns.length}`);
+  console.log(`    Methodology steps: ${methodologySteps.length}`);
+
+  // 2. Map to unified schema
+  const allRows: MethodologyRow[] = [
+    ...mapGlobalRules(globalRules, extractionRun),
+    ...mapAccountInsights(accountInsights, extractionRun),
+    ...mapDecisionExamples(decisionExamples, extractionRun),
+    ...mapCreativePatterns(creativePatterns, extractionRun),
+    ...mapMethodologySteps(methodologySteps, extractionRun),
+  ];
+
+  console.log(`\n  Total rows to insert: ${allRows.length}`);
+
+  // 3. Delete existing rows (idempotent re-load)
+  console.log("\n  Clearing existing methodology_knowledge rows...");
+  const { error: deleteError } = await supabase
+    .from("methodology_knowledge")
+    .delete()
+    .neq("id", "00000000-0000-0000-0000-000000000000"); // delete all rows
+
+  if (deleteError) {
+    console.error(`  Failed to delete existing rows: ${deleteError.message}`);
+    process.exit(1);
+  }
+  console.log("  Cleared.");
+
+  // 4. Batch insert into Supabase (chunks of 100)
+  console.log("  Inserting rows...");
+  const BATCH_INSERT_SIZE = 100;
+  let inserted = 0;
+
+  for (let i = 0; i < allRows.length; i += BATCH_INSERT_SIZE) {
+    const batch = allRows.slice(i, i + BATCH_INSERT_SIZE);
+    const { error: insertError } = await supabase
+      .from("methodology_knowledge")
+      .insert(batch);
+
+    if (insertError) {
+      console.error(`  Batch insert failed at offset ${i}: ${insertError.message}`);
+      process.exit(1);
+    }
+    inserted += batch.length;
+    process.stdout.write(`  Inserted ${inserted}/${allRows.length}\r`);
+  }
+  console.log(`  Inserted ${inserted}/${allRows.length} rows into methodology_knowledge.`);
+
+  // 5. Seed SQLite learnings
+  console.log("\n  Seeding SQLite learnings...");
+
+  const dbPath = process.env.DB_PATH ?? "data/dai.db";
+  if (!existsSync(dbPath)) {
+    console.log(`  SQLite DB not found at ${dbPath} — skipping learning seeding.`);
+    console.log("  (Set DB_PATH env var or run the app once to create the database.)");
+  } else {
+    const db = new Database(dbPath);
+    db.pragma("journal_mode = WAL");
+    db.pragma("foreign_keys = ON");
+
+    const ADA_AGENT_ID = "ada";
+    const SOURCE_SESSION = "phase3-extraction";
+
+    // Clean previous phase3 entries
+    const deleteStmt = db.prepare("DELETE FROM learnings WHERE source_session_id = ?");
+    const deleteResult = deleteStmt.run(SOURCE_SESSION);
+    console.log(`  Cleaned ${deleteResult.changes} previous phase3 learnings.`);
+
+    // Seed high-confidence global rules as methodology_rule
+    const insertStmt = db.prepare(
+      "INSERT INTO learnings (id, agent_id, category, content, confidence, source_session_id, client_code) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    );
+
+    let seededRules = 0;
+    const insertMany = db.transaction(() => {
+      for (const rule of globalRules) {
+        if (rule.confidence === "high") {
+          insertStmt.run(
+            nanoid(),
+            ADA_AGENT_ID,
+            "methodology_rule",
+            `${rule.rule}\n\nRationale: ${rule.rationale}`,
+            0.8,
+            SOURCE_SESSION,
+            null,
+          );
+          seededRules++;
+        }
+      }
+
+      // Seed high-confidence account insights as account_knowledge
+      let seededInsights = 0;
+      for (const [code, insights] of accountInsights) {
+        for (const insight of insights) {
+          if (insight.confidence === "high") {
+            insertStmt.run(
+              nanoid(),
+              ADA_AGENT_ID,
+              "account_knowledge",
+              insight.insight,
+              0.7,
+              SOURCE_SESSION,
+              code,
+            );
+            seededInsights++;
+          }
+        }
+      }
+      console.log(`  Seeded ${seededRules} high-confidence rules as methodology_rule.`);
+      console.log(`  Seeded ${seededInsights} high-confidence insights as account_knowledge.`);
+    });
+    insertMany();
+
+    db.close();
+  }
+
+  console.log("\n=== Load complete ===");
+  console.log(`  Supabase: ${allRows.length} rows in methodology_knowledge`);
+  console.log(`  Extraction run: ${extractionRun}`);
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
   const startTime = Date.now();
   console.log("=== Phase 3: Methodology Extraction from Transcripts ===\n");
+
+  // --load: load aggregated JSON into Supabase + seed SQLite learnings
+  if (loadFlag) {
+    await loadToSupabase();
+    return;
+  }
 
   // --reaggregate: re-aggregate existing raw files without re-extracting
   if (reaggregate) {

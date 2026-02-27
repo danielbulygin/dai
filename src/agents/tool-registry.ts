@@ -9,6 +9,7 @@ import * as notionTools from './tools/notion-tools.js';
 import * as monitoringTools from './tools/monitoring-tools.js';
 import * as decisionTools from './tools/decision-tools.js';
 import * as clientConfigTools from './tools/client-config-tools.js';
+import * as methodologyTools from './tools/methodology-tools.js';
 import { logger } from '../utils/logger.js';
 
 // ---------------------------------------------------------------------------
@@ -1130,6 +1131,53 @@ register({
       agent_id: context.agentId,
     });
     return JSON.stringify(result);
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Methodology knowledge tools (DAI Supabase)
+// ---------------------------------------------------------------------------
+
+register({
+  definition: {
+    name: 'search_methodology',
+    description:
+      'Search extracted media buying methodology knowledge from meeting transcripts. Contains global rules, account-specific insights, decision examples, creative patterns, and methodology steps. Use to ground analysis in proven patterns and past decisions.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Free-text search query (e.g. "frequency fatigue", "hook rate creative")',
+        },
+        type: {
+          type: 'string',
+          enum: ['rule', 'insight', 'decision', 'creative_pattern', 'methodology'],
+          description: 'Filter by knowledge type: rule (global principles), insight (account-specific), decision (kill/scale/pause examples), creative_pattern, methodology (analytical workflows)',
+        },
+        accountCode: {
+          type: 'string',
+          description: 'Filter by account code (e.g. "ninepine", "press_london"). Also returns global entries.',
+        },
+        category: {
+          type: 'string',
+          description: 'Filter by subcategory (e.g. "what_works", "quirk", "kill", "scale")',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum results (default 20)',
+        },
+      },
+    },
+  },
+  async execute(input) {
+    return await methodologyTools.searchMethodology({
+      query: input.query as string | undefined,
+      type: input.type as string | undefined,
+      accountCode: input.accountCode as string | undefined,
+      category: input.category as string | undefined,
+      limit: input.limit as number | undefined,
+    });
   },
 });
 

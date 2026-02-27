@@ -13,6 +13,7 @@ export const toolProfiles = {
     'search_meetings', 'get_meeting_summary', 'get_meeting_transcript', 'list_recent_meetings',
     'post_message', 'reply_in_thread',
     'log_decision',
+    'search_methodology',
   ],
 } as const;
 
