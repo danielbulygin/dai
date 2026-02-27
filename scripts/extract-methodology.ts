@@ -31,7 +31,6 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import Database from "better-sqlite3";
 import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { nanoid } from "nanoid";
@@ -217,12 +216,19 @@ const ACCOUNT_CODE_ALIASES: Record<string, string> = {
   audibena: "audibene",
   audibina: "audibene",
   audibana: "audibene",
+  audibane: "audibene",
+  audiben: "audibene",
+  audi_bayonet: "audibene",
   // Laori (BMAD: LA)
   lowry: "laori",
   laurie: "laori",
   lori: "laori",
   lauri: "laori",
   loris: "laori",
+  lahori: "laori",
+  lowe: "laori",
+  lower: "laori",
+  lowri: "laori",
   // URVI (BMAD: URV)
   irvy: "urvi",
   irvie: "urvi",
@@ -231,13 +237,19 @@ const ACCOUNT_CODE_ALIASES: Record<string, string> = {
   // Teethlovers (BMAD: TL)
   tea_lovers: "teethlovers",
   teeth_lovers: "teethlovers",
+  tape_lovers: "teethlovers",
+  loli_lovers: "teethlovers",
+  luke_teeth: "teethlovers",
   // Vi Lifestyle (BMAD: VL)
   v_lifestyle: "vi_lifestyle",
   vlifestyle: "vi_lifestyle",
   vlive: "vi_lifestyle",
+  v: "vi_lifestyle",
+  v_health: "vi_lifestyle",
   // JV Academy (BMAD: JVA)
   jv: "jva",
   jv_academy: "jva",
+  my_it_academy: "jva",
   // Strayz (BMAD: meow)
   strays: "strayz",
   stray: "strayz",
@@ -245,6 +257,7 @@ const ACCOUNT_CODE_ALIASES: Record<string, string> = {
   nine_pine: "ninepine",
   // Slumber (BMAD: SLB)
   slumber_pod: "slumber",
+  slumber_night_lights: "slumber",
   // Press London (BMAD: PL)
   press: "press_london",
   // Nothings Something (BMAD: NOSO)
@@ -252,15 +265,48 @@ const ACCOUNT_CODE_ALIASES: Record<string, string> = {
   // Hausmed (former client, phonetic variants)
   housemade: "hausmed",
   housemate: "hausmed",
+  hausmat: "hausmed",
+  housemaid: "hausmed",
+  house_med_live: "hausmed",
   // Stella = Laori founder, insights belong to Laori
   stella: "laori",
+  stella_ecomm: "laori",
   // Tillman = URVI founder, insights belong to URVI
   tillman: "urvi",
-  // AOT Academy = Ads on Tap's own academy (also "online_course")
+  // AOT / Ads on Tap
   aot_academy: "aot_academy",
   online_course: "aot_academy",
+  ads_on_tap: "aot_academy",
+  adsontap: "aot_academy",
   // Kid Lovers → Teethlovers (phonetic confusion in transcript)
   kid_lovers: "teethlovers",
+  // GermaniKüre (German skincare client)
+  germanikure: "germanikure",
+  germankure: "germanikure",
+  germanica: "germanikure",
+  germanic: "germanikure",
+  germanicure: "germanikure",
+  // Lifeseeds (supplement brand)
+  lifeseed: "lifeseeds",
+  liveseeds: "lifeseeds",
+  liveseed: "lifeseeds",
+  lifeseats: "lifeseeds",
+  live_seeds: "lifeseeds",
+  live_sits: "lifeseeds",
+  // Sunwarrior (vegan protein)
+  sun_warrior: "sunwarrior",
+  // Zodiac
+  zodiaque: "zodiac",
+  // Tebalou (children's products)
+  tableau: "tebalou",
+  // Pip Decks
+  pipdex: "pip_decks",
+  piptex: "pip_decks",
+  // Power Sprout / Power Spotter (phonetic variants)
+  power_spotter: "powersprout",
+  powertrain: "powersprout",
+  // Prime Routes/Roots
+  prime_routes: "prime_roots",
 };
 
 /** Normalize an account code to its canonical form */
@@ -1098,72 +1144,70 @@ async function loadToSupabase(): Promise<void> {
   }
   console.log(`  Inserted ${inserted}/${allRows.length} rows into methodology_knowledge.`);
 
-  // 5. Seed SQLite learnings
-  console.log("\n  Seeding SQLite learnings...");
+  // 5. Seed learnings in DAI Supabase
+  console.log("\n  Seeding learnings in Supabase...");
 
-  const dbPath = process.env.DB_PATH ?? "data/dai.db";
-  if (!existsSync(dbPath)) {
-    console.log(`  SQLite DB not found at ${dbPath} — skipping learning seeding.`);
-    console.log("  (Set DB_PATH env var or run the app once to create the database.)");
+  const daiUrl = process.env.DAI_SUPABASE_URL;
+  const daiKey = process.env.DAI_SUPABASE_SERVICE_KEY;
+  if (!daiUrl || !daiKey) {
+    console.log("  DAI_SUPABASE_URL/DAI_SUPABASE_SERVICE_KEY not set — skipping learning seeding.");
   } else {
-    const db = new Database(dbPath);
-    db.pragma("journal_mode = WAL");
-    db.pragma("foreign_keys = ON");
-
+    const daiSupa = createClient(daiUrl, daiKey);
     const ADA_AGENT_ID = "ada";
     const SOURCE_SESSION = "phase3-extraction";
 
     // Clean previous phase3 entries
-    const deleteStmt = db.prepare("DELETE FROM learnings WHERE source_session_id = ?");
-    const deleteResult = deleteStmt.run(SOURCE_SESSION);
-    console.log(`  Cleaned ${deleteResult.changes} previous phase3 learnings.`);
+    const { data: deleted } = await daiSupa
+      .from("learnings")
+      .delete()
+      .eq("source_session_id", SOURCE_SESSION)
+      .select("id");
+    console.log(`  Cleaned ${deleted?.length ?? 0} previous phase3 learnings.`);
 
     // Seed high-confidence global rules as methodology_rule
-    const insertStmt = db.prepare(
-      "INSERT INTO learnings (id, agent_id, category, content, confidence, source_session_id, client_code) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    );
+    const ruleRows: Array<Record<string, unknown>> = [];
+    for (const rule of globalRules) {
+      if (rule.confidence === "high") {
+        ruleRows.push({
+          id: nanoid(),
+          agent_id: ADA_AGENT_ID,
+          category: "methodology_rule",
+          content: `${rule.rule}\n\nRationale: ${rule.rationale}`,
+          confidence: 0.8,
+          source_session_id: SOURCE_SESSION,
+          client_code: null,
+        });
+      }
+    }
+    if (ruleRows.length > 0) {
+      await daiSupa.from("learnings").insert(ruleRows);
+    }
+    console.log(`  Seeded ${ruleRows.length} high-confidence rules as methodology_rule.`);
 
-    let seededRules = 0;
-    const insertMany = db.transaction(() => {
-      for (const rule of globalRules) {
-        if (rule.confidence === "high") {
-          insertStmt.run(
-            nanoid(),
-            ADA_AGENT_ID,
-            "methodology_rule",
-            `${rule.rule}\n\nRationale: ${rule.rationale}`,
-            0.8,
-            SOURCE_SESSION,
-            null,
-          );
-          seededRules++;
+    // Seed high-confidence account insights as account_knowledge
+    const insightRows: Array<Record<string, unknown>> = [];
+    for (const [code, insights] of accountInsights) {
+      for (const insight of insights) {
+        if (insight.confidence === "high") {
+          insightRows.push({
+            id: nanoid(),
+            agent_id: ADA_AGENT_ID,
+            category: "account_knowledge",
+            content: insight.insight,
+            confidence: 0.7,
+            source_session_id: SOURCE_SESSION,
+            client_code: code,
+          });
         }
       }
-
-      // Seed high-confidence account insights as account_knowledge
-      let seededInsights = 0;
-      for (const [code, insights] of accountInsights) {
-        for (const insight of insights) {
-          if (insight.confidence === "high") {
-            insertStmt.run(
-              nanoid(),
-              ADA_AGENT_ID,
-              "account_knowledge",
-              insight.insight,
-              0.7,
-              SOURCE_SESSION,
-              code,
-            );
-            seededInsights++;
-          }
-        }
+    }
+    if (insightRows.length > 0) {
+      // Insert in batches of 500
+      for (let i = 0; i < insightRows.length; i += 500) {
+        await daiSupa.from("learnings").insert(insightRows.slice(i, i + 500));
       }
-      console.log(`  Seeded ${seededRules} high-confidence rules as methodology_rule.`);
-      console.log(`  Seeded ${seededInsights} high-confidence insights as account_knowledge.`);
-    });
-    insertMany();
-
-    db.close();
+    }
+    console.log(`  Seeded ${insightRows.length} high-confidence insights as account_knowledge.`);
   }
 
   console.log("\n=== Load complete ===");
