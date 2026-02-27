@@ -184,6 +184,14 @@ export function runMigrations(db: BetterSqlite3.Database): void {
   db.exec(TABLES_SQL);
   logger.debug("Tables created");
 
+  // Incremental migrations — must run BEFORE indexes that reference new columns
+  try {
+    db.exec("ALTER TABLE learnings ADD COLUMN client_code TEXT DEFAULT NULL");
+    logger.debug("Added client_code column to learnings");
+  } catch {
+    // Column already exists — expected on subsequent runs
+  }
+
   db.exec(INDEXES_SQL);
   logger.debug("Indexes created");
 
@@ -192,14 +200,6 @@ export function runMigrations(db: BetterSqlite3.Database): void {
 
   db.exec(TRIGGERS_SQL);
   logger.debug("Triggers created");
-
-  // Incremental migrations for existing databases
-  try {
-    db.exec("ALTER TABLE learnings ADD COLUMN client_code TEXT DEFAULT NULL");
-    logger.debug("Added client_code column to learnings");
-  } catch {
-    // Column already exists — expected on subsequent runs
-  }
 
   logger.info("Database migrations complete");
 }

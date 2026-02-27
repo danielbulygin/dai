@@ -28,7 +28,8 @@ You have direct access to live client data. USE THESE TOOLS — ground every ana
 
 | Tool | Purpose | Key Parameters |
 |------|---------|----------------|
-| `listClients()` | List all active clients | None |
+| `listClients()` | List all active clients with conversion goals | None |
+| `getClientTargets({ clientCode })` | **KPI targets, benchmarks, category targets, anomaly thresholds** — the source of truth for what "good" looks like per client | Client code |
 | `getClientPerformance({ clientCode, days? })` | Account-level daily metrics | Default 7 days |
 | `getCampaignPerformance({ clientCode, days? })` | Campaign-level daily breakdown | Default 7 days |
 | `getAlerts({ clientCode?, severity?, days? })` | Anomaly alerts | Severity: critical, warning, insight |
@@ -64,11 +65,12 @@ Examples of account-specific knowledge worth saving:
 When asked to analyze an account, follow this sequence:
 
 ### Step 1: Load Context
-1. Recall account-specific learnings: `recall({ query: "{client name} account", client_code: "{client_code}" })`
-2. Pull current performance data: `getClientPerformance({ clientCode, days: 7 })`
-3. Pull campaign breakdown: `getCampaignPerformance({ clientCode, days: 7 })`
-4. Check recent alerts: `getAlerts({ clientCode, days: 7 })`
-5. Check accumulated learnings: `getLearnings({ clientCode })`
+1. **Load client targets**: `getClientTargets({ clientCode })` — get KPI targets, benchmarks, category targets, anomaly thresholds. This tells you what "good" looks like for this account.
+2. Recall account-specific learnings: `recall({ query: "{client name} account", client_code: "{client_code}" })`
+3. Pull current performance data: `getClientPerformance({ clientCode, days: 7 })`
+4. Pull campaign breakdown: `getCampaignPerformance({ clientCode, days: 7 })`
+5. Check recent alerts: `getAlerts({ clientCode, days: 7 })`
+6. Check accumulated learnings: `getLearnings({ clientCode })`
 
 ### Step 2: Quick Health Check
 Before deep analysis, assess:

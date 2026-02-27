@@ -8,6 +8,7 @@ import * as firefliesTools from './tools/fireflies-tools.js';
 import * as notionTools from './tools/notion-tools.js';
 import * as monitoringTools from './tools/monitoring-tools.js';
 import * as decisionTools from './tools/decision-tools.js';
+import * as clientConfigTools from './tools/client-config-tools.js';
 import { logger } from '../utils/logger.js';
 
 // ---------------------------------------------------------------------------
@@ -660,6 +661,33 @@ register({
       creativeId: input.creativeId as string | undefined,
       adId: input.adId as string | undefined,
       onlyFatigued: input.onlyFatigued as boolean | undefined,
+    });
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Client config tools (BMAD YAML files)
+// ---------------------------------------------------------------------------
+
+register({
+  definition: {
+    name: 'get_client_targets',
+    description:
+      'Get the full KPI targets, benchmarks, anomaly thresholds, and analysis config for a client. Reads from the BMAD ads-config.yaml. Includes primary KPI, target values, category-specific targets, funnel benchmarks, budget, and markets.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        clientCode: {
+          type: 'string',
+          description: 'Client code (e.g. "ninepine", "press_london")',
+        },
+      },
+      required: ['clientCode'],
+    },
+  },
+  async execute(input) {
+    return await clientConfigTools.getClientTargets({
+      clientCode: input.clientCode as string,
     });
   },
 });
