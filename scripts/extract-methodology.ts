@@ -25,11 +25,12 @@
  *   pnpm extract:methodology -- --concurrency 3        # Parallel API calls
  *   pnpm extract:methodology -- --batch-size 20        # Meetings per batch
  *   pnpm extract:methodology -- --single-stage         # Skip Stage 1, send full transcript to Opus
+ *   pnpm extract:methodology -- --reaggregate          # Re-aggregate raw files (e.g., after normalization changes)
  */
 
 import Anthropic from "@anthropic-ai/sdk";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 // ---------------------------------------------------------------------------
@@ -102,6 +103,7 @@ const priorityFilter = getStringArg("--priority", "all");
 const singleStage = args.includes("--single-stage");
 const titleMatch = getStringArg("--title-match", "");
 const titleRegex = titleMatch ? new RegExp(titleMatch, "i") : null;
+const reaggregate = args.includes("--reaggregate");
 
 // ---------------------------------------------------------------------------
 // Types
@@ -190,6 +192,54 @@ interface Progress {
 }
 
 type MeetingPriority = "p1_nina_daniel" | "p2_client_specific" | "p3_general";
+
+// ---------------------------------------------------------------------------
+// Account code normalization
+// ---------------------------------------------------------------------------
+// LLMs extract account names phonetically from audio transcripts, producing
+// variant spellings. This map normalizes them to canonical lowercase codes
+// that match BMAD Supabase `clients.code` (lowercased).
+
+const ACCOUNT_CODE_ALIASES: Record<string, string> = {
+  // Audibene (BMAD: AB)
+  audibena: "audibene",
+  audibina: "audibene",
+  audibana: "audibene",
+  // Laori (BMAD: LA)
+  lowry: "laori",
+  laurie: "laori",
+  lori: "laori",
+  // URVI (BMAD: URV)
+  irvy: "urvi",
+  irvie: "urvi",
+  irvi: "urvi",
+  // Teethlovers (BMAD: TL)
+  tea_lovers: "teethlovers",
+  teeth_lovers: "teethlovers",
+  // Vi Lifestyle (BMAD: VL)
+  v_lifestyle: "vi_lifestyle",
+  vlifestyle: "vi_lifestyle",
+  // JV Academy (BMAD: JVA)
+  jv: "jva",
+  jv_academy: "jva",
+  // Strayz (BMAD: meow)
+  strays: "strayz",
+  stray: "strayz",
+  // Ninepine (BMAD: NP)
+  nine_pine: "ninepine",
+  // Slumber (BMAD: SLB)
+  slumber_pod: "slumber",
+  // Press London (BMAD: PL)
+  press: "press_london",
+  // Nothings Something (BMAD: NOSO)
+  nothings_something: "noso",
+};
+
+/** Normalize an account code to its canonical form */
+function normalizeAccountCode(code: string): string {
+  const normalized = code.toLowerCase().replace(/\s+/g, "_").trim();
+  return ACCOUNT_CODE_ALIASES[normalized] ?? normalized;
+}
 
 // ---------------------------------------------------------------------------
 // Meeting classification
@@ -618,16 +668,31 @@ function aggregateResults(resultFiles: string[]): {
     }
   }
 
+  // Normalize all account codes before deduplication
+  for (const insight of allInsights) {
+    insight.account_code = normalizeAccountCode(insight.account_code);
+  }
+  for (const decision of allDecisions) {
+    decision.account_code = normalizeAccountCode(decision.account_code);
+  }
+  for (const pattern of allCreative) {
+    if (pattern.account_code_if_specific) {
+      pattern.account_code_if_specific = normalizeAccountCode(
+        pattern.account_code_if_specific,
+      );
+    }
+  }
+
   // Deduplicate each category
   const globalRules = deduplicateByContent(allRules, "rule");
   const decisionExamples = deduplicateByContent(allDecisions, "reasoning");
   const creativePatterns = deduplicateByContent(allCreative, "pattern");
   const methodologySteps = deduplicateByContent(allMethodology, "description");
 
-  // Group account insights by account code, then deduplicate within each
+  // Group account insights by normalized code, then deduplicate within each
   const accountInsights = new Map<string, AccountInsight[]>();
   for (const insight of allInsights) {
-    const code = insight.account_code.toLowerCase().replace(/\s+/g, "_");
+    const code = insight.account_code;
     const existing = accountInsights.get(code) ?? [];
     existing.push(insight);
     accountInsights.set(code, existing);
@@ -656,8 +721,13 @@ function writeOutputFiles(agg: ReturnType<typeof aggregateResults>): void {
     JSON.stringify(agg.globalRules, null, 2),
   );
 
-  // Per-account insights
+  // Per-account insights — clear old files first to avoid stale aliases
   const accountDir = join(OUTPUT_DIR, "account-insights");
+  if (existsSync(accountDir)) {
+    for (const f of readdirSync(accountDir)) {
+      if (f.endsWith(".json")) unlinkSync(join(accountDir, f));
+    }
+  }
   mkdirSync(accountDir, { recursive: true });
   for (const [code, insights] of agg.accountInsights) {
     writeFileSync(
@@ -828,6 +898,31 @@ async function processBatch(
 async function main(): Promise<void> {
   const startTime = Date.now();
   console.log("=== Phase 3: Methodology Extraction from Transcripts ===\n");
+
+  // --reaggregate: re-aggregate existing raw files without re-extracting
+  if (reaggregate) {
+    console.log("Re-aggregating existing raw results with updated normalization...\n");
+    const rawFiles = readdirSync(RAW_DIR)
+      .filter((f) => f.endsWith(".json"))
+      .map((f) => join(RAW_DIR, f));
+    console.log(`  Found ${rawFiles.length} raw extraction files`);
+
+    const aggregated = aggregateResults(rawFiles);
+    writeOutputFiles(aggregated);
+
+    const insightCount = [...aggregated.accountInsights.values()].reduce(
+      (sum, a) => sum + a.length,
+      0,
+    );
+    console.log(`\n=== Re-aggregation complete ===`);
+    console.log(`  Global rules: ${aggregated.globalRules.length}`);
+    console.log(`  Account insights: ${insightCount} across ${aggregated.accountInsights.size} accounts`);
+    console.log(`  Decision examples: ${aggregated.decisionExamples.length}`);
+    console.log(`  Creative patterns: ${aggregated.creativePatterns.length}`);
+    console.log(`  Methodology steps: ${aggregated.methodologySteps.length}`);
+    return;
+  }
+
   const pipeline = singleStage ? "single-stage (Opus only)" : `two-stage (${FILTER_MODEL} → ${EXTRACTION_MODEL})`;
   console.log(
     `Config: pipeline=${pipeline}, batch_size=${batchSize}, concurrency=${concurrency}, ` +
