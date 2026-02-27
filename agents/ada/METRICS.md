@@ -1,5 +1,35 @@
 # Ada's Metric Reference
 
+## Client Types & Applicable Metrics
+
+Not all clients have the same funnel. Always check the client's `conversion_goals` field from `listClients()` to determine the type.
+
+### E-Commerce Clients (e.g. Ninepine, Press London, Laori)
+- **Primary KPI:** ROAS, CPA (cost per purchase), Revenue per Click
+- **Full funnel available:** Impressions → Clicks → LPV → Content Views → ATC → IC → Purchase
+- **All funnel metrics apply:** ATC rate, checkout rate, conversion rate, AOV, purchase value
+
+### Lead Generation Clients (e.g. Brain.fm, Slumber)
+- **Primary KPI:** CPL (cost per lead), Cost per Registration, CPA (cost per trial/signup)
+- **Funnel:** Impressions → Clicks → LPV → Lead/Registration
+- **NO e-com funnel metrics:** add_to_carts, checkouts_initiated, purchases, purchase_value, ROAS, ATC rate, checkout rate, AOV are all **null/zero** — do not flag their absence as anomalies
+- **Use instead:** leads, complete_registrations, results, cost_per_result
+
+### App Install Clients
+- **Primary KPI:** CPI (cost per install), Cost per Trial
+- **Funnel:** Impressions → Clicks → Install → Trial → Subscription
+- **Same exclusions as lead gen** — no e-com funnel metrics
+
+### How to Tell
+1. Check `conversion_goals` from the clients table — it states the target event
+2. If `purchases` and `purchase_value` are consistently 0 across all days, it's NOT e-commerce
+3. If `leads` or `complete_registrations` are the primary non-zero conversion events, it's lead gen
+4. When in doubt, check `results` and `cost_per_result` — these are objective-agnostic
+
+**CRITICAL:** Never diagnose "broken funnel" for a lead gen client because ATC/checkout metrics are zero. That's expected, not an anomaly.
+
+---
+
 ## Available Metrics by Level
 
 ### Account Level (get_client_performance)
@@ -163,24 +193,40 @@ Rich creative metadata with scoring and fatigue detection.
 
 These are NOT stored in the database — compute them from raw columns.
 
+### Universal Metrics (all client types)
+
 | Metric | Formula | When to Use | Benchmark |
 |--------|---------|-------------|-----------|
 | Hook Rate | video_p25 / impressions | Scroll-stopping power (use pre-calc column at ad level) | 25-30%+ good, 30%+ excellent |
 | Hold Rate | video_avg_time / video_duration | Content engagement depth (use pre-calc column at ad level) | 20-40% typical |
 | Thruplay Rate | thruplays / impressions | 15s+ engagement rate | 10-20% typical |
+| Cost per Click (Link) | spend / link_clicks | Traffic efficiency | Varies by vertical |
+| Landing Page View Rate | landing_page_views / link_clicks | Page load success rate | 70-90% typical |
+| Video Drop-off | 1 - (video_p100 / video_p25) | Content retention loss | 60-80% drop is normal |
+
+### E-Commerce Only
+
+| Metric | Formula | When to Use | Benchmark |
+|--------|---------|-------------|-----------|
 | PDP View Rate | content_views / link_clicks | Landing page effectiveness — are clicks reaching product pages? | 60-80% typical |
-| ATC Rate | add_to_carts / content_views | E-commerce funnel: product page → cart | 5-15% typical |
+| ATC Rate | add_to_carts / content_views | E-com funnel: product page → cart | 5-15% typical |
 | Checkout Rate | checkouts_initiated / add_to_carts | Cart abandonment signal | 40-70% typical |
 | Conversion Rate | purchases / link_clicks | Full-funnel efficiency from click to purchase | 1-5% typical |
 | Revenue per Click | purchase_value / link_clicks | Attribution-independent efficiency metric — Daniel's preferred KPI | Account-specific |
-| Cost per Click (Link) | spend / link_clicks | Traffic efficiency | Varies by vertical |
-| CPA | spend / purchases | Cost per acquisition | Account-specific target |
+| CPA (purchase) | spend / purchases | Cost per purchase | Account-specific target |
 | AOV | purchase_value / purchases | Average order value — needed to contextualize CPA | Account-specific |
 | ROAS | purchase_value / spend | Return on ad spend (also available pre-calculated) | Account-specific target |
 | Cost per ATC | spend / add_to_carts | Upper-funnel cost efficiency | $5-15 typical e-com |
-| Cost per Lead | spend / leads | Lead-gen primary metric | Account-specific target |
-| Landing Page View Rate | landing_page_views / link_clicks | Page load success rate | 70-90% typical |
-| Video Drop-off | 1 - (video_p100 / video_p25) | Content retention loss | 60-80% drop is normal |
+
+### Lead Gen / App Install Only
+
+| Metric | Formula | When to Use | Benchmark |
+|--------|---------|-------------|-----------|
+| CPL | spend / leads | Cost per lead — primary lead gen metric | Account-specific target |
+| Cost per Registration | spend / complete_registrations | Cost per completed signup/trial | Account-specific target |
+| Lead Rate | leads / link_clicks | Click-to-lead conversion rate | 5-20% typical |
+| Registration Rate | complete_registrations / leads | Lead-to-registration completion rate | 30-70% typical |
+| Cost per Result | spend / results | Objective-agnostic cost metric — works for any client type | Account-specific target |
 
 ---
 
@@ -188,7 +234,7 @@ These are NOT stored in the database — compute them from raw columns.
 
 These are multi-metric patterns that indicate specific problems. Never diagnose from a single metric.
 
-### Out of Stock Signal
+### Out of Stock Signal (E-COM ONLY)
 - **Pattern:** ATC rate drops >40% vs 7-day avg AND CTR stable AND traffic stable
 - **Confidence:** High if affects specific products, not whole account
 - **Action:** Alert P0, check product availability
@@ -230,7 +276,7 @@ These are multi-metric patterns that indicate specific problems. Never diagnose 
 - **Action:** Alert P1, need audience expansion or new TOF campaign
 - **Verify:** Check reach trend and compare audience overlap between ad sets
 
-### Attribution Window Shift
+### Attribution Window Shift (E-COM ONLY)
 - **Pattern:** ROAS drops but revenue per click stable
 - **Confidence:** Medium — could be attribution model change or iOS signal loss
 - **Action:** Cross-reference with Shopify/GA data, check revenue per click trend
@@ -242,11 +288,17 @@ These are multi-metric patterns that indicate specific problems. Never diagnose 
 - **Action:** Alert P1, exclude Audience Network or add placement targeting
 - **Verify:** Check placement breakdown via `get_breakdowns({ breakdownType: 'placement' })`
 
-### Checkout Friction Signal
+### Checkout Friction Signal (E-COM ONLY)
 - **Pattern:** ATC rate stable AND checkout rate drops >30% AND checkout_abandonment_rate rising
 - **Confidence:** High — issue is between cart and purchase
 - **Action:** Alert P1, check checkout flow (shipping costs, payment options, promo codes)
 - **Verify:** Check if issue is device-specific or country-specific via breakdowns
+
+### Lead Quality Degradation Signal (LEAD GEN ONLY)
+- **Pattern:** CPL decreasing or stable BUT downstream conversion rate (registration/trial) dropping
+- **Confidence:** Medium-high — cheap leads that don't convert are worse than expensive ones that do
+- **Action:** Alert P1, investigate audience quality — likely reaching less qualified prospects
+- **Verify:** Check if targeting changed recently via `get_account_changes`, compare lead rate across ad sets
 
 ### Scaling Degradation Signal
 - **Pattern:** Budget increased >30% in last 3 days (check account_changes) AND CPA rising >20% AND frequency rising

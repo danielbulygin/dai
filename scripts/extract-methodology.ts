@@ -1,9 +1,16 @@
 /**
  * Phase 3: Bulk methodology extraction from meeting transcripts.
  *
- * Reads all 2,472 Fireflies meeting transcripts from DAI Supabase,
- * filters to media-buying-relevant meetings, and extracts structured
- * methodology using Claude Opus.
+ * Two-stage pipeline for cost efficiency:
+ *   Stage 1 (Haiku — cheap): Scan full transcript, extract only the relevant
+ *     media-buying snippets. Meetings with no relevant content are skipped.
+ *   Stage 2 (Opus — deep): Structured methodology extraction from the
+ *     concentrated snippets only.
+ *
+ * This saves ~50-70% vs sending full transcripts to Opus, because:
+ *   - Most transcripts are 80% greetings, scheduling, off-topic
+ *   - Meetings with zero media buying content skip Stage 2 entirely
+ *   - Opus processes 2-5k tokens of focused content instead of 20-40k
  *
  * Output: data/extraction/*.json files with global rules, account insights,
  * creative patterns, decision examples, and methodology steps.
@@ -17,6 +24,7 @@
  *   pnpm extract:methodology -- --resume               # Resume from last run
  *   pnpm extract:methodology -- --concurrency 3        # Parallel API calls
  *   pnpm extract:methodology -- --batch-size 20        # Meetings per batch
+ *   pnpm extract:methodology -- --single-stage         # Skip Stage 1, send full transcript to Opus
  */
 
 import Anthropic from "@anthropic-ai/sdk";
@@ -28,7 +36,8 @@ import { join } from "node:path";
 // Config
 // ---------------------------------------------------------------------------
 
-const EXTRACTION_MODEL = "claude-opus-4-6";
+const FILTER_MODEL = "claude-haiku-4-5-20251001"; // Stage 1: cheap snippet extraction
+const EXTRACTION_MODEL = "claude-opus-4-6"; // Stage 2: deep structured extraction
 const MAX_TRANSCRIPT_CHARS = 80_000;
 const REQUEST_DELAY_MS = 2_000;
 const DEFAULT_BATCH_SIZE = 50;
@@ -86,6 +95,7 @@ function getStringArg(flag: string, fallback: string): string {
   return idx !== -1 && args[idx + 1] ? args[idx + 1]! : fallback;
 }
 const priorityFilter = getStringArg("--priority", "all");
+const singleStage = args.includes("--single-stage");
 
 // ---------------------------------------------------------------------------
 // Types
@@ -254,14 +264,76 @@ function classifyMeeting(
 }
 
 // ---------------------------------------------------------------------------
-// Extraction prompt
+// Stage 1: Snippet filtering (Haiku — cheap)
 // ---------------------------------------------------------------------------
 
-const EXTRACTION_SYSTEM = `You are extracting media buying knowledge from a meeting transcript.
+const FILTER_SYSTEM = `You extract media-buying-relevant snippets from meeting transcripts.
+
+Context: Daniel Bulygin runs performance marketing at Ads on Tap agency. Nina is a senior media buyer. They manage Meta/Facebook ad accounts for e-commerce and lead gen clients.
+
+Your job: Read the transcript and extract ONLY the portions that discuss:
+- Ad account performance (metrics, results, trends)
+- Optimization decisions (kill, scale, pause, restructure campaigns/ad sets/ads)
+- Creative analysis (hook rates, hold rates, what's working, what's not)
+- Methodology (how they diagnose issues, analytical frameworks, decision processes)
+- Account-specific patterns (what works for this client, quirks, audience insights)
+- Strategic principles (general rules Daniel/Nina state about media buying)
+
+RULES:
+- Copy the relevant dialogue VERBATIM — do not summarize or paraphrase
+- Include enough surrounding context so each snippet makes sense standalone
+- Include the speaker name for each line
+- Separate distinct topics with "---"
+- If the meeting has NO media buying content at all, respond with exactly: NO_RELEVANT_CONTENT
+- Do NOT include: greetings, scheduling, small talk, HR topics, unrelated business discussion
+- Aim for the minimum text that captures all the methodology and insights`;
+
+async function filterSnippets(m: MeetingRow): Promise<string | null> {
+  let transcript = m.full_transcript ?? "";
+  if (transcript.length > MAX_TRANSCRIPT_CHARS) {
+    transcript =
+      transcript.slice(0, MAX_TRANSCRIPT_CHARS) +
+      "\n\n[... transcript truncated]";
+  }
+
+  const date = m.date ? new Date(m.date).toISOString().slice(0, 10) : "unknown";
+
+  const response = await anthropic.messages.create({
+    model: FILTER_MODEL,
+    max_tokens: 16384,
+    system: FILTER_SYSTEM,
+    messages: [
+      {
+        role: "user",
+        content: `Meeting: ${m.title ?? "Untitled"} (${date})\nSpeakers: ${(m.speakers ?? []).join(", ")}\n\nTranscript:\n${transcript}`,
+      },
+    ],
+  });
+
+  const text = response.content
+    .filter((block): block is Anthropic.TextBlock => block.type === "text")
+    .map((block) => block.text)
+    .join("")
+    .trim();
+
+  if (text === "NO_RELEVANT_CONTENT" || text.length < 100) {
+    return null;
+  }
+
+  return text;
+}
+
+// ---------------------------------------------------------------------------
+// Stage 2: Deep extraction (Opus)
+// ---------------------------------------------------------------------------
+
+const EXTRACTION_SYSTEM = `You are extracting media buying knowledge from pre-filtered meeting snippets.
 
 The speaker Daniel Bulygin is the head of performance marketing at Ads on Tap (adsontap.io), a paid media agency. Nina is a senior media buyer. Other speakers may be clients or team members.
 
-Extract the following categories. Return ONLY a valid JSON object with these exact keys.
+These snippets have already been filtered to contain only media-buying-relevant discussion. Extract ALL methodology from them.
+
+Return ONLY a valid JSON object with these exact keys:
 
 1. "global_rules" — Universal media buying principles that apply to all accounts
    Each: { "rule": string, "rationale": string, "confidence": "high"|"medium", "source_quote": string }
@@ -288,56 +360,23 @@ Rules:
 - Include direct quotes where they capture a principle ("let it cook", "where in the funnel", etc.)
 - Be specific and actionable. "ROAS was discussed" is not an insight.
 - It's better to extract fewer high-quality insights than many vague ones.
-- If the meeting has no media buying content, return all empty arrays.
+- If the snippets have no extractable methodology, return all empty arrays.
 - Return ONLY valid JSON, no other text, no markdown code fences.`;
 
-function buildExtractionUserMessage(m: MeetingRow): string {
-  const date = m.date ? new Date(m.date).toISOString().slice(0, 10) : "unknown";
-  const speakers = (m.speakers ?? []).join(", ") || "unknown";
+// ---------------------------------------------------------------------------
+// Two-stage extraction
+// ---------------------------------------------------------------------------
 
-  let transcript = m.full_transcript ?? "";
-  if (transcript.length > MAX_TRANSCRIPT_CHARS) {
-    transcript =
-      transcript.slice(0, MAX_TRANSCRIPT_CHARS) +
-      "\n\n[... transcript truncated at 80k chars]";
-  }
-
-  return [
-    `Meeting: ${m.title ?? "Untitled"} (${date})`,
-    `Speakers: ${speakers}`,
-    m.short_summary ? `Summary: ${m.short_summary}` : "",
-    "",
-    "Transcript:",
-    transcript,
-  ]
-    .filter(Boolean)
-    .join("\n");
+interface StageResult {
+  skipped_stage1: boolean;
+  snippets_chars: number;
+  extraction: ExtractionResult | null;
 }
 
-// ---------------------------------------------------------------------------
-// Extraction logic
-// ---------------------------------------------------------------------------
-
-async function extractFromMeeting(
+function parseExtractionResponse(
+  responseText: string,
   m: MeetingRow,
-): Promise<ExtractionResult | null> {
-  if (!m.full_transcript || m.full_transcript.trim().length < 200) {
-    return null; // Too short to be useful
-  }
-
-  const response = await anthropic.messages.create({
-    model: EXTRACTION_MODEL,
-    max_tokens: 8192,
-    system: EXTRACTION_SYSTEM,
-    messages: [{ role: "user", content: buildExtractionUserMessage(m) }],
-  });
-
-  const responseText = response.content
-    .filter((block): block is Anthropic.TextBlock => block.type === "text")
-    .map((block) => block.text)
-    .join("");
-
-  // Strip markdown fences if Claude wraps the JSON
+): ExtractionResult {
   const cleaned = responseText
     .replace(/^```(?:json)?\s*/i, "")
     .replace(/\s*```$/i, "")
@@ -349,7 +388,6 @@ async function extractFromMeeting(
     : "unknown";
   const meetingTitle = m.title ?? "Untitled";
 
-  // Attach source metadata to each item
   const annotate = <T extends object>(items: unknown[]): T[] =>
     (items ?? []).map((item) => ({
       ...(item as T),
@@ -361,22 +399,111 @@ async function extractFromMeeting(
     meeting_id: m.id,
     meeting_title: meetingTitle,
     meeting_date: meetingDate,
-    global_rules: annotate<GlobalRule>(
-      parsed["global_rules"] as unknown[],
-    ),
-    account_insights: annotate<AccountInsight>(
-      parsed["account_insights"] as unknown[],
-    ),
-    decision_examples: annotate<DecisionExample>(
-      parsed["decision_examples"] as unknown[],
-    ),
-    creative_patterns: annotate<CreativePattern>(
-      parsed["creative_patterns"] as unknown[],
-    ),
-    methodology_steps: annotate<MethodologyStep>(
-      parsed["methodology"] as unknown[],
-    ),
+    global_rules: annotate<GlobalRule>(parsed["global_rules"] as unknown[]),
+    account_insights: annotate<AccountInsight>(parsed["account_insights"] as unknown[]),
+    decision_examples: annotate<DecisionExample>(parsed["decision_examples"] as unknown[]),
+    creative_patterns: annotate<CreativePattern>(parsed["creative_patterns"] as unknown[]),
+    methodology_steps: annotate<MethodologyStep>(parsed["methodology"] as unknown[]),
   };
+}
+
+async function extractTwoStage(m: MeetingRow): Promise<StageResult> {
+  if (!m.full_transcript || m.full_transcript.trim().length < 200) {
+    return { skipped_stage1: true, snippets_chars: 0, extraction: null };
+  }
+
+  // Stage 1: Filter with Haiku
+  const snippets = await filterSnippets(m);
+
+  if (!snippets) {
+    return { skipped_stage1: true, snippets_chars: 0, extraction: null };
+  }
+
+  // Stage 2: Extract with Opus from concentrated snippets
+  const date = m.date ? new Date(m.date).toISOString().slice(0, 10) : "unknown";
+  const speakers = (m.speakers ?? []).join(", ") || "unknown";
+
+  const response = await anthropic.messages.create({
+    model: EXTRACTION_MODEL,
+    max_tokens: 8192,
+    system: EXTRACTION_SYSTEM,
+    messages: [
+      {
+        role: "user",
+        content: [
+          `Meeting: ${m.title ?? "Untitled"} (${date})`,
+          `Speakers: ${speakers}`,
+          m.short_summary ? `Summary: ${m.short_summary}` : "",
+          "",
+          "Relevant snippets from transcript:",
+          snippets,
+        ]
+          .filter(Boolean)
+          .join("\n"),
+      },
+    ],
+  });
+
+  const responseText = response.content
+    .filter((block): block is Anthropic.TextBlock => block.type === "text")
+    .map((block) => block.text)
+    .join("");
+
+  const extraction = parseExtractionResponse(responseText, m);
+  return { skipped_stage1: false, snippets_chars: snippets.length, extraction };
+}
+
+async function extractSingleStage(m: MeetingRow): Promise<StageResult> {
+  if (!m.full_transcript || m.full_transcript.trim().length < 200) {
+    return { skipped_stage1: true, snippets_chars: 0, extraction: null };
+  }
+
+  let transcript = m.full_transcript;
+  if (transcript.length > MAX_TRANSCRIPT_CHARS) {
+    transcript =
+      transcript.slice(0, MAX_TRANSCRIPT_CHARS) +
+      "\n\n[... transcript truncated at 80k chars]";
+  }
+
+  const date = m.date ? new Date(m.date).toISOString().slice(0, 10) : "unknown";
+  const speakers = (m.speakers ?? []).join(", ") || "unknown";
+
+  const response = await anthropic.messages.create({
+    model: EXTRACTION_MODEL,
+    max_tokens: 8192,
+    system: EXTRACTION_SYSTEM,
+    messages: [
+      {
+        role: "user",
+        content: [
+          `Meeting: ${m.title ?? "Untitled"} (${date})`,
+          `Speakers: ${speakers}`,
+          m.short_summary ? `Summary: ${m.short_summary}` : "",
+          "",
+          "Transcript:",
+          transcript,
+        ]
+          .filter(Boolean)
+          .join("\n"),
+      },
+    ],
+  });
+
+  const responseText = response.content
+    .filter((block): block is Anthropic.TextBlock => block.type === "text")
+    .map((block) => block.text)
+    .join("");
+
+  const extraction = parseExtractionResponse(responseText, m);
+  return {
+    skipped_stage1: false,
+    snippets_chars: transcript.length,
+    extraction,
+  };
+}
+
+async function extractFromMeeting(m: MeetingRow): Promise<StageResult> {
+  return singleStage ? extractSingleStage(m) : extractTwoStage(m);
 }
 
 // ---------------------------------------------------------------------------
@@ -590,17 +717,24 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+interface BatchStats {
+  filtered: number;
+  extracted: number;
+  skipped: number;
+  errors: number;
+}
+
 async function processBatch(
   meetings: MeetingRow[],
   progress: Progress,
   batchNum: number,
   totalBatches: number,
-): Promise<void> {
+): Promise<BatchStats> {
   console.log(
     `\n--- Batch ${batchNum}/${totalBatches} (${meetings.length} meetings) ---`,
   );
 
-  // Process with limited concurrency
+  const stats: BatchStats = { filtered: 0, extracted: 0, skipped: 0, errors: 0 };
   let idx = 0;
   const pending = new Set<Promise<void>>();
 
@@ -612,26 +746,41 @@ async function processBatch(
       const date = meeting.date
         ? new Date(meeting.date).toISOString().slice(0, 10)
         : "?";
+      const transcriptLen = meeting.full_transcript?.length ?? 0;
 
       try {
         const result = await extractFromMeeting(meeting);
-        if (result) {
-          saveRawResult(result);
+
+        if (result.extraction) {
+          saveRawResult(result.extraction);
           const counts = [
-            result.global_rules.length,
-            result.account_insights.length,
-            result.decision_examples.length,
-            result.creative_patterns.length,
-            result.methodology_steps.length,
+            result.extraction.global_rules.length,
+            result.extraction.account_insights.length,
+            result.extraction.decision_examples.length,
+            result.extraction.creative_patterns.length,
+            result.extraction.methodology_steps.length,
           ];
+          const reduction = transcriptLen > 0
+            ? Math.round((1 - result.snippets_chars / transcriptLen) * 100)
+            : 0;
+          const stageInfo = singleStage
+            ? ""
+            : ` (${reduction}% filtered, ${result.snippets_chars} chars → Opus)`;
           console.log(
-            `  [${num}/${meetings.length}] ${meeting.title} (${date}) — ` +
+            `  [${num}/${meetings.length}] ${meeting.title} (${date})${stageInfo} — ` +
               `rules:${counts[0]} insights:${counts[1]} decisions:${counts[2]} creative:${counts[3]} methodology:${counts[4]}`,
           );
+          stats.extracted++;
+        } else if (result.skipped_stage1) {
+          console.log(
+            `  [${num}/${meetings.length}] ${meeting.title} (${date}) — filtered out (no relevant content)`,
+          );
+          stats.filtered++;
         } else {
           console.log(
             `  [${num}/${meetings.length}] ${meeting.title} (${date}) — skipped (no/short transcript)`,
           );
+          stats.skipped++;
         }
 
         progress.processed_ids.push(meeting.id);
@@ -642,27 +791,28 @@ async function processBatch(
           `  [${num}/${meetings.length}] ERROR: ${meeting.title} (${date}) — ${msg}`,
         );
         progress.errors.push({ meeting_id: meeting.id, error: msg });
-        progress.processed_ids.push(meeting.id); // Don't retry on resume
+        progress.processed_ids.push(meeting.id);
+        stats.errors++;
       }
 
-      // Rate limiting
       await sleep(REQUEST_DELAY_MS);
     })();
 
     pending.add(task);
     task.finally(() => pending.delete(task));
 
-    // Limit concurrency
     if (pending.size >= concurrency) {
       await Promise.race(pending);
     }
   }
 
-  // Wait for remaining
   await Promise.all(pending);
-
-  // Save progress after each batch
   saveProgress(progress);
+
+  console.log(
+    `  Batch summary: ${stats.extracted} extracted, ${stats.filtered} filtered out, ${stats.skipped} skipped, ${stats.errors} errors`,
+  );
+  return stats;
 }
 
 // ---------------------------------------------------------------------------
@@ -672,8 +822,9 @@ async function processBatch(
 async function main(): Promise<void> {
   const startTime = Date.now();
   console.log("=== Phase 3: Methodology Extraction from Transcripts ===\n");
+  const pipeline = singleStage ? "single-stage (Opus only)" : `two-stage (${FILTER_MODEL} → ${EXTRACTION_MODEL})`;
   console.log(
-    `Config: model=${EXTRACTION_MODEL}, batch_size=${batchSize}, concurrency=${concurrency}, ` +
+    `Config: pipeline=${pipeline}, batch_size=${batchSize}, concurrency=${concurrency}, ` +
       `priority=${priorityFilter}, limit=${limit || "none"}, dry_run=${dryRun}, resume=${resume}\n`,
   );
 
@@ -787,30 +938,56 @@ async function main(): Promise<void> {
     const withTranscripts = targetMeetings.filter(
       (c) => (c.meeting.full_transcript?.trim().length ?? 0) >= 200,
     );
+    const n = withTranscripts.length;
     const avgCharsPerMeeting =
       withTranscripts.reduce(
         (sum, c) => sum + (c.meeting.full_transcript?.length ?? 0),
         0,
-      ) / Math.max(withTranscripts.length, 1);
+      ) / Math.max(n, 1);
     const avgTokensIn = avgCharsPerMeeting / 4;
-    const avgTokensOut = 2000;
-    const costPerInputToken = 15 / 1_000_000; // Opus input
-    const costPerOutputToken = 75 / 1_000_000; // Opus output
-    const totalCost =
-      withTranscripts.length *
-      (avgTokensIn * costPerInputToken + avgTokensOut * costPerOutputToken);
 
     console.log(
-      `\n  Meetings with transcript (>=200 chars): ${withTranscripts.length}/${effectiveCount}`,
+      `\n  Meetings with transcript (>=200 chars): ${n}/${effectiveCount}`,
     );
-    console.log(
-      `  Estimated cost: $${totalCost.toFixed(0)} (${withTranscripts.length} meetings × ~${Math.round(avgTokensIn)} input tokens avg)`,
-    );
-    console.log(
-      `  Estimated time: ${Math.round((withTranscripts.length * REQUEST_DELAY_MS) / 1000 / 60 / concurrency)} minutes at ${concurrency} concurrency`,
-    );
+    console.log(`  Avg transcript: ~${Math.round(avgTokensIn)} tokens\n`);
+
+    if (singleStage) {
+      // Single-stage: all tokens go to Opus
+      const opusIn = 15 / 1_000_000;
+      const opusOut = 75 / 1_000_000;
+      const cost = n * (avgTokensIn * opusIn + 2000 * opusOut);
+      console.log(`  [single-stage] Estimated cost: $${cost.toFixed(0)}`);
+      console.log(
+        `  [single-stage] Estimated time: ${Math.round((n * REQUEST_DELAY_MS) / 1000 / 60 / concurrency)} min at ${concurrency} concurrency`,
+      );
+    } else {
+      // Two-stage: Haiku filters, Opus extracts from snippets
+      const haikuIn = 0.80 / 1_000_000;
+      const haikuOut = 4 / 1_000_000;
+      const opusIn = 15 / 1_000_000;
+      const opusOut = 75 / 1_000_000;
+      const snippetTokens = avgTokensIn * 0.25; // ~25% of transcript is relevant
+      const yieldRate = 0.60; // ~60% of meetings have relevant content
+
+      const stage1Cost = n * (avgTokensIn * haikuIn + 3000 * haikuOut);
+      const stage2Count = Math.round(n * yieldRate);
+      const stage2Cost = stage2Count * (snippetTokens * opusIn + 2000 * opusOut);
+      const totalCost = stage1Cost + stage2Cost;
+
+      // Compare with single-stage
+      const singleCost = n * (avgTokensIn * opusIn + 2000 * opusOut);
+      const savings = Math.round((1 - totalCost / singleCost) * 100);
+
+      console.log(`  [two-stage] Stage 1 (Haiku filter): ${n} meetings → $${stage1Cost.toFixed(0)}`);
+      console.log(`  [two-stage] Stage 2 (Opus extract): ~${stage2Count} meetings (~${Math.round(yieldRate * 100)}% yield) → $${stage2Cost.toFixed(0)}`);
+      console.log(`  [two-stage] Total estimated: $${totalCost.toFixed(0)} (${savings}% savings vs single-stage $${singleCost.toFixed(0)})`);
+      console.log(
+        `  [two-stage] Estimated time: ${Math.round((n * REQUEST_DELAY_MS + stage2Count * REQUEST_DELAY_MS) / 1000 / 60 / concurrency)} min at ${concurrency} concurrency`,
+      );
+    }
+
     console.log("\n  Run without --dry-run to start extraction.");
-    console.log("  Options: --priority p1|p2|all  --limit N  --resume  --concurrency N");
+    console.log("  Options: --priority p1|p2|all  --limit N  --resume  --concurrency N  --single-stage");
     return;
   }
 
@@ -844,10 +1021,15 @@ async function main(): Promise<void> {
 
   // Process in batches
   const totalBatches = Math.ceil(toProcess.length / batchSize);
+  const totalStats: BatchStats = { filtered: 0, extracted: 0, skipped: 0, errors: 0 };
   for (let i = 0; i < toProcess.length; i += batchSize) {
     const batch = toProcess.slice(i, i + batchSize);
     const batchNum = Math.floor(i / batchSize) + 1;
-    await processBatch(batch, progress, batchNum, totalBatches);
+    const stats = await processBatch(batch, progress, batchNum, totalBatches);
+    totalStats.filtered += stats.filtered;
+    totalStats.extracted += stats.extracted;
+    totalStats.skipped += stats.skipped;
+    totalStats.errors += stats.errors;
   }
 
   saveProgress(progress);
@@ -874,6 +1056,11 @@ async function main(): Promise<void> {
   );
 
   console.log(`\n=== Done in ${elapsed} minutes ===`);
+  if (!singleStage) {
+    console.log(
+      `  Pipeline: ${totalStats.extracted} extracted, ${totalStats.filtered} filtered out by Haiku, ${totalStats.skipped} skipped (no transcript)`,
+    );
+  }
   console.log(`  Global rules: ${aggregated.globalRules.length}`);
   console.log(
     `  Account insights: ${insightCount} across ${aggregated.accountInsights.size} accounts`,
