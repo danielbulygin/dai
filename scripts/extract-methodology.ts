@@ -100,6 +100,8 @@ function getStringArg(flag: string, fallback: string): string {
 }
 const priorityFilter = getStringArg("--priority", "all");
 const singleStage = args.includes("--single-stage");
+const titleMatch = getStringArg("--title-match", "");
+const titleRegex = titleMatch ? new RegExp(titleMatch, "i") : null;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -909,13 +911,16 @@ async function main(): Promise<void> {
   // 3. Dry-run mode: show sample and exit
   if (dryRun) {
     // Build the filtered set the same way the real run would
-    const dryRunMeetings: typeof relevant = [];
+    let dryRunMeetings: typeof relevant = [];
     dryRunMeetings.push(...byPriority.p1);
     if (priorityFilter === "p2" || priorityFilter === "all") {
       dryRunMeetings.push(...byPriority.p2);
     }
     if (priorityFilter === "all") {
       dryRunMeetings.push(...byPriority.p3);
+    }
+    if (titleRegex) {
+      dryRunMeetings = dryRunMeetings.filter((c) => titleRegex.test(c.meeting.title ?? ""));
     }
     const effectiveCount = limit > 0 ? Math.min(dryRunMeetings.length, limit) : dryRunMeetings.length;
 
@@ -1016,6 +1021,12 @@ async function main(): Promise<void> {
   // Filter out already-processed meetings
   const processedSet = new Set(progress.processed_ids);
   let toProcess = orderedMeetings.filter((m) => !processedSet.has(m.id));
+
+  // Apply title filter
+  if (titleRegex) {
+    toProcess = toProcess.filter((m) => titleRegex.test(m.title ?? ""));
+    console.log(`  Title filter /${titleMatch}/i: ${toProcess.length} matches`);
+  }
 
   // Apply limit
   if (limit > 0 && toProcess.length > limit) {
