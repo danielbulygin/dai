@@ -43,6 +43,10 @@ const REQUEST_DELAY_MS = 2_000;
 const DEFAULT_BATCH_SIZE = 50;
 const DEFAULT_CONCURRENCY = 2;
 
+// Daniel's Fireflies recordings — filter to this to avoid duplicates.
+// Each meeting participant with Fireflies gets their own copy; we only want Daniel's.
+const DANIEL_ORGANIZER_EMAIL = "daniel.bulygin@gmail.com";
+
 const OUTPUT_DIR = join(process.cwd(), "data", "extraction");
 const PROGRESS_FILE = join(OUTPUT_DIR, "progress.json");
 const RAW_DIR = join(OUTPUT_DIR, "raw");
@@ -831,8 +835,10 @@ async function main(): Promise<void> {
   // Ensure output directories
   mkdirSync(RAW_DIR, { recursive: true });
 
-  // 1. Fetch all meeting metadata (paginated — Supabase defaults to 1000 rows)
-  console.log("Step 1: Fetching all meetings from DAI Supabase...");
+  // 1. Fetch Daniel's meeting recordings (paginated — Supabase defaults to 1000 rows)
+  //    Each Fireflies user gets their own copy of a meeting. We filter to Daniel's
+  //    organizer_email to deduplicate (he's in every meeting we care about).
+  console.log("Step 1: Fetching Daniel's meetings from DAI Supabase...");
   const meetings: MeetingRow[] = [];
   const PAGE_SIZE = 1000;
   let offset = 0;
@@ -841,6 +847,7 @@ async function main(): Promise<void> {
     const { data, error } = await supabase
       .from("meetings")
       .select("id, title, date, speakers, short_summary, full_transcript")
+      .eq("organizer_email", DANIEL_ORGANIZER_EMAIL)
       .order("date", { ascending: false })
       .range(offset, offset + PAGE_SIZE - 1);
 
@@ -856,7 +863,7 @@ async function main(): Promise<void> {
     process.stdout.write(`  Fetched ${meetings.length} meetings so far...\r`);
   }
 
-  console.log(`  Total meetings in DB: ${meetings.length}`);
+  console.log(`  Daniel's meetings: ${meetings.length} (filtered by organizer_email)`);
 
   // 2. Classify meetings
   console.log("\nStep 2: Classifying meetings by relevance and priority...");
