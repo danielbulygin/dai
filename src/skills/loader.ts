@@ -1,16 +1,13 @@
 import { readFileSync, readdirSync, existsSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import matter from "gray-matter";
 import { logger } from "../utils/logger.js";
 
 // ---------------------------------------------------------------------------
-// Path resolution
+// Path resolution - use cwd so it works both in dev (tsx) and prod (dist/)
 // ---------------------------------------------------------------------------
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const PROJECT_ROOT = resolve(__dirname, "..", "..");
+const PROJECT_ROOT = process.cwd();
 const AGENTS_DIR = join(PROJECT_ROOT, "agents");
 const SHARED_SKILLS_DIR = join(AGENTS_DIR, "_skills");
 

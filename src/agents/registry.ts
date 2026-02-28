@@ -1,18 +1,15 @@
 import { readFileSync, readdirSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import matter from 'gray-matter';
 import yaml from 'js-yaml';
 import { z } from 'zod';
 import { type ToolProfile } from './profiles/index.js';
 
 // ---------------------------------------------------------------------------
-// Path resolution - resolve relative to project root via import.meta.url
+// Path resolution - use cwd so it works both in dev (tsx) and prod (dist/)
 // ---------------------------------------------------------------------------
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const PROJECT_ROOT = resolve(__dirname, '..', '..');
+const PROJECT_ROOT = process.cwd();
 const AGENTS_DIR = join(PROJECT_ROOT, 'agents');
 
 // ---------------------------------------------------------------------------
