@@ -2,11 +2,12 @@ import Anthropic from '@anthropic-ai/sdk';
 import { nanoid } from 'nanoid';
 import { env } from '../env.js';
 import { logger } from '../utils/logger.js';
-import { getDb } from '../memory/db.js';
 import { addLearning, searchLearnings } from '../memory/learnings.js';
 import { getDaiSupabase } from '../integrations/dai-supabase.js';
 import { getMeetingTranscript } from '../agents/tools/fireflies-tools.js';
 import { matchMeetingPattern } from './meeting-patterns.js';
+import { extractMethodologyInsights } from './methodology-extractor.js';
+import { sendInsightsForApproval } from './insight-approval.js';
 
 const EXTRACTION_MODEL = 'claude-sonnet-4-20250514';
 const ADA_AGENT_ID = 'ada';
@@ -31,7 +32,7 @@ export async function ingestNewTranscripts(): Promise<number> {
   logger.info('Starting transcript ingestion for media buying insights');
 
   // Get last ingestion date
-  const lastIngested = getLastIngestionDate();
+  const lastIngested = await getLastIngestionDate();
   const since = lastIngested ?? new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
 
   // Fetch meetings since last ingestion
@@ -53,7 +54,7 @@ export async function ingestNewTranscripts(): Promise<number> {
   }
 
   // Filter out already-ingested meetings
-  const ingestedIds = getIngestedMeetingIds();
+  const ingestedIds = await getIngestedMeetingIds();
   const newMeetings = meetings.filter((m) => !ingestedIds.has(m.id));
 
   if (newMeetings.length === 0) {
@@ -72,7 +73,7 @@ export async function ingestNewTranscripts(): Promise<number> {
 
     if (!pattern) {
       // Log as skipped — no matching pattern
-      logIngestion(meeting.id, meeting.title, null, 0);
+      await logIngestion(meeting.id, meeting.title, null, 0);
       continue;
     }
 
@@ -81,7 +82,7 @@ export async function ingestNewTranscripts(): Promise<number> {
       const deduped = await deduplicateInsights(insights);
 
       for (const insight of deduped) {
-        addLearning({
+        await addLearning({
           agent_id: ADA_AGENT_ID,
           category: insight.category,
           content: insight.account_code
@@ -91,7 +92,7 @@ export async function ingestNewTranscripts(): Promise<number> {
         });
       }
 
-      logIngestion(meeting.id, meeting.title, pattern.id, deduped.length);
+      await logIngestion(meeting.id, meeting.title, pattern.id, deduped.length);
       totalInsights += deduped.length;
 
       logger.info(
@@ -104,7 +105,7 @@ export async function ingestNewTranscripts(): Promise<number> {
         'Failed to ingest meeting transcript, continuing',
       );
       // Log as attempted with 0 insights so we don't retry
-      logIngestion(meeting.id, meeting.title, pattern.id, 0);
+      await logIngestion(meeting.id, meeting.title, pattern.id, 0);
     }
   }
 
@@ -192,7 +193,7 @@ async function deduplicateInsights(insights: ExtractedInsight[]): Promise<Extrac
   for (const insight of insights) {
     // Search existing learnings for similar content
     try {
-      const existing = searchLearnings(insight.content.split(' ').slice(0, 5).join(' '));
+      const existing = await searchLearnings(insight.content.split(' ').slice(0, 5).join(' '));
       const isDuplicate = existing.some((e) => {
         const overlap = computeOverlap(e.content, insight.content);
         return overlap > 0.6;
@@ -225,38 +226,178 @@ function computeOverlap(a: string, b: string): number {
 }
 
 // ---------------------------------------------------------------------------
-// Ingestion log helpers
+// Ingestion log helpers (now using Supabase)
 // ---------------------------------------------------------------------------
 
-function getLastIngestionDate(): string | null {
-  const db = getDb();
-  const row = db
-    .prepare('SELECT created_at FROM transcript_ingestion_log ORDER BY created_at DESC LIMIT 1')
-    .get() as { created_at: string } | undefined;
-  return row?.created_at ?? null;
+async function getLastIngestionDate(): Promise<string | null> {
+  const supabase = getDaiSupabase();
+
+  const { data } = await supabase
+    .from('transcript_ingestion_log')
+    .select('created_at')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  return (data as { created_at: string } | null)?.created_at ?? null;
 }
 
-function getIngestedMeetingIds(): Set<string> {
-  const db = getDb();
-  const rows = db
-    .prepare('SELECT meeting_id FROM transcript_ingestion_log')
-    .all() as { meeting_id: string }[];
-  return new Set(rows.map((r) => r.meeting_id));
+async function getIngestedMeetingIds(): Promise<Set<string>> {
+  const supabase = getDaiSupabase();
+
+  const { data } = await supabase
+    .from('transcript_ingestion_log')
+    .select('meeting_id');
+
+  return new Set((data ?? []).map((r: { meeting_id: string }) => r.meeting_id));
 }
 
-function logIngestion(
+async function logIngestion(
   meetingId: string,
   meetingTitle: string | null,
   patternId: string | null,
   insightsExtracted: number,
-): void {
-  const db = getDb();
+): Promise<void> {
+  const supabase = getDaiSupabase();
+
   try {
-    db.prepare(`
-      INSERT OR IGNORE INTO transcript_ingestion_log (id, meeting_id, meeting_title, pattern_id, insights_extracted)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(nanoid(), meetingId, meetingTitle, patternId, insightsExtracted);
+    await supabase
+      .from('transcript_ingestion_log')
+      .upsert(
+        {
+          id: nanoid(),
+          meeting_id: meetingId,
+          meeting_title: meetingTitle,
+          pattern_id: patternId,
+          insights_extracted: insightsExtracted,
+        },
+        { onConflict: 'meeting_id', ignoreDuplicates: true },
+      );
   } catch (err) {
     logger.warn({ error: err, meetingId }, 'Failed to log ingestion');
   }
+}
+
+// ---------------------------------------------------------------------------
+// Nina/Daniel call monitoring (daily cron)
+// ---------------------------------------------------------------------------
+
+const NINA_DANIEL_PATTERN_ID = 'nina-daniel-monitoring';
+const DANIEL_ORGANIZER_EMAIL = 'daniel.bulygin@gmail.com';
+
+/**
+ * Check for new Nina/Daniel meetings in the last 48h, extract methodology
+ * insights via the two-stage pipeline, and send for Slack approval.
+ *
+ * Called daily at 9am Berlin by the scheduler.
+ */
+export async function monitorNinaDanielCalls(): Promise<number> {
+  logger.info('Starting Nina/Daniel call monitoring');
+
+  const supabase = getDaiSupabase();
+
+  // Look back 48h to catch stragglers (meetings that get transcribed late)
+  const since = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+
+  // 1. Fetch recent meetings from Daniel's recordings
+  const { data: meetings, error } = await supabase
+    .from('meetings')
+    .select('id, title, date, speakers, short_summary')
+    .eq('organizer_email', DANIEL_ORGANIZER_EMAIL)
+    .gt('date', since)
+    .order('date', { ascending: true });
+
+  if (error) {
+    logger.error({ error }, 'Failed to fetch meetings for Nina/Daniel monitoring');
+    return 0;
+  }
+
+  if (!meetings || meetings.length === 0) {
+    logger.debug('No recent meetings found');
+    return 0;
+  }
+
+  // 2. Filter to Nina/Daniel meetings only
+  const ninaDanielMeetings = (meetings as Array<{
+    id: string;
+    title: string | null;
+    date: string | null;
+    speakers: string[] | null;
+    short_summary: string | null;
+  }>).filter((m) => {
+    const title = (m.title ?? '').toLowerCase();
+    const speakers = (m.speakers ?? []).map((s) => s.toLowerCase());
+    const hasNina = speakers.some((s) => s.includes('nina'));
+    const hasDaniel = speakers.some((s) => s.includes('daniel'));
+
+    // Must have both Nina and Daniel as speakers, or "nina" in title with Daniel
+    return (hasNina && hasDaniel) || (title.includes('nina') && hasDaniel);
+  });
+
+  if (ninaDanielMeetings.length === 0) {
+    logger.debug('No Nina/Daniel meetings in the last 48h');
+    return 0;
+  }
+
+  // 3. Filter out already-ingested meetings
+  const ingestedIds = await getIngestedMeetingIds();
+  const newMeetings = ninaDanielMeetings.filter((m) => !ingestedIds.has(m.id));
+
+  if (newMeetings.length === 0) {
+    logger.debug('All Nina/Daniel meetings already processed');
+    return 0;
+  }
+
+  logger.info({ count: newMeetings.length }, 'Found new Nina/Daniel meetings to process');
+
+  let totalProcessed = 0;
+
+  // 4. Process each meeting
+  for (const meeting of newMeetings) {
+    const meetingDate = meeting.date
+      ? new Date(meeting.date).toISOString().slice(0, 10)
+      : new Date().toISOString().slice(0, 10);
+    const meetingTitle = meeting.title ?? 'Untitled Nina/Daniel call';
+
+    try {
+      // Extract insights via two-stage pipeline
+      const insights = await extractMethodologyInsights(
+        meeting.id,
+        meetingTitle,
+        meetingDate,
+      );
+
+      if (insights.length > 0) {
+        // Send for Slack approval
+        await sendInsightsForApproval(insights, meeting.id, meetingTitle, meetingDate);
+        logger.info(
+          { meetingId: meeting.id, title: meetingTitle, insights: insights.length },
+          'Sent Nina/Daniel insights for approval',
+        );
+      } else {
+        logger.info(
+          { meetingId: meeting.id, title: meetingTitle },
+          'No methodology insights found in meeting',
+        );
+      }
+
+      // Log as processed (so we don't re-process)
+      await logIngestion(meeting.id, meetingTitle, NINA_DANIEL_PATTERN_ID, insights.length);
+      totalProcessed++;
+    } catch (err) {
+      logger.error(
+        { error: err, meetingId: meeting.id },
+        'Failed to process Nina/Daniel meeting',
+      );
+      // Log as attempted so we don't retry indefinitely
+      await logIngestion(meeting.id, meetingTitle, NINA_DANIEL_PATTERN_ID, 0);
+    }
+  }
+
+  logger.info(
+    { totalProcessed, totalMeetings: newMeetings.length },
+    'Nina/Daniel call monitoring complete',
+  );
+
+  return totalProcessed;
 }

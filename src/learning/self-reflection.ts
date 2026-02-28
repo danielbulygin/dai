@@ -16,14 +16,14 @@ import type { Feedback } from "../memory/feedback.js";
 export async function generateSelfReflection(
   sessionId: string,
 ): Promise<string | null> {
-  const session = getSession(sessionId);
+  const session = await getSession(sessionId);
   if (!session) {
     logger.warn({ sessionId }, "Session not found for self-reflection");
     return null;
   }
 
-  const observations = getObservations(sessionId);
-  const feedback = getFeedbackForSession(sessionId);
+  const observations = await getObservations(sessionId);
+  const feedback = await getFeedbackForSession(sessionId);
 
   const issues = detectIssues(observations, feedback, session.total_turns);
 
@@ -38,7 +38,7 @@ export async function generateSelfReflection(
   const reflection = buildReflection(session.agent_id, sessionId, issues);
 
   // Persist the reflection as a learning
-  addLearning({
+  await addLearning({
     agent_id: session.agent_id,
     category: "self_reflection",
     content: reflection,

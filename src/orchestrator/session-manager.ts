@@ -15,20 +15,20 @@ import type { Session } from "../memory/sessions.js";
  *   - If an active session is found, it is returned as-is.
  *   - Otherwise a new session is created.
  */
-export function getOrCreateSession(params: {
+export async function getOrCreateSession(params: {
   agentId: string;
   channelId: string;
   threadTs?: string;
   userId: string;
-}): Session {
+}): Promise<Session> {
   const { agentId, channelId, threadTs, userId } = params;
 
-  const existing = findSession(channelId, threadTs ?? null, agentId);
+  const existing = await findSession(channelId, threadTs ?? null, agentId);
   if (existing) {
     return existing;
   }
 
-  return createSession({
+  return await createSession({
     agent_id: agentId,
     channel_id: channelId,
     thread_ts: threadTs ?? null,
@@ -45,11 +45,11 @@ export function getOrCreateSession(params: {
  * @param sessionId - The session ID to check.
  * @param idleMinutes - Maximum idle time before auto-ending (default 30).
  */
-export function endSessionIfIdle(
+export async function endSessionIfIdle(
   sessionId: string,
   idleMinutes = 30,
-): boolean {
-  const session = getSession(sessionId);
+): Promise<boolean> {
+  const session = await getSession(sessionId);
 
   if (!session) {
     return false;
@@ -68,6 +68,6 @@ export function endSessionIfIdle(
     return false;
   }
 
-  endSession(sessionId, `Auto-ended after ${idleMinutes} minutes of inactivity`);
+  await endSession(sessionId, `Auto-ended after ${idleMinutes} minutes of inactivity`);
   return true;
 }

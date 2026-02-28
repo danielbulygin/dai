@@ -1,48 +1,36 @@
-import { readFileSync, existsSync } from "node:fs";
-import { resolve } from "node:path";
-import yaml from "js-yaml";
+import { getSupabase } from "../../integrations/supabase.js";
 import { logger } from "../../utils/logger.js";
-
-const BMAD_CLIENTS_DIR = resolve(
-  process.env.BMAD_CLIENTS_DIR ?? "/Users/danielbulygin/dev/bmad/pma/clients",
-);
-
-/** Map Supabase client codes (snake_case) to BMAD folder names (kebab-case) */
-const CODE_TO_FOLDER: Record<string, string> = {
-  ninepine: "ninepine",
-  press_london: "press-london",
-  brainfm: "brainfm",
-  slumber: "slumber",
-  laori: "laori",
-  meow: "meow",
-  teethlovers: "teethlovers",
-  urvi: "urvi",
-  vi_lifestyle: "vi-lifestyle",
-  jva: "jv-academy",
-  noso: "nothings-something",
-  getgoing: "getgoing",
-  sweetspot: "sweetspot",
-  strayz: "strayz",
-  audibene: "audibene",
-};
 
 export async function getClientTargets(params: {
   clientCode: string;
 }): Promise<string> {
   try {
-    const folder = CODE_TO_FOLDER[params.clientCode] ?? params.clientCode;
-    const configPath = resolve(BMAD_CLIENTS_DIR, folder, "ads-config.yaml");
+    const supabase = getSupabase();
 
-    if (!existsSync(configPath)) {
-      logger.warn({ clientCode: params.clientCode, configPath }, "Client config not found");
+    // Try exact match first, then uppercase (BMAD codes are typically uppercase)
+    let { data, error } = await supabase
+      .from("client_configs")
+      .select("config")
+      .eq("client_code", params.clientCode)
+      .maybeSingle();
+
+    if (!data && !error) {
+      ({ data, error } = await supabase
+        .from("client_configs")
+        .select("config")
+        .eq("client_code", params.clientCode.toUpperCase())
+        .maybeSingle());
+    }
+
+    if (error || !data) {
+      logger.warn({ clientCode: params.clientCode, error }, "Client config not found in Supabase");
       return JSON.stringify({
-        error: `No ads-config.yaml found for '${params.clientCode}' (looked in ${folder}/)`,
+        error: `No config found for '${params.clientCode}'`,
         hint: "Use list_clients() for basic conversion goals, or ask Daniel for targets",
       });
     }
 
-    const raw = readFileSync(configPath, "utf-8");
-    const config = yaml.load(raw) as Record<string, unknown>;
+    const config = data.config as Record<string, unknown>;
 
     // Extract the most useful fields for Ada
     const result: Record<string, unknown> = {
@@ -66,7 +54,7 @@ export async function getClientTargets(params: {
 
     logger.debug(
       { clientCode: params.clientCode, fields: Object.keys(result).length },
-      "Loaded client targets config",
+      "Loaded client targets config from Supabase",
     );
     return JSON.stringify(result);
   } catch (err) {

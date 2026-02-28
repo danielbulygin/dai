@@ -1,5 +1,5 @@
 import { nanoid } from "nanoid";
-import { getDb } from "./db.js";
+import { getDaiSupabase } from "../integrations/dai-supabase.js";
 
 export interface Observation {
   id: string;
@@ -21,44 +21,50 @@ export interface AddObservationParams {
   tags?: string[];
 }
 
-export function addObservation(params: AddObservationParams): Observation {
-  const db = getDb();
+export async function addObservation(params: AddObservationParams): Promise<Observation> {
+  const supabase = getDaiSupabase();
   const id = nanoid();
 
-  const stmt = db.prepare(`
-    INSERT INTO observations (id, session_id, tool_name, input_summary, output_summary, importance, tags)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `);
+  const { data, error } = await supabase
+    .from("observations")
+    .insert({
+      id,
+      session_id: params.session_id,
+      tool_name: params.tool_name,
+      input_summary: params.input_summary ?? null,
+      output_summary: params.output_summary ?? null,
+      importance: params.importance ?? 5,
+      tags: params.tags ? JSON.stringify(params.tags) : null,
+    })
+    .select()
+    .single();
 
-  stmt.run(
-    id,
-    params.session_id,
-    params.tool_name,
-    params.input_summary ?? null,
-    params.output_summary ?? null,
-    params.importance ?? 5,
-    params.tags ? JSON.stringify(params.tags) : null,
-  );
-
-  return db.prepare("SELECT * FROM observations WHERE id = ?").get(id) as Observation;
+  if (error) throw new Error(`Failed to add observation: ${error.message}`);
+  return data as Observation;
 }
 
-export function getObservations(sessionId: string): Observation[] {
-  const db = getDb();
-  const stmt = db.prepare(
-    "SELECT * FROM observations WHERE session_id = ? ORDER BY created_at ASC",
-  );
-  return stmt.all(sessionId) as Observation[];
+export async function getObservations(sessionId: string): Promise<Observation[]> {
+  const supabase = getDaiSupabase();
+
+  const { data, error } = await supabase
+    .from("observations")
+    .select()
+    .eq("session_id", sessionId)
+    .order("created_at", { ascending: true });
+
+  if (error) throw new Error(`Failed to get observations: ${error.message}`);
+  return (data ?? []) as Observation[];
 }
 
-export function searchObservations(query: string): Observation[] {
-  const db = getDb();
-  const stmt = db.prepare(`
-    SELECT o.*
-    FROM observations_fts fts
-    JOIN observations o ON o.rowid = fts.rowid
-    WHERE observations_fts MATCH ?
-    ORDER BY rank
-  `);
-  return stmt.all(query) as Observation[];
+export async function searchObservations(query: string): Promise<Observation[]> {
+  const supabase = getDaiSupabase();
+
+  const { data, error } = await supabase.rpc("search_observations", {
+    query_text: query,
+    agent_id_filter: null,
+    result_limit: 10,
+  });
+
+  if (error) throw new Error(`Failed to search observations: ${error.message}`);
+  return (data ?? []) as Observation[];
 }

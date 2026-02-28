@@ -76,10 +76,10 @@ export function registerReactionListener(app: App): void {
       }
 
       // Resolve agent_id from the session that produced this message
-      const session = findRecentSessionForChannel(channel, messageThreadTs ?? itemTs);
+      const session = await findRecentSessionForChannel(channel, messageThreadTs ?? itemTs);
       const agentId = session?.agent_id ?? "unknown";
 
-      addFeedback({
+      await addFeedback({
         agent_id: agentId,
         session_id: session?.id ?? undefined,
         user_id: userId,

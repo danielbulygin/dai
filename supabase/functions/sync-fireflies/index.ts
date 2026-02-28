@@ -223,13 +223,23 @@ Deno.serve(async (req) => {
       }
     }
 
-    // 5. Update sync state
+    // 5. Deduplicate: keep Daniel's copy, delete inferior duplicates
+    let deduped = 0;
+    if (synced > 0) {
+      const { data: dedupResult } = await supabase.rpc("dedup_meetings");
+      deduped = dedupResult?.[0]?.deleted_count ?? dedupResult?.deleted_count ?? 0;
+      if (deduped > 0) {
+        console.log(`Deduplication removed ${deduped} duplicate meetings`);
+      }
+    }
+
+    // 6. Update sync state
     await supabase
       .from("sync_state")
       .update({
         last_synced_at: new Date().toISOString(),
         last_sync_run: new Date().toISOString(),
-        total_synced: (syncState?.total_synced ?? 0) + synced,
+        total_synced: (syncState?.total_synced ?? 0) + synced - deduped,
         last_error: lastError,
       })
       .eq("id", 1);
@@ -237,8 +247,9 @@ Deno.serve(async (req) => {
     return new Response(
       JSON.stringify({
         synced,
+        deduped,
         errors: lastError ? 1 : 0,
-        total: (syncState?.total_synced ?? 0) + synced,
+        total: (syncState?.total_synced ?? 0) + synced - deduped,
       }),
       { headers: { "Content-Type": "application/json" } },
     );

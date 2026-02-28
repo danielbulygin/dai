@@ -61,7 +61,7 @@ export function registerCommandListener(app: App): void {
             break;
           }
 
-          addFeedback({
+          await addFeedback({
             agent_id: "system",
             user_id: command.user_id,
             type: "explicit",

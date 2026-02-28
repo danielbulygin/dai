@@ -12,9 +12,7 @@
  */
 
 import { createClient } from "@supabase/supabase-js";
-import Database from "better-sqlite3";
 import { nanoid } from "nanoid";
-import { resolve } from "path";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -22,17 +20,22 @@ import { resolve } from "path";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
-const DB_PATH = process.env.DB_PATH ?? "data/dai.db";
+const DAI_SUPABASE_URL = process.env.DAI_SUPABASE_URL;
+const DAI_SUPABASE_SERVICE_KEY = process.env.DAI_SUPABASE_SERVICE_KEY;
 const DRY_RUN = process.argv.includes("--dry-run");
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
-  console.error("Missing SUPABASE_URL or SUPABASE_SERVICE_KEY");
+  console.error("Missing SUPABASE_URL or SUPABASE_SERVICE_KEY (BMAD)");
+  process.exit(1);
+}
+
+if (!DAI_SUPABASE_URL || !DAI_SUPABASE_SERVICE_KEY) {
+  console.error("Missing DAI_SUPABASE_URL or DAI_SUPABASE_SERVICE_KEY");
   process.exit(1);
 }
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
-const db = new Database(resolve(DB_PATH));
-db.pragma("journal_mode = WAL");
+const daiSupabase = createClient(DAI_SUPABASE_URL, DAI_SUPABASE_SERVICE_KEY);
 
 const AGENT_ID = "ada";
 
@@ -57,21 +60,28 @@ interface BmadLearning {
 // Seed Functions
 // ---------------------------------------------------------------------------
 
-function insertLearning(
+async function insertLearning(
   category: string,
   content: string,
   confidence: number = 0.7,
-): void {
+): Promise<void> {
   if (DRY_RUN) {
     console.log(`[DRY RUN] ${category}: ${content.slice(0, 80)}...`);
     return;
   }
 
-  const id = nanoid();
-  db.prepare(
-    `INSERT INTO learnings (id, agent_id, category, content, confidence, source_session_id)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-  ).run(id, AGENT_ID, category, content, confidence, null);
+  const { error } = await daiSupabase.from("learnings").insert({
+    id: nanoid(),
+    agent_id: AGENT_ID,
+    category,
+    content,
+    confidence,
+    source_session_id: null,
+  });
+
+  if (error) {
+    console.error(`Failed to insert learning: ${error.message}`);
+  }
 }
 
 async function seedFromBmadClients(): Promise<void> {
@@ -95,7 +105,7 @@ async function seedFromBmadClients(): Promise<void> {
   console.log(`Found ${clients.length} active clients`);
 
   for (const client of clients as BmadClient[]) {
-    insertLearning(
+    await insertLearning(
       "account_profile",
       `Client: ${client.name} (${client.code}) | Status: ${client.status}`,
       0.9,
@@ -126,7 +136,7 @@ async function seedFromBmadLearnings(): Promise<void> {
 
   for (const l of learnings as BmadLearning[]) {
     const prefix = l.client_code ? `[${l.client_code}] ` : "";
-    insertLearning(
+    await insertLearning(
       l.category ?? "general",
       `${prefix}${l.content}`,
       l.confidence ?? 0.6,
@@ -134,7 +144,7 @@ async function seedFromBmadLearnings(): Promise<void> {
   }
 }
 
-function seedTranscriptInsights(): void {
+async function seedTranscriptInsights(): Promise<void> {
   console.log("\n--- Seeding transcript-derived client insights ---");
 
   const insights: Array<{
@@ -318,7 +328,7 @@ function seedTranscriptInsights(): void {
   ];
 
   for (const insight of insights) {
-    insertLearning(insight.category, insight.content, insight.confidence);
+    await insertLearning(insight.category, insight.content, insight.confidence);
   }
 
   console.log(`Seeded ${insights.length} transcript-derived insights`);
@@ -329,42 +339,30 @@ function seedTranscriptInsights(): void {
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
-  console.log(`Seeding Ada learnings into ${DB_PATH}`);
+  console.log("Seeding Ada learnings into DAI Supabase");
   if (DRY_RUN) console.log("=== DRY RUN MODE ===\n");
 
-  // Check that learnings table exists
-  const tableCheck = db
-    .prepare(
-      "SELECT name FROM sqlite_master WHERE type='table' AND name='learnings'",
-    )
-    .get();
-  if (!tableCheck) {
-    console.error(
-      "learnings table does not exist. Run migrations first: pnpm tsx scripts/migrate.ts",
-    );
-    process.exit(1);
-  }
-
   // Count existing Ada learnings
-  const existing = db
-    .prepare("SELECT COUNT(*) as count FROM learnings WHERE agent_id = ?")
-    .get(AGENT_ID) as { count: number };
-  console.log(`Existing Ada learnings: ${existing.count}`);
+  const { count: existingCount } = await daiSupabase
+    .from("learnings")
+    .select("*", { count: "exact", head: true })
+    .eq("agent_id", AGENT_ID);
+  console.log(`Existing Ada learnings: ${existingCount ?? 0}`);
 
   await seedFromBmadClients();
   await seedFromBmadLearnings();
-  seedTranscriptInsights();
+  await seedTranscriptInsights();
 
   // Final count
   if (!DRY_RUN) {
-    const final = db
-      .prepare("SELECT COUNT(*) as count FROM learnings WHERE agent_id = ?")
-      .get(AGENT_ID) as { count: number };
-    console.log(`\nTotal Ada learnings after seeding: ${final.count}`);
+    const { count: finalCount } = await daiSupabase
+      .from("learnings")
+      .select("*", { count: "exact", head: true })
+      .eq("agent_id", AGENT_ID);
+    console.log(`\nTotal Ada learnings after seeding: ${finalCount ?? 0}`);
   }
 
   console.log("\nDone!");
-  db.close();
 }
 
 main().catch((err) => {

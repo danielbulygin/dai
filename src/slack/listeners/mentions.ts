@@ -24,7 +24,7 @@ export function registerMentionListener(app: App): void {
     // belongs to another agent, continue with that agent instead.
     let agentId = route.agentId;
     if (agentId === 'otto' && thread_ts) {
-      const threadAgent = findThreadOwner(channel, threadTs);
+      const threadAgent = await findThreadOwner(channel, threadTs);
       if (threadAgent && threadAgent !== 'otto') {
         agentId = threadAgent;
         logger.debug(

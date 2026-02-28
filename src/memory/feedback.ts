@@ -1,5 +1,5 @@
 import { nanoid } from "nanoid";
-import { getDb } from "./db.js";
+import { getDaiSupabase } from "../integrations/dai-supabase.js";
 
 export interface Feedback {
   id: string;
@@ -24,47 +24,63 @@ export interface AddFeedbackParams {
   message_ts?: string | null;
 }
 
-export function addFeedback(params: AddFeedbackParams): Feedback {
-  const db = getDb();
+export async function addFeedback(params: AddFeedbackParams): Promise<Feedback> {
+  const supabase = getDaiSupabase();
   const id = nanoid();
 
-  const stmt = db.prepare(`
-    INSERT INTO feedback (id, session_id, agent_id, user_id, type, sentiment, content, message_ts)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `);
+  const { data, error } = await supabase
+    .from("feedback")
+    .insert({
+      id,
+      session_id: params.session_id ?? null,
+      agent_id: params.agent_id,
+      user_id: params.user_id,
+      type: params.type,
+      sentiment: params.sentiment,
+      content: params.content ?? null,
+      message_ts: params.message_ts ?? null,
+    })
+    .select()
+    .single();
 
-  stmt.run(
-    id,
-    params.session_id ?? null,
-    params.agent_id,
-    params.user_id,
-    params.type,
-    params.sentiment,
-    params.content ?? null,
-    params.message_ts ?? null,
-  );
-
-  return db.prepare("SELECT * FROM feedback WHERE id = ?").get(id) as Feedback;
+  if (error) throw new Error(`Failed to add feedback: ${error.message}`);
+  return data as Feedback;
 }
 
-export function getUnprocessedFeedback(limit = 50): Feedback[] {
-  const db = getDb();
-  const stmt = db.prepare(
-    "SELECT * FROM feedback WHERE processed = 0 ORDER BY created_at ASC LIMIT ?",
-  );
-  return stmt.all(limit) as Feedback[];
+export async function getUnprocessedFeedback(limit = 50): Promise<Feedback[]> {
+  const supabase = getDaiSupabase();
+
+  const { data, error } = await supabase
+    .from("feedback")
+    .select()
+    .eq("processed", 0)
+    .order("created_at", { ascending: true })
+    .limit(limit);
+
+  if (error) throw new Error(`Failed to get unprocessed feedback: ${error.message}`);
+  return (data ?? []) as Feedback[];
 }
 
-export function markProcessed(id: string): void {
-  const db = getDb();
-  const stmt = db.prepare("UPDATE feedback SET processed = 1 WHERE id = ?");
-  stmt.run(id);
+export async function markProcessed(id: string): Promise<void> {
+  const supabase = getDaiSupabase();
+
+  const { error } = await supabase
+    .from("feedback")
+    .update({ processed: 1 })
+    .eq("id", id);
+
+  if (error) throw new Error(`Failed to mark feedback processed: ${error.message}`);
 }
 
-export function getFeedbackForSession(sessionId: string): Feedback[] {
-  const db = getDb();
-  const stmt = db.prepare(
-    "SELECT * FROM feedback WHERE session_id = ? ORDER BY created_at ASC",
-  );
-  return stmt.all(sessionId) as Feedback[];
+export async function getFeedbackForSession(sessionId: string): Promise<Feedback[]> {
+  const supabase = getDaiSupabase();
+
+  const { data, error } = await supabase
+    .from("feedback")
+    .select()
+    .eq("session_id", sessionId)
+    .order("created_at", { ascending: true });
+
+  if (error) throw new Error(`Failed to get feedback for session: ${error.message}`);
+  return (data ?? []) as Feedback[];
 }

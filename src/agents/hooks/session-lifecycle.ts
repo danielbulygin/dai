@@ -16,7 +16,7 @@ export async function onSessionStart(params: {
   userId: string;
 }): Promise<string> {
   try {
-    const ctx: QuickContext = getQuickContext(params.agentId, params.userId);
+    const ctx: QuickContext = await getQuickContext(params.agentId, params.userId);
 
     const lines: string[] = [];
     lines.push("<memory_context>");
@@ -85,7 +85,7 @@ export async function onSessionEnd(params: {
     // For now, use a placeholder summary.
     const summary = "Session ended";
 
-    endSession(params.sessionId, summary);
+    await endSession(params.sessionId, summary);
 
     logger.info(
       { sessionId: params.sessionId, agentId: params.agentId },

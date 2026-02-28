@@ -4,6 +4,7 @@ import { registerMessageListener } from "./messages.js";
 import { registerReactionListener } from "./reactions.js";
 import { registerCommandListener } from "./commands.js";
 import { registerChannelMonitor } from "./channel-monitor.js";
+import { registerInsightActions } from "./insight-actions.js";
 
 export function registerAllListeners(app: App): void {
   registerMentionListener(app);
@@ -11,4 +12,5 @@ export function registerAllListeners(app: App): void {
   registerReactionListener(app);
   registerCommandListener(app);
   registerChannelMonitor(app);
+  registerInsightActions(app);
 }

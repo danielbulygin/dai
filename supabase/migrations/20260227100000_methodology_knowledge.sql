@@ -16,19 +16,22 @@ CREATE TABLE IF NOT EXISTS methodology_knowledge (
 );
 
 -- Indexes
-CREATE INDEX idx_mk_type ON methodology_knowledge (type);
-CREATE INDEX idx_mk_account_code ON methodology_knowledge (account_code) WHERE account_code IS NOT NULL;
-CREATE INDEX idx_mk_category ON methodology_knowledge (category) WHERE category IS NOT NULL;
-CREATE INDEX idx_mk_extraction_run ON methodology_knowledge (extraction_run);
+CREATE INDEX IF NOT EXISTS idx_mk_type ON methodology_knowledge (type);
+CREATE INDEX IF NOT EXISTS idx_mk_account_code ON methodology_knowledge (account_code) WHERE account_code IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_mk_category ON methodology_knowledge (category) WHERE category IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_mk_extraction_run ON methodology_knowledge (extraction_run);
 
 -- Full-text search: title weight A, body text weight B
-ALTER TABLE methodology_knowledge ADD COLUMN fts TSVECTOR
-  GENERATED ALWAYS AS (
-    setweight(to_tsvector('english', coalesce(title, '')), 'A') ||
-    setweight(to_tsvector('english', coalesce(body::text, '')), 'B')
-  ) STORED;
+DO $$ BEGIN
+  ALTER TABLE methodology_knowledge ADD COLUMN fts TSVECTOR
+    GENERATED ALWAYS AS (
+      setweight(to_tsvector('english', coalesce(title, '')), 'A') ||
+      setweight(to_tsvector('english', coalesce(body::text, '')), 'B')
+    ) STORED;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
 
-CREATE INDEX idx_mk_fts ON methodology_knowledge USING GIN (fts);
+CREATE INDEX IF NOT EXISTS idx_mk_fts ON methodology_knowledge USING GIN (fts);
 
 -- RPC function: search methodology knowledge with optional filters
 CREATE OR REPLACE FUNCTION search_methodology(

@@ -38,7 +38,7 @@ export function registerMessageListener(app: App): void {
     // Thread continuity: if router defaulted to otto but thread belongs to
     // another agent, continue with that agent.
     if (agentId === 'otto' && threadTs) {
-      const threadAgent = findThreadOwner(msg.channel as string, threadTs);
+      const threadAgent = await findThreadOwner(msg.channel as string, threadTs);
       if (threadAgent && threadAgent !== 'otto') {
         agentId = threadAgent;
         logger.debug(

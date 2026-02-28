@@ -31,7 +31,6 @@
     "@slack/bolt": "^4.6.0",
     "@slack/web-api": "^7.14.1",
     "@supabase/supabase-js": "^2.97.0",
-    "better-sqlite3": "^12.6.2",
     "gray-matter": "^4.0.3",
     "js-yaml": "^4.1.1",
     "nanoid": "^5.1.6",
@@ -39,13 +38,7 @@
     "pino": "^10.3.1",
     "zod": "^4.3.6"
   },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "better-sqlite3"
-    ]
-  },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^25.3.0",
     "@types/node-cron": "^3.0.11",

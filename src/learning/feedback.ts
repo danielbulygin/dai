@@ -15,7 +15,7 @@ import type { Feedback } from "../memory/feedback.js";
  * For positive feedback: creates a learning noting what worked well.
  */
 export async function processFeedback(feedbackId: string): Promise<void> {
-  const allFeedback = getUnprocessedFeedback(1000);
+  const allFeedback = await getUnprocessedFeedback(1000);
   const feedback = allFeedback.find((f) => f.id === feedbackId);
 
   if (!feedback) {
@@ -24,7 +24,7 @@ export async function processFeedback(feedbackId: string): Promise<void> {
   }
 
   const session = feedback.session_id
-    ? getSession(feedback.session_id)
+    ? await getSession(feedback.session_id)
     : undefined;
 
   const sessionContext = session
@@ -35,7 +35,7 @@ export async function processFeedback(feedbackId: string): Promise<void> {
     if (isNegativeSentiment(feedback)) {
       const content = buildNegativeLearning(feedback, sessionContext);
 
-      addLearning({
+      await addLearning({
         agent_id: feedback.agent_id,
         category: "self_reflection",
         content,
@@ -50,7 +50,7 @@ export async function processFeedback(feedbackId: string): Promise<void> {
     } else {
       const content = buildPositiveLearning(feedback, sessionContext);
 
-      addLearning({
+      await addLearning({
         agent_id: feedback.agent_id,
         category: "positive_signal",
         content,
@@ -64,7 +64,7 @@ export async function processFeedback(feedbackId: string): Promise<void> {
       );
     }
 
-    markProcessed(feedbackId);
+    await markProcessed(feedbackId);
   } catch (error) {
     logger.error(
       { error, feedbackId },
@@ -79,7 +79,7 @@ export async function processFeedback(feedbackId: string): Promise<void> {
  * Returns the count of successfully processed items.
  */
 export async function processAllPendingFeedback(): Promise<number> {
-  const pending = getUnprocessedFeedback();
+  const pending = await getUnprocessedFeedback();
   let processed = 0;
 
   for (const feedback of pending) {

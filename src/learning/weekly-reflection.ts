@@ -4,9 +4,9 @@ import { logger } from '../utils/logger.js';
 import { getRecentSessions } from '../memory/sessions.js';
 import { getLearnings, addLearning } from '../memory/learnings.js';
 import { getRecentDecisions } from '../memory/decisions.js';
-import { getUnprocessedFeedback, getFeedbackForSession } from '../memory/feedback.js';
+import { getFeedbackForSession } from '../memory/feedback.js';
 import { postMessage } from '../agents/tools/slack-tools.js';
-import { getDb } from '../memory/db.js';
+import { getDaiSupabase } from '../integrations/dai-supabase.js';
 
 const REFLECTION_MODEL = 'claude-opus-4-6';
 const ADA_AGENT_ID = 'ada';
@@ -24,25 +24,25 @@ export async function generateWeeklyReflection(): Promise<void> {
   logger.info('Generating Ada weekly reflection');
 
   // Gather data
-  const sessions = getRecentSessions(ADA_AGENT_ID, 50)
-    .filter((s) => {
-      const age = Date.now() - new Date(s.created_at).getTime();
-      return age < 7 * 24 * 60 * 60 * 1000;
-    });
+  const allSessions = await getRecentSessions(ADA_AGENT_ID, 50);
+  const sessions = allSessions.filter((s) => {
+    const age = Date.now() - new Date(s.created_at).getTime();
+    return age < 7 * 24 * 60 * 60 * 1000;
+  });
 
-  const decisions = getRecentDecisions(ADA_AGENT_ID, 7);
+  const decisions = await getRecentDecisions(ADA_AGENT_ID, 7);
 
-  const recentLearnings = getLearnings(ADA_AGENT_ID, undefined, 50)
-    .filter((l) => {
-      const age = Date.now() - new Date(l.created_at).getTime();
-      return age < 7 * 24 * 60 * 60 * 1000;
-    });
+  const allLearnings = await getLearnings(ADA_AGENT_ID, undefined, 50);
+  const recentLearnings = allLearnings.filter((l) => {
+    const age = Date.now() - new Date(l.created_at).getTime();
+    return age < 7 * 24 * 60 * 60 * 1000;
+  });
 
   // Count feedback sentiment
   let positiveFeedback = 0;
   let negativeFeedback = 0;
   for (const session of sessions) {
-    const feedback = getFeedbackForSession(session.id);
+    const feedback = await getFeedbackForSession(session.id);
     for (const f of feedback) {
       if (f.sentiment === 'positive') positiveFeedback++;
       else if (f.sentiment === 'negative') negativeFeedback++;
@@ -50,7 +50,7 @@ export async function generateWeeklyReflection(): Promise<void> {
   }
 
   // Transcript ingestion stats
-  const ingestionStats = getIngestionStats();
+  const ingestionStats = await getIngestionStats();
 
   // Decision outcomes
   const evaluatedDecisions = decisions.filter((d) => d.outcome);
@@ -117,7 +117,7 @@ export async function generateWeeklyReflection(): Promise<void> {
   });
 
   // Store as a learning
-  addLearning({
+  await addLearning({
     agent_id: ADA_AGENT_ID,
     category: 'weekly_reflection',
     content: reportText.slice(0, 2000),
@@ -130,14 +130,23 @@ export async function generateWeeklyReflection(): Promise<void> {
   );
 }
 
-function getIngestionStats(): { count: number; insights: number } {
-  const db = getDb();
-  const row = db.prepare(`
-    SELECT
-      COUNT(*) as count,
-      COALESCE(SUM(insights_extracted), 0) as insights
-    FROM transcript_ingestion_log
-    WHERE created_at > datetime('now', '-7 days')
-  `).get() as { count: number; insights: number } | undefined;
-  return row ?? { count: 0, insights: 0 };
+async function getIngestionStats(): Promise<{ count: number; insights: number }> {
+  const supabase = getDaiSupabase();
+  const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+
+  const { data } = await supabase
+    .from('transcript_ingestion_log')
+    .select('insights_extracted')
+    .gt('created_at', cutoff);
+
+  if (!data || data.length === 0) {
+    return { count: 0, insights: 0 };
+  }
+
+  const insights = data.reduce(
+    (sum: number, r: { insights_extracted: number }) => sum + (r.insights_extracted ?? 0),
+    0,
+  );
+
+  return { count: data.length, insights };
 }

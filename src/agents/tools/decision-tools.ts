@@ -11,7 +11,7 @@ export async function logDecisionTool(params: {
   session_id?: string;
 }): Promise<{ ok: boolean; decision_id: string }> {
   try {
-    const decision = logDecision({
+    const decision = await logDecision({
       agent_id: params.agent_id,
       account_code: params.account_code,
       decision_type: params.decision_type,

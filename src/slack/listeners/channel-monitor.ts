@@ -114,7 +114,7 @@ export function registerChannelMonitor(app: App): void {
     const priority = determinePriority(matchedKeywords);
 
     try {
-      bufferMessage({
+      await bufferMessage({
         channel_id: channel,
         user_id: userId,
         message_ts: messageTs,

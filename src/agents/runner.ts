@@ -98,26 +98,26 @@ function buildSystemPrompt(
   return parts.join('\n\n');
 }
 
-function resolveSession(
+async function resolveSession(
   agentId: string,
   channelId: string,
   userId: string,
   threadTs?: string,
   existingSessionId?: string,
-): Session {
+): Promise<Session> {
   if (existingSessionId) {
-    const existing = findSession(channelId, threadTs ?? null, agentId);
+    const existing = await findSession(channelId, threadTs ?? null, agentId);
     if (existing && existing.id === existingSessionId) {
       return existing;
     }
   }
 
-  const found = findSession(channelId, threadTs ?? null, agentId);
+  const found = await findSession(channelId, threadTs ?? null, agentId);
   if (found) {
     return found;
   }
 
-  return createSession({
+  return await createSession({
     agent_id: agentId,
     channel_id: channelId,
     thread_ts: threadTs ?? null,
@@ -327,7 +327,7 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
     `Running agent ${agentLabel}`,
   );
 
-  const session = resolveSession(
+  const session = await resolveSession(
     agent.config.id,
     channelId,
     userId,
@@ -335,7 +335,7 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
     sessionId,
   );
 
-  const context = getQuickContext(agent.config.id, userId);
+  const context = await getQuickContext(agent.config.id, userId);
   const systemPrompt = buildSystemPrompt(
     agent.persona,
     agent.instructions,
@@ -344,7 +344,7 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
   );
 
   // Load prior conversation history from this session (last 20 messages)
-  const priorMessages = getMessages(session.id, 20);
+  const priorMessages = await getMessages(session.id, 20);
   const conversationMessages: Anthropic.MessageParam[] =
     priorMessages.map((msg: ChatMessage) => ({
       role: msg.role as 'user' | 'assistant',
@@ -397,15 +397,15 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
     }
 
     // Persist the user message and assistant response (text only)
-    addMessage({ session_id: session.id, role: 'user', content: userMessage });
-    addMessage({
+    await addMessage({ session_id: session.id, role: 'user', content: userMessage });
+    await addMessage({
       session_id: session.id,
       role: 'assistant',
       content: result.responseText,
     });
 
     // Update session in the database
-    updateSession(session.id, {
+    await updateSession(session.id, {
       total_turns: session.total_turns + result.turns,
     });
 

@@ -1,47 +1,52 @@
-import { nanoid } from 'nanoid';
-import { getDb } from './db.js';
+import { nanoid } from "nanoid";
+import { getDaiSupabase } from "../integrations/dai-supabase.js";
 
 export interface ChatMessage {
   id: string;
   session_id: string;
-  role: 'user' | 'assistant';
+  role: "user" | "assistant";
   content: string;
   created_at: string;
 }
 
 export interface AddMessageParams {
   session_id: string;
-  role: 'user' | 'assistant';
+  role: "user" | "assistant";
   content: string;
 }
 
-export function addMessage(params: AddMessageParams): ChatMessage {
-  const db = getDb();
+export async function addMessage(params: AddMessageParams): Promise<ChatMessage> {
+  const supabase = getDaiSupabase();
   const id = nanoid();
 
-  const stmt = db.prepare(`
-    INSERT INTO messages (id, session_id, role, content)
-    VALUES (?, ?, ?, ?)
-  `);
+  const { data, error } = await supabase
+    .from("messages")
+    .insert({
+      id,
+      session_id: params.session_id,
+      role: params.role,
+      content: params.content,
+    })
+    .select()
+    .single();
 
-  stmt.run(id, params.session_id, params.role, params.content);
-
-  return db.prepare('SELECT * FROM messages WHERE id = ?').get(id) as ChatMessage;
+  if (error) throw new Error(`Failed to add message: ${error.message}`);
+  return data as ChatMessage;
 }
 
-export function getMessages(sessionId: string, limit = 20): ChatMessage[] {
-  const db = getDb();
+export async function getMessages(sessionId: string, limit = 20): Promise<ChatMessage[]> {
+  const supabase = getDaiSupabase();
 
   // Fetch the most recent N messages, then return them in chronological order
-  const stmt = db.prepare(`
-    SELECT * FROM (
-      SELECT * FROM messages
-      WHERE session_id = ?
-      ORDER BY created_at DESC
-      LIMIT ?
-    ) sub
-    ORDER BY created_at ASC
-  `);
+  const { data, error } = await supabase
+    .from("messages")
+    .select()
+    .eq("session_id", sessionId)
+    .order("created_at", { ascending: false })
+    .limit(limit);
 
-  return stmt.all(sessionId, limit) as ChatMessage[];
+  if (error) throw new Error(`Failed to get messages: ${error.message}`);
+
+  // Reverse to get chronological order (oldest first)
+  return ((data ?? []) as ChatMessage[]).reverse();
 }

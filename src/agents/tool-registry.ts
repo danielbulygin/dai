@@ -674,13 +674,13 @@ register({
   definition: {
     name: 'get_client_targets',
     description:
-      'Get the full KPI targets, benchmarks, anomaly thresholds, and analysis config for a client. Reads from the BMAD ads-config.yaml. Includes primary KPI, target values, category-specific targets, funnel benchmarks, budget, and markets.',
+      'Get the full KPI targets, benchmarks, anomaly thresholds, and analysis config for a client. Includes primary KPI, target values, category-specific targets, funnel benchmarks, budget, and markets.',
     input_schema: {
       type: 'object' as const,
       properties: {
         clientCode: {
           type: 'string',
-          description: 'Client code (e.g. "ninepine", "press_london")',
+          description: 'Client code from list_clients (e.g. "NP", "PL", "SS")',
         },
       },
       required: ['clientCode'],

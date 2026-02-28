@@ -57,7 +57,7 @@ export async function getRecentMentions(params?: {
 }> {
   try {
     const hours = params?.hours ?? 24;
-    const messages = getRecentMessages(hours);
+    const messages = await getRecentMessages(hours);
 
     // Filter to only messages that mention Daniel or are high priority
     const ownerMentionPattern = `<@${env.SLACK_OWNER_USER_ID}>`;

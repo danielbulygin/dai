@@ -59,13 +59,13 @@ function truncate(text: string, maxLen: number): string {
  * - Assigns importance based on tool type (Write/Edit=8, Bash=7, etc.).
  * - Delegates actual storage to `addObservation`.
  */
-export function captureObservation(obs: ToolObservation): void {
+export async function captureObservation(obs: ToolObservation): Promise<void> {
   try {
     const importance = IMPORTANCE_MAP[obs.toolName] ?? DEFAULT_IMPORTANCE;
     const inputSummary = truncate(obs.inputSummary, MAX_SUMMARY_LENGTH);
     const outputSummary = truncate(obs.outputSummary, MAX_SUMMARY_LENGTH);
 
-    addObservation({
+    await addObservation({
       session_id: obs.sessionId,
       tool_name: obs.toolName,
       input_summary: inputSummary,

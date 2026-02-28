@@ -33,7 +33,7 @@ export async function synthesizeLearnings(): Promise<void> {
   logger.info('Starting learning synthesis for Ada');
 
   // Fetch all Ada learnings
-  const allLearnings = getLearnings(ADA_AGENT_ID, undefined, 1000);
+  const allLearnings = await getLearnings(ADA_AGENT_ID, undefined, 1000);
 
   if (allLearnings.length < 10) {
     logger.debug({ count: allLearnings.length }, 'Too few learnings to synthesize');
@@ -66,10 +66,10 @@ export async function synthesizeLearnings(): Promise<void> {
             if (!kept) continue;
 
             // Delete the duplicate and update the kept one
-            deleteLearning(merge.remove_id);
+            await deleteLearning(merge.remove_id);
             // Update content of kept learning by deleting and re-adding with merged content
-            deleteLearning(merge.keep_id);
-            addLearning({
+            await deleteLearning(merge.keep_id);
+            await addLearning({
               agent_id: ADA_AGENT_ID,
               category,
               content: merge.merged_content,
@@ -86,7 +86,7 @@ export async function synthesizeLearnings(): Promise<void> {
         // Execute deprecations
         for (const id of result.deprecate_ids) {
           try {
-            deleteLearning(id);
+            await deleteLearning(id);
             totalDeprecated++;
           } catch (err) {
             logger.warn({ error: err, learningId: id }, 'Failed to deprecate learning');
@@ -96,7 +96,7 @@ export async function synthesizeLearnings(): Promise<void> {
         // Execute confidence updates
         for (const update of result.confidence_updates) {
           try {
-            updateLearningConfidence(update.id, update.new_confidence);
+            await updateLearningConfidence(update.id, update.new_confidence);
             totalUpdated++;
           } catch (err) {
             logger.warn({ error: err, update }, 'Failed to update confidence');

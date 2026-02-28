@@ -12,11 +12,10 @@ const envSchema = z.object({
   NODE_ENV: z
     .enum(['development', 'production', 'test'])
     .default('development'),
-  DB_PATH: z.string().default('data/dai.db'),
   SUPABASE_URL: z.string().optional(),
   SUPABASE_SERVICE_KEY: z.string().optional(),
-  DAI_SUPABASE_URL: z.string().optional(),
-  DAI_SUPABASE_SERVICE_KEY: z.string().optional(),
+  DAI_SUPABASE_URL: z.string().min(1, 'DAI_SUPABASE_URL is required'),
+  DAI_SUPABASE_SERVICE_KEY: z.string().min(1, 'DAI_SUPABASE_SERVICE_KEY is required'),
   FIREFLIES_API_KEY: z.string().optional(),
   NOTION_TOKEN: z.string().optional(),
   NOTION_KANBAN_DB_ID: z.string().optional(),

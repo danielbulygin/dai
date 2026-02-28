@@ -1,6 +1,6 @@
-import { getDb } from "./db.js";
+import { getDaiSupabase } from "../integrations/dai-supabase.js";
 import { getObservations } from "./observations.js";
-import { getTopLearnings, searchLearnings } from "./learnings.js";
+import { getTopLearnings } from "./learnings.js";
 import { getSession } from "./sessions.js";
 import { getFeedbackForSession } from "./feedback.js";
 import type { Session } from "./sessions.js";
@@ -32,159 +32,89 @@ export interface DeepContext {
  * Returns last session summary, top learnings, and user-specific learnings.
  * Target: ~200 tokens.
  */
-export function getQuickContext(agentId: string, userId: string): QuickContext {
-  const db = getDb();
+export async function getQuickContext(agentId: string, userId: string): Promise<QuickContext> {
+  const supabase = getDaiSupabase();
 
   // Last session summary for this agent + user
-  const lastSession = db
-    .prepare(
-      "SELECT summary FROM sessions WHERE agent_id = ? AND user_id = ? AND summary IS NOT NULL ORDER BY created_at DESC LIMIT 1",
-    )
-    .get(agentId, userId) as { summary: string } | undefined;
+  const { data: lastSession } = await supabase
+    .from("sessions")
+    .select("summary")
+    .eq("agent_id", agentId)
+    .eq("user_id", userId)
+    .not("summary", "is", null)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
 
-  // Top 5 learnings by confidence * applied_count
-  const topLearnings = getTopLearnings(agentId, 5);
+  // Top 5 learnings by score (confidence * applied_count)
+  const topLearnings = await getTopLearnings(agentId, 5);
 
   // User-specific learnings (from sessions with this user)
-  const userLearnings = db
-    .prepare(
-      `SELECT l.* FROM learnings l
-       JOIN sessions s ON l.source_session_id = s.id
-       WHERE l.agent_id = ? AND s.user_id = ? AND l.category = 'user_preference'
-       ORDER BY l.confidence DESC
-       LIMIT 5`,
-    )
-    .all(agentId, userId) as Learning[];
+  const { data: userLearningsData } = await supabase
+    .from("learnings")
+    .select("*, sessions!inner(user_id)")
+    .eq("agent_id", agentId)
+    .eq("sessions.user_id", userId)
+    .eq("category", "user_preference")
+    .order("confidence", { ascending: false })
+    .limit(5);
 
   return {
-    lastSessionSummary: lastSession?.summary ?? null,
+    lastSessionSummary: (lastSession as { summary: string } | null)?.summary ?? null,
     topLearnings,
-    userLearnings,
+    userLearnings: (userLearningsData ?? []) as Learning[],
   };
 }
 
 /**
- * Layer 2: FTS5 recall search across observations and learnings.
+ * Layer 2: Full-text recall search across observations and learnings.
  * Used when the agent needs to remember something specific.
- * When clientCode is provided, client-specific learnings are boosted (rank × 0.5).
+ * When clientCode is provided, client-specific learnings are boosted.
+ *
+ * PostgreSQL TS_RANK_CD returns higher=better (opposite of SQLite FTS5 lower=better).
+ * We use higher=better throughout and sort descending.
  */
-export function recall(query: string, agentId?: string, clientCode?: string): RecallResult[] {
-  const db = getDb();
+export async function recall(query: string, agentId?: string, clientCode?: string): Promise<RecallResult[]> {
+  const supabase = getDaiSupabase();
   const results: RecallResult[] = [];
 
-  // Search observations (unchanged — no client_code on observations)
-  const obsStmt = agentId
-    ? db.prepare(`
-        SELECT o.id, o.input_summary, o.output_summary, fts.rank
-        FROM observations_fts fts
-        JOIN observations o ON o.rowid = fts.rowid
-        JOIN sessions s ON o.session_id = s.id
-        WHERE observations_fts MATCH ? AND s.agent_id = ?
-        ORDER BY fts.rank
-        LIMIT 10
-      `)
-    : db.prepare(`
-        SELECT o.id, o.input_summary, o.output_summary, fts.rank
-        FROM observations_fts fts
-        JOIN observations o ON o.rowid = fts.rowid
-        WHERE observations_fts MATCH ?
-        ORDER BY fts.rank
-        LIMIT 10
-      `);
+  // Search observations
+  const { data: obsRows } = await supabase.rpc("search_observations", {
+    query_text: query,
+    agent_id_filter: agentId ?? null,
+    result_limit: 10,
+  });
 
-  const obsRows = (agentId ? obsStmt.all(query, agentId) : obsStmt.all(query)) as Array<{
-    id: string;
-    input_summary: string | null;
-    output_summary: string | null;
-    rank: number;
-  }>;
-
-  for (const row of obsRows) {
-    results.push({
-      source: "observation",
-      id: row.id,
-      content: [row.input_summary, row.output_summary].filter(Boolean).join(" -> "),
-      rank: row.rank,
-    });
-  }
-
-  // Search learnings — boost client-specific results when clientCode provided
-  if (clientCode && agentId) {
-    // Client-specific learnings (boosted rank)
-    const clientStmt = db.prepare(`
-      SELECT l.id, l.content, l.client_code, fts.rank
-      FROM learnings_fts fts
-      JOIN learnings l ON l.rowid = fts.rowid
-      WHERE learnings_fts MATCH ? AND l.agent_id = ? AND l.client_code = ?
-      ORDER BY fts.rank
-      LIMIT 10
-    `);
-    const clientRows = clientStmt.all(query, agentId, clientCode) as Array<{
+  if (obsRows) {
+    for (const row of obsRows as Array<{
       id: string;
-      content: string;
-      client_code: string | null;
+      input_summary: string | null;
+      output_summary: string | null;
       rank: number;
-    }>;
-    for (const row of clientRows) {
+    }>) {
       results.push({
-        source: "learning",
+        source: "observation",
         id: row.id,
-        content: row.content,
-        rank: row.rank * 0.5, // Boost client-specific results
-      });
-    }
-
-    // General learnings (non-client or different client)
-    const generalStmt = db.prepare(`
-      SELECT l.id, l.content, l.client_code, fts.rank
-      FROM learnings_fts fts
-      JOIN learnings l ON l.rowid = fts.rowid
-      WHERE learnings_fts MATCH ? AND l.agent_id = ?
-        AND (l.client_code IS NULL OR l.client_code != ?)
-      ORDER BY fts.rank
-      LIMIT 10
-    `);
-    const generalRows = generalStmt.all(query, agentId, clientCode) as Array<{
-      id: string;
-      content: string;
-      client_code: string | null;
-      rank: number;
-    }>;
-    for (const row of generalRows) {
-      results.push({
-        source: "learning",
-        id: row.id,
-        content: row.content,
+        content: [row.input_summary, row.output_summary].filter(Boolean).join(" -> "),
         rank: row.rank,
       });
     }
-  } else {
-    // No clientCode — original behavior
-    const learnStmt = agentId
-      ? db.prepare(`
-          SELECT l.id, l.content, fts.rank
-          FROM learnings_fts fts
-          JOIN learnings l ON l.rowid = fts.rowid
-          WHERE learnings_fts MATCH ? AND l.agent_id = ?
-          ORDER BY fts.rank
-          LIMIT 10
-        `)
-      : db.prepare(`
-          SELECT l.id, l.content, fts.rank
-          FROM learnings_fts fts
-          JOIN learnings l ON l.rowid = fts.rowid
-          WHERE learnings_fts MATCH ?
-          ORDER BY fts.rank
-          LIMIT 10
-        `);
+  }
 
-    const learnRows = (agentId ? learnStmt.all(query, agentId) : learnStmt.all(query)) as Array<{
+  // Search learnings with optional client boosting
+  const { data: learnRows } = await supabase.rpc("search_learnings", {
+    query_text: query,
+    agent_id_filter: agentId ?? null,
+    client_code_filter: clientCode ?? null,
+    result_limit: 20,
+  });
+
+  if (learnRows) {
+    for (const row of learnRows as Array<{
       id: string;
       content: string;
       rank: number;
-    }>;
-
-    for (const row of learnRows) {
+    }>) {
       results.push({
         source: "learning",
         id: row.id,
@@ -194,8 +124,8 @@ export function recall(query: string, agentId?: string, clientCode?: string): Re
     }
   }
 
-  // Sort combined results by FTS rank (lower = better match)
-  results.sort((a, b) => a.rank - b.rank);
+  // Sort combined results by rank (higher = better match in PostgreSQL)
+  results.sort((a, b) => b.rank - a.rank);
 
   return results;
 }
@@ -204,14 +134,14 @@ export function recall(query: string, agentId?: string, clientCode?: string): Re
  * Layer 3: Deep context for a specific session.
  * Returns full session details with all observations and feedback.
  */
-export function getDeepContext(sessionId: string): DeepContext | undefined {
-  const session = getSession(sessionId);
+export async function getDeepContext(sessionId: string): Promise<DeepContext | undefined> {
+  const session = await getSession(sessionId);
   if (!session) {
     return undefined;
   }
 
-  const observations = getObservations(sessionId);
-  const feedback = getFeedbackForSession(sessionId);
+  const observations = await getObservations(sessionId);
+  const feedback = await getFeedbackForSession(sessionId);
 
   return {
     session,

@@ -3,15 +3,19 @@ import { logger } from './utils/logger.js';
 import { slackApp } from './slack/app.js';
 import { registerAllListeners } from './slack/listeners/index.js';
 import { loadAgentRegistry } from './agents/registry.js';
-import { getDb, closeDb } from './memory/db.js';
+import { getDaiSupabase } from './integrations/dai-supabase.js';
 import { startMonitoringLoop, stopMonitoringLoop } from './monitoring/analyzer.js';
 import { setupScheduledJobs } from './scheduler/setup.js';
 import { startScheduler, stopScheduler } from './scheduler/index.js';
 
 async function start(): Promise<void> {
-  // Initialize database (runs migrations)
-  getDb();
-  logger.info('Database initialized');
+  // Verify Supabase connectivity
+  const supabase = getDaiSupabase();
+  const { error } = await supabase.from('sessions').select('id').limit(1);
+  if (error) {
+    throw new Error(`Supabase connectivity check failed: ${error.message}`);
+  }
+  logger.info('Supabase connected');
 
   // Load agent definitions
   const agents = loadAgentRegistry();
@@ -40,7 +44,6 @@ function shutdown(signal: string): void {
   logger.info({ signal }, 'Shutting down gracefully');
   stopScheduler();
   stopMonitoringLoop();
-  closeDb();
   slackApp
     .stop()
     .then(() => {

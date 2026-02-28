@@ -1,4 +1,4 @@
-import { getDb } from "../memory/db.js";
+import { getDaiSupabase } from "../integrations/dai-supabase.js";
 import { logger } from "../utils/logger.js";
 
 export interface MonitoredMessage {
@@ -28,26 +28,30 @@ export interface BufferMessageParams {
   priority?: string;
 }
 
-export function bufferMessage(params: BufferMessageParams): void {
-  const db = getDb();
+export async function bufferMessage(params: BufferMessageParams): Promise<void> {
+  const supabase = getDaiSupabase();
 
-  const stmt = db.prepare(`
-    INSERT OR IGNORE INTO channel_monitor
-      (channel_id, channel_name, user_id, user_name, message_ts, thread_ts, text, matched_keywords, priority)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
+  const { error } = await supabase
+    .from("channel_monitor")
+    .upsert(
+      {
+        channel_id: params.channel_id,
+        channel_name: params.channel_name ?? null,
+        user_id: params.user_id,
+        user_name: params.user_name ?? null,
+        message_ts: params.message_ts,
+        thread_ts: params.thread_ts ?? null,
+        text: params.text,
+        matched_keywords: params.matched_keywords ?? null,
+        priority: params.priority ?? "normal",
+      },
+      { onConflict: "message_ts", ignoreDuplicates: true },
+    );
 
-  stmt.run(
-    params.channel_id,
-    params.channel_name ?? null,
-    params.user_id,
-    params.user_name ?? null,
-    params.message_ts,
-    params.thread_ts ?? null,
-    params.text,
-    params.matched_keywords ?? null,
-    params.priority ?? "normal",
-  );
+  if (error) {
+    logger.warn({ error, message_ts: params.message_ts }, "Failed to buffer message");
+    return;
+  }
 
   logger.debug(
     { channel_id: params.channel_id, message_ts: params.message_ts, priority: params.priority },
@@ -55,71 +59,74 @@ export function bufferMessage(params: BufferMessageParams): void {
   );
 }
 
-export function getUnanalyzedMessages(limit = 100): MonitoredMessage[] {
-  const db = getDb();
+export async function getUnanalyzedMessages(limit = 100): Promise<MonitoredMessage[]> {
+  const supabase = getDaiSupabase();
 
-  const stmt = db.prepare(`
-    SELECT * FROM channel_monitor
-    WHERE analyzed = 0
-    ORDER BY created_at ASC
-    LIMIT ?
-  `);
+  const { data, error } = await supabase
+    .from("channel_monitor")
+    .select()
+    .eq("analyzed", 0)
+    .order("created_at", { ascending: true })
+    .limit(limit);
 
-  return stmt.all(limit) as MonitoredMessage[];
+  if (error) throw new Error(`Failed to get unanalyzed messages: ${error.message}`);
+  return (data ?? []) as MonitoredMessage[];
 }
 
-export function markAnalyzed(ids: number[]): void {
+export async function markAnalyzed(ids: number[]): Promise<void> {
   if (ids.length === 0) return;
 
-  const db = getDb();
+  const supabase = getDaiSupabase();
 
-  const placeholders = ids.map(() => "?").join(", ");
-  const stmt = db.prepare(`
-    UPDATE channel_monitor SET analyzed = 1 WHERE id IN (${placeholders})
-  `);
+  const { error } = await supabase
+    .from("channel_monitor")
+    .update({ analyzed: 1 })
+    .in("id", ids);
 
-  stmt.run(...ids);
+  if (error) throw new Error(`Failed to mark messages as analyzed: ${error.message}`);
 
   logger.debug({ count: ids.length }, "Marked messages as analyzed");
 }
 
-export function getRecentMessages(
+export async function getRecentMessages(
   hours = 24,
   channelId?: string,
-): MonitoredMessage[] {
-  const db = getDb();
+): Promise<MonitoredMessage[]> {
+  const supabase = getDaiSupabase();
+  const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+
+  let query = supabase
+    .from("channel_monitor")
+    .select()
+    .gte("created_at", cutoff)
+    .order("created_at", { ascending: false });
 
   if (channelId) {
-    const stmt = db.prepare(`
-      SELECT * FROM channel_monitor
-      WHERE created_at >= datetime('now', ? || ' hours')
-        AND channel_id = ?
-      ORDER BY created_at DESC
-    `);
-    return stmt.all(`-${hours}`, channelId) as MonitoredMessage[];
+    query = query.eq("channel_id", channelId);
   }
 
-  const stmt = db.prepare(`
-    SELECT * FROM channel_monitor
-    WHERE created_at >= datetime('now', ? || ' hours')
-    ORDER BY created_at DESC
-  `);
-  return stmt.all(`-${hours}`) as MonitoredMessage[];
+  const { data, error } = await query;
+
+  if (error) throw new Error(`Failed to get recent messages: ${error.message}`);
+  return (data ?? []) as MonitoredMessage[];
 }
 
-export function cleanOldMessages(daysToKeep = 7): number {
-  const db = getDb();
+export async function cleanOldMessages(daysToKeep = 7): Promise<number> {
+  const supabase = getDaiSupabase();
+  const cutoff = new Date(Date.now() - daysToKeep * 24 * 60 * 60 * 1000).toISOString();
 
-  const stmt = db.prepare(`
-    DELETE FROM channel_monitor
-    WHERE created_at < datetime('now', ? || ' days')
-  `);
+  const { data, error } = await supabase
+    .from("channel_monitor")
+    .delete()
+    .lt("created_at", cutoff)
+    .select("id");
 
-  const result = stmt.run(`-${daysToKeep}`);
+  if (error) throw new Error(`Failed to clean old messages: ${error.message}`);
 
-  if (result.changes > 0) {
-    logger.info({ deleted: result.changes, daysToKeep }, "Cleaned old monitored messages");
+  const deleted = data?.length ?? 0;
+  if (deleted > 0) {
+    logger.info({ deleted, daysToKeep }, "Cleaned old monitored messages");
   }
 
-  return result.changes;
+  return deleted;
 }

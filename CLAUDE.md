@@ -6,14 +6,14 @@ Multi-agent Slack system powered by Claude. Agents live in Slack, respond to @me
 - TypeScript (strict, ESM), Node.js 22+
 - @slack/bolt (Socket Mode)
 - @anthropic-ai/sdk for Claude API
-- SQLite via better-sqlite3
+- Supabase (PostgreSQL) for persistence — all data layer functions are async
 - pnpm for package management
 
 ## Architecture
 - Agent definitions are YAML/MD data files in `agents/`, not code
 - 4 starter agents: Otto (orchestrator), Coda (dev), Rex (research), Sage (reviewer)
 - Routing: Slack events -> router -> agent runner -> Claude API -> Slack response
-- Memory: SQLite with 3-layer progressive disclosure
+- Memory: Supabase (PostgreSQL) with 3-layer progressive disclosure, FTS via tsvector
 - Learning: Reactions -> feedback -> learnings -> context injection
 
 ## Conventions

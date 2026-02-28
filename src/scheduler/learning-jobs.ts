@@ -30,4 +30,10 @@ export function registerLearningJobs(): void {
     const { generateWeeklyReflection } = await import('../learning/weekly-reflection.js');
     await generateWeeklyReflection();
   });
+
+  // Nina/Daniel call monitoring (daily 9am Berlin)
+  registerJob('nina-daniel-monitoring', '0 9 * * *', 'Europe/Berlin', async () => {
+    const { monitorNinaDanielCalls } = await import('../learning/transcript-ingestor.js');
+    await monitorNinaDanielCalls();
+  });
 }

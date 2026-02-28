@@ -56,7 +56,7 @@ export async function recall(params: {
 }> {
   try {
     const clientCode = normalizeClientCode(params.client_code);
-    const raw = memoryRecall(params.query, params.agent_id, clientCode);
+    const raw = await memoryRecall(params.query, params.agent_id, clientCode);
 
     const results = raw.map((r) => ({
       type: r.source,
@@ -87,7 +87,7 @@ export async function remember(params: {
     const clientCode = normalizeClientCode(params.client_code) ?? null;
 
     // Check for duplicate/near-duplicate learnings before inserting
-    const existing = findDuplicateLearning(
+    const existing = await findDuplicateLearning(
       params.agent_id,
       params.category,
       params.content,
@@ -102,7 +102,7 @@ export async function remember(params: {
       return { id: existing.id, saved: true, deduplicated: true };
     }
 
-    const learning = addLearning({
+    const learning = await addLearning({
       agent_id: params.agent_id,
       category: params.category,
       content: params.content,
@@ -132,7 +132,7 @@ export async function searchMemories(params: {
   try {
     const limit = params.limit ?? 10;
     const clientCode = normalizeClientCode(params.client_code);
-    const raw = searchLearnings(params.topic, clientCode);
+    const raw = await searchLearnings(params.topic, clientCode);
 
     const memories = raw.slice(0, limit).map((l) => ({
       content: l.content,

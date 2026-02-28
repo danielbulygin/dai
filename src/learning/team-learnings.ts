@@ -29,7 +29,7 @@ export async function aggregateTeamLearnings(): Promise<void> {
   const allLearnings: Learning[] = [];
   for (const agentId of agentIds) {
     try {
-      const top = getTopLearnings(agentId, 20);
+      const top = await getTopLearnings(agentId, 20);
       allLearnings.push(...top);
     } catch (error) {
       logger.warn(
@@ -61,7 +61,7 @@ export async function aggregateTeamLearnings(): Promise<void> {
 
     for (const pattern of patterns) {
       // Check if we already have a similar team learning
-      const existing = getTeamLearnings(100);
+      const existing = await getTeamLearnings(100);
       const isDuplicate = existing.some(
         (e) => e.category === category && contentOverlap(e.content, pattern) > 0.7,
       );
@@ -72,7 +72,7 @@ export async function aggregateTeamLearnings(): Promise<void> {
 
       const sourceAgents = [...uniqueAgents].join(", ");
 
-      addLearning({
+      await addLearning({
         agent_id: TEAM_AGENT_ID,
         category,
         content: `[Team pattern from: ${sourceAgents}] ${pattern}`,
@@ -96,9 +96,9 @@ export async function aggregateTeamLearnings(): Promise<void> {
 /**
  * Retrieve team-wide learnings (agent_id='_team').
  */
-export function getTeamLearnings(limit = 20): Learning[] {
+export async function getTeamLearnings(limit = 20): Promise<Learning[]> {
   try {
-    return getLearnings(TEAM_AGENT_ID, undefined, limit);
+    return await getLearnings(TEAM_AGENT_ID, undefined, limit);
   } catch (error) {
     logger.error({ error }, "Failed to get team learnings");
     return [];

@@ -1,5 +1,5 @@
 import { nanoid } from "nanoid";
-import { getDb } from "./db.js";
+import { getDaiSupabase } from "../integrations/dai-supabase.js";
 
 export interface Decision {
   id: string;
@@ -26,65 +26,74 @@ export interface LogDecisionParams {
   session_id?: string;
 }
 
-export function logDecision(params: LogDecisionParams): Decision {
-  const db = getDb();
+export async function logDecision(params: LogDecisionParams): Promise<Decision> {
+  const supabase = getDaiSupabase();
   const id = nanoid();
 
-  const stmt = db.prepare(`
-    INSERT INTO decisions (id, agent_id, account_code, decision_type, target, rationale, metrics_snapshot, session_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `);
+  const { data, error } = await supabase
+    .from("decisions")
+    .insert({
+      id,
+      agent_id: params.agent_id,
+      account_code: params.account_code,
+      decision_type: params.decision_type,
+      target: params.target,
+      rationale: params.rationale,
+      metrics_snapshot: params.metrics_snapshot ? JSON.stringify(params.metrics_snapshot) : null,
+      session_id: params.session_id ?? null,
+    })
+    .select()
+    .single();
 
-  stmt.run(
-    id,
-    params.agent_id,
-    params.account_code,
-    params.decision_type,
-    params.target,
-    params.rationale,
-    params.metrics_snapshot ? JSON.stringify(params.metrics_snapshot) : null,
-    params.session_id ?? null,
-  );
-
-  return db.prepare("SELECT * FROM decisions WHERE id = ?").get(id) as Decision;
+  if (error) throw new Error(`Failed to log decision: ${error.message}`);
+  return data as Decision;
 }
 
-export function getPendingDecisions(minAgeDays = 3): Decision[] {
-  const db = getDb();
-  const stmt = db.prepare(`
-    SELECT * FROM decisions
-    WHERE outcome IS NULL
-      AND created_at < datetime('now', ? || ' days')
-    ORDER BY created_at ASC
-  `);
-  return stmt.all(`-${minAgeDays}`) as Decision[];
+export async function getPendingDecisions(minAgeDays = 3): Promise<Decision[]> {
+  const supabase = getDaiSupabase();
+  const cutoff = new Date(Date.now() - minAgeDays * 24 * 60 * 60 * 1000).toISOString();
+
+  const { data, error } = await supabase
+    .from("decisions")
+    .select()
+    .is("outcome", null)
+    .lt("created_at", cutoff)
+    .order("created_at", { ascending: true });
+
+  if (error) throw new Error(`Failed to get pending decisions: ${error.message}`);
+  return (data ?? []) as Decision[];
 }
 
-export function recordOutcome(
+export async function recordOutcome(
   id: string,
   outcome: string,
   outcomeMetrics?: Record<string, unknown>,
-): void {
-  const db = getDb();
-  const stmt = db.prepare(`
-    UPDATE decisions
-    SET outcome = ?, outcome_metrics = ?, evaluated_at = datetime('now')
-    WHERE id = ?
-  `);
-  stmt.run(
-    outcome,
-    outcomeMetrics ? JSON.stringify(outcomeMetrics) : null,
-    id,
-  );
+): Promise<void> {
+  const supabase = getDaiSupabase();
+
+  const { error } = await supabase
+    .from("decisions")
+    .update({
+      outcome,
+      outcome_metrics: outcomeMetrics ? JSON.stringify(outcomeMetrics) : null,
+      evaluated_at: new Date().toISOString(),
+    })
+    .eq("id", id);
+
+  if (error) throw new Error(`Failed to record outcome: ${error.message}`);
 }
 
-export function getRecentDecisions(agentId: string, days = 7): Decision[] {
-  const db = getDb();
-  const stmt = db.prepare(`
-    SELECT * FROM decisions
-    WHERE agent_id = ?
-      AND created_at > datetime('now', ? || ' days')
-    ORDER BY created_at DESC
-  `);
-  return stmt.all(agentId, `-${days}`) as Decision[];
+export async function getRecentDecisions(agentId: string, days = 7): Promise<Decision[]> {
+  const supabase = getDaiSupabase();
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+
+  const { data, error } = await supabase
+    .from("decisions")
+    .select()
+    .eq("agent_id", agentId)
+    .gt("created_at", cutoff)
+    .order("created_at", { ascending: false });
+
+  if (error) throw new Error(`Failed to get recent decisions: ${error.message}`);
+  return (data ?? []) as Decision[];
 }

@@ -206,7 +206,7 @@ async function persistInsight(result: AnalysisResult): Promise<void> {
 }
 
 export async function analyzeBufferedMessages(): Promise<AnalysisResult | null> {
-  const messages = getUnanalyzedMessages(100);
+  const messages = await getUnanalyzedMessages(100);
 
   if (messages.length === 0) {
     logger.debug("No unanalyzed messages to process");
@@ -238,7 +238,7 @@ export async function analyzeBufferedMessages(): Promise<AnalysisResult | null> 
 
     // Mark all messages as analyzed
     const ids = messages.map((m) => m.id);
-    markAnalyzed(ids);
+    await markAnalyzed(ids);
 
     // Persist analysis results to Supabase (best-effort)
     await persistInsight(result);
@@ -271,7 +271,7 @@ export async function analyzeBufferedMessages(): Promise<AnalysisResult | null> 
 
     // Still mark as analyzed to avoid reprocessing on repeated failures
     const ids = messages.map((m) => m.id);
-    markAnalyzed(ids);
+    await markAnalyzed(ids);
 
     return null;
   }
@@ -298,11 +298,9 @@ export function startMonitoringLoop(intervalMinutes = 15): void {
     });
 
     // Clean old messages once per cycle
-    try {
-      cleanOldMessages(7);
-    } catch (err) {
+    cleanOldMessages(7).catch((err) => {
       logger.error({ err }, "Failed to clean old monitored messages");
-    }
+    });
   }, intervalMs);
 }
 

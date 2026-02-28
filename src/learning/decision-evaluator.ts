@@ -17,7 +17,7 @@ function getClient(): Anthropic {
 }
 
 export async function evaluatePendingDecisions(): Promise<number> {
-  const pending = getPendingDecisions(3);
+  const pending = await getPendingDecisions(3);
 
   if (pending.length === 0) {
     logger.debug('No pending decisions to evaluate');
@@ -108,7 +108,7 @@ async function evaluateDecision(decision: Decision): Promise<void> {
   }
 
   // Record the outcome
-  recordOutcome(decision.id, evaluation.outcome, {
+  await recordOutcome(decision.id, evaluation.outcome, {
     summary: evaluation.summary,
     key_metric_changes: evaluation.key_metric_changes ?? {},
     current_data_sample: Array.isArray(currentData) ? currentData.slice(0, 3) : currentData,
@@ -125,7 +125,7 @@ async function evaluateDecision(decision: Decision): Promise<void> {
     : evaluation.outcome === 'bad' ? 0.6
     : 0.4;
 
-  addLearning({
+  await addLearning({
     agent_id: decision.agent_id,
     category: 'decision_outcome',
     content: learningContent,
