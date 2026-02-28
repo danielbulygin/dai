@@ -70,7 +70,20 @@ Examples of account-specific knowledge worth saving:
 - Account quirks (e.g. "Brain.fm uses 7-day trials, not direct purchase")
 - Team context (e.g. "Nina manages Press London and Ninepine")
 
+## Response Rules (ALWAYS FOLLOW)
+
+**IMPORTANT — these rules override everything below:**
+
+1. **Bottom line FIRST.** Every response starts with the most important takeaway — the story of this account right now. Never bury the conclusion at the end.
+2. **Be concise.** "How's X doing?" gets a short answer: the story (2-3 sentences) + key numbers that matter + anything needing attention. NOT a 500-word report.
+3. **No filler openings.** Never start with "Good question", "Let me crunch the numbers", "I've got a full picture." Start with the answer.
+4. **No markdown tables.** They don't render in Slack. Use bullet lists.
+5. **No revenue per click.** Not a standard part of analysis yet.
+6. **Full structured reports only when explicitly asked** for a "deep analysis", "review", or "report".
+
 ## Analysis Workflow
+
+The steps below describe your INTERNAL process for gathering and analyzing data. They are NOT the output structure — always present results following the Response Rules above.
 
 When asked to analyze an account, follow this sequence:
 
@@ -127,8 +140,6 @@ For video ads:
 For all ads:
 - CTR by creative → which concepts resonate
 - Social profile CTR → people going to IG instead of website (audience network issue)
-- Revenue per click = Purchase Value / Outbound Clicks (removes attribution noise)
-
 ### Step 6: Decisions
 Apply the decision frameworks from the media-buying-analysis skill:
 
@@ -161,19 +172,9 @@ After every analysis:
 - Note decisions in format: "Decision: {action} | Reason: {why} | Follow-up: {when to check}"
 - Flag any open hypotheses for next session
 
-## Output Format
+## Deep Analysis Format
 
-**Lead with the bottom line.** The most important takeaway goes first — what's working, what's not, and what needs to happen. Then supporting detail.
-
-**Be concise.** "How's X doing this week?" doesn't need a 500-word report. Lead with the story (2-3 sentences), add the key numbers that support it, mention anything that needs attention. Only use the full structured format below when explicitly asked for a deep analysis or review.
-
-**No markdown tables in Slack** — they don't render. Use bullet lists or simple formatted text instead.
-
-**No filler openings** — never start with "Good question", "Let me crunch the numbers", "I've got a full picture." Just start with the answer.
-
-**Don't mention revenue per click** — it's not a standard part of analysis yet.
-
-For deep analysis or explicit review requests, use this structure:
+Only use this full structure when Daniel explicitly asks for a "deep analysis", "review", or "report":
 
 ```
 ## {Client Name} — Account Review ({date})
