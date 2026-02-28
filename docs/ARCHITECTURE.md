@@ -4,7 +4,7 @@
 
 Daniel wants to build a Slack-based multi-agent system where AI agents with distinct personas live in Slack, users interact with them via @mentions/DMs/commands, agents can collaborate with each other in channels, and the system learns from feedback. Inspired by OpenClaw (gateway/session model), claude-mem (memory compression), Superpowers (skills/subagent pipelines), and BMAD (agent personas/modules/workflows).
 
-**Stack**: TypeScript, Node.js 22+, Claude Agent SDK, @slack/bolt (Socket Mode), SQLite, pnpm
+**Stack**: TypeScript, Node.js 22+, @anthropic-ai/sdk, @slack/bolt (Socket Mode), Supabase (PostgreSQL), pnpm
 
 ---
 
@@ -83,12 +83,19 @@ Registry of all agents with id, path, display_name, icon, description, tags
 
 ## Phase 4: Memory & Persistence
 
-### 4.1 SQLite schema (5 tables + FTS5)
+### 4.1 Supabase (PostgreSQL) schema
+Two Supabase projects:
+- **DAI Supabase** (fgwzscafqolpjtmcnxhn): sessions, observations, summaries, learnings, messages, feedback, decisions, meetings, meeting_sentences, transcript_ingestion_log, methodology_knowledge, pending_insights
+- **BMAD Supabase** (bzhqvxknwvxhgpovrhlp): clients, ad account data, alerts, client_configs
+
+Core tables:
 - `sessions` - Agent sessions (channel, thread, claude_session_id, summary, cost)
 - `observations` - Raw tool observations (tool_name, input/output summaries, importance)
 - `summaries` - AI-compressed session/daily/weekly summaries
-- `learnings` - Extracted learnings (category, confidence, applied_count)
+- `learnings` - Extracted learnings (category, confidence, applied_count, client_code)
 - `feedback` - User reactions/feedback (type, sentiment, processed flag)
+
+Full-text search via tsvector + GIN indexes + RPC functions (search_observations, search_learnings, search_meetings, search_methodology).
 
 ### 4.2 SDK Hooks
 - `memory-capture.ts` (PostToolUse) - Capture tool observations
@@ -122,6 +129,89 @@ Registry of all agents with id, path, display_name, icon, description, tags
 ### 6.1 Feedback: :thumbsup:/:thumbsdown: reactions -> learning records
 ### 6.2 Self-reflection: Post-session "what could improve?" analysis
 ### 6.3 Team learnings: Aggregate across sessions, inject into all agents
+
+---
+
+## Fireflies Meeting Pipeline
+
+End-to-end system for capturing, storing, deduplicating, and extracting insights from Fireflies.ai call transcripts.
+
+### Data Flow
+
+```
+Fireflies.ai (call recorded)
+  │
+  ├─► Webhook (real-time)              POST to /functions/v1/fireflies-webhook
+  │     { meetingId, eventType }        Fetches full meeting, upserts, deduplicates
+  │
+  └─► Cron sync (every 3h, safety net) /functions/v1/sync-fireflies
+        Lists new meetings, fetches details, upserts, deduplicates
+  │
+  ▼
+DAI Supabase: `meetings` + `meeting_sentences` tables
+  │
+  ▼  (Sunday 8am Berlin, src/learning/transcript-ingestor.ts)
+Pattern matching (src/learning/meeting-patterns.ts)
+  → Claude Sonnet extracts insights (account_insight, methodology, creative, etc.)
+  → Deduplicates against existing learnings (60% word overlap threshold)
+  │
+  ▼
+DAI Supabase: `learnings` table (agent_id='ada', client_code, confidence)
+  │
+  ▼  (Sunday 9am Berlin, src/learning/learning-synthesizer.ts)
+Claude Opus merges duplicates, deprecates stale learnings, adjusts confidence
+  │
+  ▼
+Injected into Ada's context at query time via search_learnings()
+```
+
+### Storage (DAI Supabase — fgwzscafqolpjtmcnxhn)
+
+| Table | Purpose | Key fields |
+|-------|---------|------------|
+| `meetings` | One row per call | id, title, date, organizer_email (= transcript source), speakers[], full_transcript, FTS vectors |
+| `meeting_sentences` | Sentence-level transcript | meeting_id (CASCADE), speaker_name, text, start/end_time |
+| `sync_state` | Singleton tracking sync progress | last_synced_at, total_synced |
+| `transcript_ingestion_log` | Prevents re-extracting insights from same meeting | meeting_id (UNIQUE), pattern_id, insights_extracted |
+| `learnings` | Extracted insights used by agents | agent_id, category, content, confidence, client_code, applied_count |
+| `methodology_knowledge` | Bulk-extracted rules/patterns from Nina-Daniel calls | type (rule/insight/decision/creative_pattern/methodology), body (JSONB), account_code |
+
+### Deduplication
+
+Multiple Fireflies bots can record the same call (each participant's bot creates a separate transcript). The `dedup_meetings()` RPC function runs after every sync:
+- Groups meetings by (same title, date within 10 minutes)
+- Keeps Daniel's copy (`organizer_email = daniel.bulygin@gmail.com`) as canonical
+- If Daniel wasn't in the meeting, keeps the copy with the lowest ID
+- `meeting_sentences` cascade-delete automatically
+
+The `organizer_email` field indicates whose Fireflies bot recorded the transcript — it's the **source** of that copy, not necessarily the meeting organizer.
+
+### Edge Functions
+
+| Function | Trigger | Purpose |
+|----------|---------|---------|
+| `sync-fireflies` | pg_cron every 3h | Lists new meetings from Fireflies API, fetches details, upserts, deduplicates |
+| `fireflies-webhook` | Fireflies webhook POST | Real-time: receives meetingId, fetches details, upserts, deduplicates |
+
+### Search RPCs
+
+| Function | Used by | How |
+|----------|---------|-----|
+| `search_meetings(query, from_date, to_date, speaker_filter)` | Ada, Jasmin (via `search_meetings` tool) | FTS on summary (2x boost) + transcript |
+| `search_learnings(query, client_code_filter)` | Ada (via `search_learnings` tool) | FTS on learnings, client-specific 2x boost |
+| `search_methodology(query, type_filter, account_filter)` | Ada (via `search_methodology` tool) | FTS on methodology_knowledge, account-specific boost |
+
+### Key Files
+
+| File | Role |
+|------|------|
+| `supabase/functions/sync-fireflies/index.ts` | Cron sync edge function |
+| `supabase/functions/fireflies-webhook/index.ts` | Webhook receiver edge function |
+| `src/learning/transcript-ingestor.ts` | Sunday insight extraction (Claude Sonnet) |
+| `src/learning/meeting-patterns.ts` | Which meetings to extract insights from |
+| `src/learning/learning-synthesizer.ts` | Sunday merge/dedup of learnings (Claude Opus) |
+| `src/agents/tools/fireflies-tools.ts` | Agent tools: searchMeetings, getMeetingTranscript, etc. |
+| `supabase/migrations/20260228100000_dedup_meetings.sql` | dedup_meetings() RPC function |
 
 ---
 
