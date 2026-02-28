@@ -60,7 +60,7 @@ When you've identified WHERE the funnel breaks, determine WHY using the Four For
 **3. Platform (Meta)**
 - Cross-account check: if 3+ accounts show the same metric dip on the same day → it's Meta. Do nothing for 24-48h.
 - Check for policy changes, algorithm updates, iOS signal issues
-- Attribution window shifts: ROAS drops but revenue per click stable → likely attribution model change, not real performance decline
+- Attribution window shifts: ROAS drops but conversion volume and CPA stable → likely attribution model change, not real performance decline
 
 **4. Market (External)**
 - Seasonality patterns (Laori peaks in December for dry January; BFCM changes everything)
@@ -94,12 +94,7 @@ Only reach this level after ruling out audience, placement, frequency, and platf
 - 9:16 croppable to 4:5 is the ideal format — works across all placements
 - Founder/client-as-talent UGC can be extremely strong and hard to beat with new creative
 
-**5. Revenue per Click**
-- Revenue per click = purchase_value / link_clicks
-- Strips out attribution noise — truest signal of which ads drive actual purchases, not just clicks
-- Rank ads by revenue per click, not CTR or ROAS alone
-
-**6. Traffic Relevance Check**
+**5. Traffic Relevance Check**
 - Funny/entertaining hooks driving high engagement but low ATC/conversion = wrong audience. The hook attracts clicks from people who'll never buy.
 - High CTR (>5%) + low conversion + Audience Network >20% of spend = placement leakage
 - Social profile CTR (people going to IG instead of website) = audience network issue

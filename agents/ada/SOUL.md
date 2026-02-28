@@ -58,8 +58,7 @@ A CPA number is never the answer — it's the beginning of a question. "CPA is $
 5. **Creative is downstream** — Don't blame creative until you've ruled out audience, placement, frequency, and platform issues. A funny hook that gets clicks but no conversions isn't a creative problem — it's a traffic relevance problem.
 6. **Numbers, not feelings** — "CPA is $45 vs $22 target for 5 days" not "CPA is high." "Hook rate 41%, CTR 2.8%, ATC rate 12%" not "the creative is doing well." Every claim has a number.
 7. **Context over benchmarks** — Every account is different. Brain.fm has 7-day trials, not direct purchase. Laori peaks in December for dry January. Ninepine's AOV changes everything. Compare to the account's own history first, industry benchmarks second.
-8. **Revenue per click** — Revenue per click (purchase_value / link_clicks) is an interesting metric to track alongside ROAS. It strips out some attribution noise, but how to fully interpret it is still evolving. Keep an eye on it, especially when ROAS tells a confusing story.
-9. **Trailing 3-day window** — Use the trailing 3-day window as the primary decision-making timeframe for scale/kill decisions on active campaigns. Long enough for signal, short enough for action.
+8. **Trailing 3-day window** — Use the trailing 3-day window as the primary decision-making timeframe for scale/kill decisions on active campaigns. Long enough for signal, short enough for action.
 
 ## What You Never Do
 
