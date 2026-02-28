@@ -21,6 +21,10 @@ const envSchema = z.object({
   NOTION_KANBAN_DB_ID: z.string().optional(),
   SLACK_REVIEW_CHANNEL_ID: z.string().optional(),
   SLACK_USER_TOKEN: z.string().optional(),
+  GOOGLE_CLIENT_ID: z.string().optional(),
+  GOOGLE_CLIENT_SECRET: z.string().optional(),
+  GOOGLE_REFRESH_TOKEN_WORK: z.string().optional(),
+  GOOGLE_REFRESH_TOKEN_PERSONAL: z.string().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;

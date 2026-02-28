@@ -8,7 +8,7 @@ Jasmin evolves from a capable assistant into Daniel's **always-on chief of staff
 
 ## Current State (as of Feb 2026)
 
-**What Jasmin has (21 tools, `assistant` profile):**
+**What Jasmin has (28 tools, `assistant` profile):**
 - Memory: recall, remember, search_memories (3)
 - Delegation: ask_agent → Otto → specialists (1)
 - Slack messaging: post_message, reply_in_thread, send_as_daniel, read_dms (4)
@@ -16,6 +16,8 @@ Jasmin evolves from a capable assistant into Daniel's **always-on chief of staff
 - Notion tasks: query, create, update, comment, search (5)
 - Channel monitoring: get_channel_insights, get_recent_mentions, get_monitoring_history (3)
 - Briefings: generate_briefing — morning/EOD, persisted to Supabase (1)
+- Google Calendar: list_events, search_events, create_event, check_availability (4)
+- Gmail: search_emails, read_email, draft_email (3)
 
 **What Jasmin does today:**
 - Responds to DMs and @mentions, delegates specialist work to Otto
@@ -55,60 +57,12 @@ Keyword pre-filter → Supabase buffer → 15-min batch Claude analysis → DM D
 ### Send As Daniel ✅
 `send_as_daniel` and `read_dms` tools using `SLACK_USER_TOKEN` (xoxp-). Gated to assistant profile. Instructions require Daniel's explicit approval before sending.
 
+### Phase 3: Calendar & Email Integration ✅
+7 tools: list_events, search_events, create_event, check_availability, search_emails, read_email, draft_email. Uses `googleapis` package with OAuth2 refresh tokens. Two accounts: work (adsontap.io, default) + personal (gmail). Availability checks and event search query both accounts in parallel. Emails always draft-only — never sends directly.
+
 ---
 
 ## Remaining Phases
-
-### Phase 3: Calendar & Email Integration
-
-**Goal:** Jasmin can check Daniel's calendar, create events, read/search emails, and draft replies.
-**Prerequisites:** Google OAuth credentials for Daniel's accounts (personal gmail + work adsontap.io).
-**Estimate:** Medium complexity — needs OAuth token management.
-
-#### Approach Options
-
-**Option A: Google OAuth directly**
-- Use `googleapis` npm package
-- Store refresh tokens in `.env` or Supabase
-- Create `src/integrations/google.ts` with calendar + gmail clients
-- Pro: Full control, no external deps. Con: OAuth flow setup, token refresh logic.
-
-**Option B: `gogcli` or similar CLI wrapper**
-- Shell out to a CLI tool for calendar/email
-- Pro: Quick. Con: Fragile, hard to extend.
-
-**Option C: MCP servers**
-- Use existing Google Calendar / Gmail MCP servers
-- Pro: Standard interface. Con: MCP overhead, may not fit agent tool pattern.
-
-**Recommended: Option A** — direct Google OAuth. Matches the Notion integration pattern.
-
-#### Tools to Add (7 new)
-| Tool | Description |
-|------|-------------|
-| `list_events` | List calendar events for a date range |
-| `search_events` | Search events by query across both accounts |
-| `create_event` | Create calendar event (confirmation required for events with attendees) |
-| `check_availability` | Check free/busy across both calendars |
-| `search_emails` | Search emails by query, sender, date range |
-| `read_email` | Read a specific email thread |
-| `draft_email` | Create a draft email (never send directly) |
-
-#### Key Files to Create/Modify
-| File | Action |
-|------|--------|
-| `src/integrations/google.ts` | Create — OAuth client, token refresh, calendar + gmail APIs |
-| `src/agents/tools/google-tools.ts` | Create — 7 tool implementations |
-| `src/agents/tool-registry.ts` | Modify — register 7 new tools |
-| `src/agents/profiles/index.ts` | Modify — add tools to assistant profile |
-| `agents/jasmin/INSTRUCTIONS.md` | Modify — add calendar/email operating rules |
-| `.env` / `.env.example` | Modify — add Google OAuth vars |
-
-#### Operating Rules for Jasmin
-- **Calendar**: Can view freely. Creating events with attendees requires Daniel's confirmation.
-- **Email**: Can search and read freely. Never send — only create drafts for Daniel's review.
-- **Default account**: work (adsontap.io). Must specify when using personal.
-- **Two accounts**: personal gmail, work adsontap.io — both accessible.
 
 ---
 
@@ -217,7 +171,8 @@ src/agents/
     ├── slack-tools.ts      # post_message, reply_in_thread, send_as_daniel, read_dms
     ├── fireflies-tools.ts  # 4 meeting tools
     ├── notion-tools.ts     # 5 task/search tools
-    └── monitoring-tools.ts # channel insights, mentions, history, briefing
+    ├── monitoring-tools.ts # channel insights, mentions, history, briefing
+    └── google-tools.ts     # 4 calendar + 3 gmail tools
 
 src/monitoring/
 ├── buffer.ts               # Supabase message buffer for channel monitoring
@@ -257,6 +212,10 @@ src/slack/listeners/
 | `DAI_SUPABASE_SERVICE_KEY` | Yes | DAI Supabase service role key |
 | `NOTION_TOKEN` | No | Notion integration token |
 | `NOTION_KANBAN_DB_ID` | No | Notion kanban database ID |
+| `GOOGLE_CLIENT_ID` | No | Google OAuth client ID |
+| `GOOGLE_CLIENT_SECRET` | No | Google OAuth client secret |
+| `GOOGLE_REFRESH_TOKEN_WORK` | No | Refresh token for work (adsontap.io) account |
+| `GOOGLE_REFRESH_TOKEN_PERSONAL` | No | Refresh token for personal (gmail) account |
 
 ### Deployment
 - **Droplet**: 139.59.144.194 (fra1, 4 vCPU, 8GB RAM, Ubuntu 24.04)

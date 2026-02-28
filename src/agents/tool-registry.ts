@@ -10,6 +10,7 @@ import * as monitoringTools from './tools/monitoring-tools.js';
 import * as decisionTools from './tools/decision-tools.js';
 import * as clientConfigTools from './tools/client-config-tools.js';
 import * as methodologyTools from './tools/methodology-tools.js';
+import * as googleTools from './tools/google-tools.js';
 import { logger } from '../utils/logger.js';
 
 // ---------------------------------------------------------------------------
@@ -1382,6 +1383,266 @@ register({
       id: input.id as string,
     });
     return JSON.stringify(result);
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Google Calendar & Gmail tools
+// ---------------------------------------------------------------------------
+
+register({
+  definition: {
+    name: 'list_events',
+    description:
+      'List calendar events for a date range. Returns events from a single Google account (default: work).',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        startDate: {
+          type: 'string',
+          description: 'Start date (ISO 8601, e.g. "2026-02-28" or "2026-02-28T09:00:00")',
+        },
+        endDate: {
+          type: 'string',
+          description: 'End date (ISO 8601). If omitted, shows events for startDate only.',
+        },
+        account: {
+          type: 'string',
+          enum: ['work', 'personal'],
+          description: 'Google account to query (default: work)',
+        },
+      },
+      required: ['startDate'],
+    },
+  },
+  async execute(input) {
+    return await googleTools.listEvents({
+      startDate: input.startDate as string,
+      endDate: input.endDate as string | undefined,
+      account: input.account as string | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'search_events',
+    description:
+      'Search calendar events by keyword across both Google accounts (work + personal). Results are merged and sorted by start time.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Search query (matches event title, description, location)',
+        },
+        startDate: {
+          type: 'string',
+          description: 'Start of search window (ISO 8601). Default: 30 days ago.',
+        },
+        endDate: {
+          type: 'string',
+          description: 'End of search window (ISO 8601). Default: 90 days from now.',
+        },
+      },
+      required: ['query'],
+    },
+  },
+  async execute(input) {
+    return await googleTools.searchEvents({
+      query: input.query as string,
+      startDate: input.startDate as string | undefined,
+      endDate: input.endDate as string | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'create_event',
+    description:
+      'Create a calendar event. If attendees are provided, invitations are sent automatically. Always confirm with Daniel before creating events with attendees.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        summary: { type: 'string', description: 'Event title' },
+        startTime: {
+          type: 'string',
+          description: 'Event start time (ISO 8601, e.g. "2026-02-28T14:00:00")',
+        },
+        endTime: {
+          type: 'string',
+          description: 'Event end time (ISO 8601, e.g. "2026-02-28T15:00:00")',
+        },
+        description: { type: 'string', description: 'Event description' },
+        location: { type: 'string', description: 'Event location' },
+        attendees: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Email addresses of attendees',
+        },
+        account: {
+          type: 'string',
+          enum: ['work', 'personal'],
+          description: 'Google account (default: work)',
+        },
+      },
+      required: ['summary', 'startTime', 'endTime'],
+    },
+  },
+  async execute(input) {
+    return await googleTools.createEvent({
+      summary: input.summary as string,
+      startTime: input.startTime as string,
+      endTime: input.endTime as string,
+      description: input.description as string | undefined,
+      location: input.location as string | undefined,
+      attendees: input.attendees as string[] | undefined,
+      account: input.account as string | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'check_availability',
+    description:
+      'Check free/busy status across both Google calendars (work + personal). Returns busy slots and whether the time window is free.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        startTime: {
+          type: 'string',
+          description: 'Start of window to check (ISO 8601)',
+        },
+        endTime: {
+          type: 'string',
+          description: 'End of window to check (ISO 8601)',
+        },
+      },
+      required: ['startTime', 'endTime'],
+    },
+  },
+  async execute(input) {
+    return await googleTools.checkAvailability({
+      startTime: input.startTime as string,
+      endTime: input.endTime as string,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'search_emails',
+    description:
+      'Search emails by query, sender, and date range. Returns metadata (subject, from, date, snippet) for matching emails from a single account.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Search query (Gmail search syntax supported)',
+        },
+        from: {
+          type: 'string',
+          description: 'Filter by sender email or name',
+        },
+        after: {
+          type: 'string',
+          description: 'Only emails after this date (YYYY/MM/DD)',
+        },
+        before: {
+          type: 'string',
+          description: 'Only emails before this date (YYYY/MM/DD)',
+        },
+        maxResults: {
+          type: 'number',
+          description: 'Maximum emails to return (default 10)',
+        },
+        account: {
+          type: 'string',
+          enum: ['work', 'personal'],
+          description: 'Google account (default: work)',
+        },
+      },
+      required: ['query'],
+    },
+  },
+  async execute(input) {
+    return await googleTools.searchEmails({
+      query: input.query as string,
+      from: input.from as string | undefined,
+      after: input.after as string | undefined,
+      before: input.before as string | undefined,
+      maxResults: input.maxResults as number | undefined,
+      account: input.account as string | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'read_email',
+    description:
+      'Read a full email thread by thread ID. Returns all messages with headers and body text (truncated at 3000 chars per message).',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        threadId: {
+          type: 'string',
+          description: 'Gmail thread ID (from search_emails results)',
+        },
+        account: {
+          type: 'string',
+          enum: ['work', 'personal'],
+          description: 'Google account (default: work)',
+        },
+      },
+      required: ['threadId'],
+    },
+  },
+  async execute(input) {
+    return await googleTools.readEmail({
+      threadId: input.threadId as string,
+      account: input.account as string | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'draft_email',
+    description:
+      'Create an email draft. NEVER sends directly — always creates a draft for Daniel to review and send manually. Use threadId to draft a reply to an existing thread.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        to: { type: 'string', description: 'Recipient email address' },
+        subject: { type: 'string', description: 'Email subject line' },
+        body: { type: 'string', description: 'Email body (plain text)' },
+        cc: { type: 'string', description: 'CC email address' },
+        threadId: {
+          type: 'string',
+          description: 'Thread ID to reply to (from search_emails or read_email)',
+        },
+        account: {
+          type: 'string',
+          enum: ['work', 'personal'],
+          description: 'Google account to create draft in (default: work)',
+        },
+      },
+      required: ['to', 'subject', 'body'],
+    },
+  },
+  async execute(input) {
+    return await googleTools.draftEmail({
+      to: input.to as string,
+      subject: input.subject as string,
+      body: input.body as string,
+      cc: input.cc as string | undefined,
+      threadId: input.threadId as string | undefined,
+      account: input.account as string | undefined,
+    });
   },
 });
 

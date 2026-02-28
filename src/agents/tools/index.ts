@@ -24,3 +24,12 @@ export {
   searchNotion,
 } from "./notion-tools.js";
 export { getChannelInsights, getRecentMentions, getMonitoringHistory, generateBriefing } from "./monitoring-tools.js";
+export {
+  listEvents,
+  searchEvents,
+  createEvent,
+  checkAvailability,
+  searchEmails,
+  readEmail,
+  draftEmail,
+} from "./google-tools.js";
