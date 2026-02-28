@@ -45,6 +45,17 @@ function stripBotMention(text: string, botUserId: string): string {
 }
 
 /**
+ * Strip Slack mrkdwn formatting so keywords like agent names are not
+ * obscured by `_italic_`, `*bold*`, or `~strike~` wrappers.
+ */
+function stripFormatting(text: string): string {
+  return text
+    .replace(/[_*~`]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
  * Try to find an agent whose display_name (case-insensitive) matches any of
  * the mentioned user IDs' names. This is a heuristic: since we don't have a
  * lookup from Slack user ID to our agent system, we compare against the
@@ -108,18 +119,20 @@ function findAgentByPrefix(text: string): { agent: AgentDefinition; cleanedText:
 export function routeMessage(text: string, botUserId: string): RouteResult {
   // Strip the bot's own @mention first
   const cleaned = stripBotMention(text, botUserId);
+  // Strip Slack mrkdwn formatting for routing (agent name detection)
+  const plain = stripFormatting(cleaned);
 
   // 1. Check for "hey coda" / "ask rex" prefix pattern
-  const prefixResult = findAgentByPrefix(cleaned);
+  const prefixResult = findAgentByPrefix(plain);
   if (prefixResult) {
     return {
       agentId: prefixResult.agent.config.id,
-      cleanedText: prefixResult.cleanedText,
+      cleanedText: cleaned,
     };
   }
 
   // 2. Check for agent name keyword anywhere in the text
-  const keywordAgent = findAgentByKeyword(cleaned);
+  const keywordAgent = findAgentByKeyword(plain);
   if (keywordAgent) {
     return {
       agentId: keywordAgent.config.id,
