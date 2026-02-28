@@ -29,6 +29,7 @@ export interface MethodologyInsight {
   account_code: string | null;
   category: string | null;
   confidence: "high" | "medium" | null;
+  durability: "durable" | "situational";
 }
 
 interface RawExtraction {
@@ -43,6 +44,7 @@ interface RawExtraction {
     insight: string;
     category: string;
     confidence: "high" | "medium";
+    durability?: "durable" | "situational";
   }>;
   decision_examples: Array<{
     account_code: string;
@@ -50,12 +52,14 @@ interface RawExtraction {
     target: string;
     reasoning: string;
     outcome_if_known: string | null;
+    durability?: "durable" | "situational";
   }>;
   creative_patterns: Array<{
     pattern: string;
     account_code_if_specific: string | null;
     evidence: string;
     confidence: "high" | "medium";
+    durability?: "durable" | "situational";
   }>;
   methodology: Array<{
     step: string;
@@ -169,6 +173,14 @@ Return ONLY a valid JSON object with these exact keys:
 5. "methodology" — How Daniel/Nina approach analysis (process, not content)
    Each: { "step": string, "description": string, "when_to_use": string }
    Focus on analytical workflows, diagnostic sequences, and decision-making processes.
+
+Durability classification — add a "durability" field to each item in account_insights, decision_examples, and creative_patterns:
+- "durable": Structural principles, reusable patterns, lasting methodology. Would still be true 6+ months from now.
+  Examples: "kill ads at 3x target CPA after 7 days", "UGC hooks outperform branded intros", "check frequency before scaling"
+- "situational": Current performance observations, time-bound metrics, trends that could change within weeks.
+  Examples: "UK CPA is high right now", "US outperforms UK at 2x currently", "this campaign started converting yesterday"
+- When in doubt, default to "durable".
+- global_rules and methodology items are always durable — no durability field needed for those.
 
 Rules:
 - Only extract things that are clearly stated or demonstrated. Do not infer.
@@ -286,6 +298,7 @@ export async function extractMethodologyInsights(
       account_code: null,
       category: null,
       confidence: rule.confidence,
+      durability: "durable", // rules are always durable
     });
   }
 
@@ -297,6 +310,7 @@ export async function extractMethodologyInsights(
       account_code: normalizeAccountCode(ai.account_code),
       category: ai.category,
       confidence: ai.confidence,
+      durability: ai.durability ?? "durable",
     });
   }
 
@@ -308,6 +322,7 @@ export async function extractMethodologyInsights(
       account_code: normalizeAccountCode(de.account_code),
       category: de.decision_type,
       confidence: null,
+      durability: de.durability ?? "durable",
     });
   }
 
@@ -321,6 +336,7 @@ export async function extractMethodologyInsights(
         : null,
       category: null,
       confidence: cp.confidence,
+      durability: cp.durability ?? "durable",
     });
   }
 
@@ -332,6 +348,7 @@ export async function extractMethodologyInsights(
       account_code: null,
       category: null,
       confidence: null,
+      durability: "durable", // methodology is always durable
     });
   }
 

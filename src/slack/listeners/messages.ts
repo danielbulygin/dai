@@ -6,6 +6,7 @@ import { getAgent, getDefaultAgent } from '../../agents/registry.js';
 import { agentQueue } from '../../orchestrator/queue.js';
 import { createStreamResponder } from '../stream-responder.js';
 import { findThreadOwner } from '../../memory/sessions.js';
+import { isInsightThread } from '../../learning/insight-approval.js';
 
 export function registerMessageListener(app: App): void {
   app.message(async ({ message, client }) => {
@@ -25,6 +26,12 @@ export function registerMessageListener(app: App): void {
     const threadTs = msg.thread_ts as string | undefined;
 
     if (!text || !userId || !messageTs) return;
+
+    // Skip insight approval threads — handled by insight-actions.ts
+    if (threadTs) {
+      const isInsight = await isInsightThread(threadTs);
+      if (isInsight) return;
+    }
 
     // Get bot user ID for mention stripping
     const authResult = await client.auth.test();

@@ -9,6 +9,7 @@
  * 5. On approve: copies to `methodology_knowledge` + `learnings`
  */
 
+import Anthropic from "@anthropic-ai/sdk";
 import { env } from "../env.js";
 import { logger } from "../utils/logger.js";
 import { getDaiSupabase } from "../integrations/dai-supabase.js";
@@ -65,13 +66,73 @@ export async function sendInsightsForApproval(
   meetingId: string,
   meetingTitle: string,
   meetingDate: string,
-): Promise<number> {
-  if (insights.length === 0) return 0;
+): Promise<{ durable: number; situational: number }> {
+  if (insights.length === 0) return { durable: 0, situational: 0 };
 
   const supabase = getDaiSupabase();
 
-  // 1. Batch insert with sequential numbers
-  const rows = insights.map((ins, i) => ({
+  // Partition by durability
+  const durableInsights = insights.filter((i) => i.durability === "durable");
+  const situationalInsights = insights.filter((i) => i.durability === "situational");
+
+  // --- Handle situational insights: auto-save ---
+  if (situationalInsights.length > 0) {
+    const sitRows = situationalInsights.map((ins) => ({
+      meeting_id: meetingId,
+      meeting_title: meetingTitle,
+      meeting_date: meetingDate,
+      type: ins.type,
+      title: ins.title,
+      body: ins.body,
+      account_code: ins.account_code,
+      category: ins.category,
+      confidence: ins.confidence,
+      status: "auto_saved",
+      durability: "situational",
+      seq: null,
+    }));
+
+    await supabase.from("pending_insights").insert(sitRows);
+
+    // Auto-save each to learnings
+    for (const ins of situationalInsights) {
+      const content = ins.account_code
+        ? `[${ins.account_code}] ${ins.title}`
+        : ins.title;
+
+      await addLearning({
+        agent_id: ADA_AGENT_ID,
+        category: "situational_observation",
+        content,
+        confidence: 0.5,
+        source_session_id: SOURCE_SESSION,
+        client_code: ins.account_code,
+      });
+    }
+
+    logger.info(
+      { meetingId, count: situationalInsights.length },
+      "Auto-saved situational insights to learnings",
+    );
+  }
+
+  const channel = getReviewChannel();
+
+  // --- If ALL insights are situational, post a brief notification ---
+  if (durableInsights.length === 0) {
+    const examples = situationalInsights
+      .slice(0, 3)
+      .map((i) => i.title)
+      .join("; ");
+    await slackApp.client.chat.postMessage({
+      channel,
+      text: `_"${meetingTitle}" (${meetingDate}) — ${situationalInsights.length} situational observations auto-saved (e.g. ${examples})_`,
+    });
+    return { durable: 0, situational: situationalInsights.length };
+  }
+
+  // --- Handle durable insights: existing approval flow ---
+  const durableRows = durableInsights.map((ins, i) => ({
     meeting_id: meetingId,
     meeting_title: meetingTitle,
     meeting_date: meetingDate,
@@ -82,12 +143,13 @@ export async function sendInsightsForApproval(
     category: ins.category,
     confidence: ins.confidence,
     status: "pending",
+    durability: "durable",
     seq: i + 1,
   }));
 
   const { data: inserted, error } = await supabase
     .from("pending_insights")
-    .insert(rows)
+    .insert(durableRows)
     .select("id, seq, type, title, account_code, category, confidence, body");
 
   if (error) {
@@ -106,19 +168,35 @@ export async function sendInsightsForApproval(
     body: Record<string, unknown>;
   }>;
 
-  // 2. Build Block Kit message
+  // Build Block Kit message (durable only)
   const blocks = buildApprovalBlocks(pendingRows, meetingId, meetingTitle, meetingDate);
-  const channel = getReviewChannel();
 
-  // 3. Post to review channel
+  // Append situational footnote if any
+  if (situationalInsights.length > 0) {
+    const examples = situationalInsights
+      .slice(0, 3)
+      .map((i) => `"${i.title}"`)
+      .join(", ");
+    blocks.push({
+      type: "context",
+      elements: [
+        {
+          type: "mrkdwn",
+          text: `_${situationalInsights.length} situational observations auto-saved — ${examples}_`,
+        },
+      ],
+    });
+  }
+
+  // Post to review channel
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const result = await slackApp.client.chat.postMessage({
     channel,
     blocks: blocks as any,
-    text: `${insights.length} methodology insights extracted from "${meetingTitle}" — review and approve/reject`,
+    text: `${durableInsights.length} methodology insights extracted from "${meetingTitle}" — review and approve/reject`,
   });
 
-  // 4. Store slack_message_ts on pending rows
+  // Store slack_message_ts on pending rows
   if (result.ts) {
     const ids = pendingRows.map((r) => r.id);
     await supabase
@@ -126,7 +204,7 @@ export async function sendInsightsForApproval(
       .update({ slack_message_ts: result.ts })
       .in("id", ids);
 
-    // 5. Post a helper message in the thread
+    // Post a helper message in the thread
     await slackApp.client.chat.postMessage({
       channel,
       thread_ts: result.ts,
@@ -141,11 +219,11 @@ export async function sendInsightsForApproval(
   }
 
   logger.info(
-    { meetingId, count: insights.length, messageTs: result.ts, channel },
+    { meetingId, durable: durableInsights.length, situational: situationalInsights.length, messageTs: result.ts, channel },
     "Sent insights for approval",
   );
 
-  return insights.length;
+  return { durable: durableInsights.length, situational: situationalInsights.length };
 }
 
 // ---------------------------------------------------------------------------
@@ -298,6 +376,7 @@ function buildApprovalBlocks(
 export async function handleInsightAction(
   insightId: string,
   action: "approve" | "reject",
+  notes?: string,
 ): Promise<void> {
   const supabase = getDaiSupabase();
 
@@ -321,7 +400,11 @@ export async function handleInsightAction(
 
   await supabase
     .from("pending_insights")
-    .update({ status: action === "approve" ? "approved" : "rejected", reviewed_at: new Date().toISOString() })
+    .update({
+      status: action === "approve" ? "approved" : "rejected",
+      reviewed_at: new Date().toISOString(),
+      review_notes: notes ?? null,
+    })
     .eq("id", insightId);
 
   if (action === "approve") {
@@ -519,4 +602,207 @@ export async function updateApprovalMessage(
   } catch (err) {
     logger.error({ err, messageTs }, "Failed to post approval update");
   }
+}
+
+// ---------------------------------------------------------------------------
+// Natural language feedback parsing
+// ---------------------------------------------------------------------------
+
+export interface FeedbackItem {
+  seq: number;
+  action: "reject";
+  reason: string;
+}
+
+/**
+ * Parse natural language feedback from Daniel's thread replies.
+ *
+ * Handles multi-line messages with patterns like:
+ * - "15 is situational"
+ * - "19 is a duplicate of 13"
+ * - "4 - sometimes true but not always"
+ * - "31 - only applies to Laori"
+ *
+ * All are treated as rejections with a reason.
+ */
+export function parseFeedbackReply(text: string): FeedbackItem[] {
+  const items: FeedbackItem[] = [];
+  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+
+  for (const line of lines) {
+    // "15 is situational"
+    const sitMatch = line.match(/^(\d+)\s+is\s+situational/i);
+    if (sitMatch) {
+      items.push({ seq: parseInt(sitMatch[1]!, 10), action: "reject", reason: "situational" });
+      continue;
+    }
+
+    // "19 is a duplicate of 13"
+    const dupMatch = line.match(/^(\d+)\s+is\s+a?\s*duplicate\s+of\s+(\d+)/i);
+    if (dupMatch) {
+      items.push({ seq: parseInt(dupMatch[1]!, 10), action: "reject", reason: `duplicate of #${dupMatch[2]}` });
+      continue;
+    }
+
+    // "4 - sometimes true but not always" or "31 — only applies to Laori"
+    const dashMatch = line.match(/^(\d+)\s*[-–—]\s+(.+)$/);
+    if (dashMatch) {
+      items.push({ seq: parseInt(dashMatch[1]!, 10), action: "reject", reason: dashMatch[2]!.trim() });
+      continue;
+    }
+  }
+
+  return items;
+}
+
+/**
+ * Process parsed feedback items by resolving seq numbers and rejecting with notes.
+ */
+export async function handleFeedbackItems(
+  messageTs: string,
+  items: FeedbackItem[],
+): Promise<string> {
+  const supabase = getDaiSupabase();
+
+  const { data: rows } = await supabase
+    .from("pending_insights")
+    .select("id, seq, type, title")
+    .eq("slack_message_ts", messageTs)
+    .eq("status", "pending");
+
+  if (!rows || rows.length === 0) return "No pending insights found for this message.";
+
+  const typedRows = rows as Array<{ id: string; seq: number; type: string; title: string }>;
+  const seqMap = new Map(typedRows.map((r) => [r.seq, r]));
+
+  const results: string[] = [];
+
+  for (const item of items) {
+    const row = seqMap.get(item.seq);
+    if (!row) {
+      results.push(`#${item.seq}: not found or already processed`);
+      continue;
+    }
+
+    await handleInsightAction(row.id, item.action, item.reason);
+    results.push(`#${item.seq} rejected — ${item.reason}`);
+  }
+
+  return results.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// Insight thread detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Check if a thread_ts belongs to an insight approval message.
+ */
+export async function isInsightThread(threadTs: string): Promise<boolean> {
+  const supabase = getDaiSupabase();
+  const { count } = await supabase
+    .from("pending_insights")
+    .select("id", { count: "exact", head: true })
+    .eq("slack_message_ts", threadTs);
+  return (count ?? 0) > 0;
+}
+
+// ---------------------------------------------------------------------------
+// LLM fallback for ambiguous feedback
+// ---------------------------------------------------------------------------
+
+const FEEDBACK_MODEL = "claude-haiku-4-5-20251001";
+
+/**
+ * Use Haiku to interpret ambiguous feedback in context of the pending insights.
+ * Returns a summary of actions taken, or null if no actionable feedback found.
+ */
+export async function interpretFeedbackWithLLM(
+  messageTs: string,
+  text: string,
+): Promise<string | null> {
+  const supabase = getDaiSupabase();
+
+  const { data: rows } = await supabase
+    .from("pending_insights")
+    .select("seq, type, title, account_code")
+    .eq("slack_message_ts", messageTs)
+    .eq("status", "pending")
+    .order("seq", { ascending: true });
+
+  if (!rows || rows.length === 0) return null;
+
+  const typedRows = rows as Array<{ seq: number; type: string; title: string; account_code: string | null }>;
+  const insightList = typedRows
+    .map((r) => {
+      const acct = r.account_code ? ` [${r.account_code}]` : "";
+      return `${r.seq}. (${r.type})${acct} ${r.title}`;
+    })
+    .join("\n");
+
+  const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+  const response = await client.messages.create({
+    model: FEEDBACK_MODEL,
+    max_tokens: 1024,
+    system: [
+      "You interpret Daniel's feedback on methodology insights extracted from media buying meetings.",
+      "Given a numbered list of pending insights and Daniel's message, extract structured actions.",
+      "",
+      "Return ONLY a JSON array of objects: [{\"seq\": N, \"action\": \"reject\", \"reason\": \"...\"}]",
+      "- If Daniel says an item is situational, time-bound, or current-state → reject with reason",
+      "- If Daniel says an item is a duplicate → reject with reason \"duplicate of #N\"",
+      "- If Daniel gives a correction or note implying the item is wrong/incomplete → reject with reason",
+      "- If Daniel's feedback is just a comment with no actionable rejection → return []",
+      "- Only return reject actions. Approval requires explicit \"approve\" command.",
+      "- Return ONLY valid JSON, no other text, no markdown.",
+    ].join("\n"),
+    messages: [{
+      role: "user",
+      content: `Pending insights:\n${insightList}\n\nDaniel's feedback:\n${text}`,
+    }],
+  });
+
+  const responseText = response.content
+    .filter((block): block is Anthropic.TextBlock => block.type === "text")
+    .map((block) => block.text)
+    .join("");
+
+  let actions: Array<{ seq: number; action: "reject"; reason: string }>;
+  try {
+    const cleaned = responseText.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+    actions = JSON.parse(cleaned);
+  } catch {
+    logger.warn({ text, responseText }, "Failed to parse LLM feedback interpretation");
+    return null;
+  }
+
+  if (!Array.isArray(actions) || actions.length === 0) return null;
+
+  // Execute the actions
+  const seqMap = new Map(typedRows.map((r) => [r.seq, r]));
+  const allRows = await supabase
+    .from("pending_insights")
+    .select("id, seq")
+    .eq("slack_message_ts", messageTs)
+    .eq("status", "pending");
+
+  const idMap = new Map(
+    ((allRows.data ?? []) as Array<{ id: string; seq: number }>).map((r) => [r.seq, r.id]),
+  );
+
+  const results: string[] = [];
+
+  for (const act of actions) {
+    const insightId = idMap.get(act.seq);
+    if (!insightId) {
+      results.push(`#${act.seq}: not found or already processed`);
+      continue;
+    }
+    if (!seqMap.has(act.seq)) continue;
+
+    await handleInsightAction(insightId, "reject", act.reason);
+    results.push(`#${act.seq} rejected — ${act.reason}`);
+  }
+
+  return results.length > 0 ? results.join("\n") : null;
 }

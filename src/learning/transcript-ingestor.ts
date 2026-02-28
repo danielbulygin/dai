@@ -368,11 +368,11 @@ export async function monitorNinaDanielCalls(): Promise<number> {
       );
 
       if (insights.length > 0) {
-        // Send for Slack approval
-        await sendInsightsForApproval(insights, meeting.id, meetingTitle, meetingDate);
+        // Send for Slack approval (splits durable vs situational)
+        const counts = await sendInsightsForApproval(insights, meeting.id, meetingTitle, meetingDate);
         logger.info(
-          { meetingId: meeting.id, title: meetingTitle, insights: insights.length },
-          'Sent Nina/Daniel insights for approval',
+          { meetingId: meeting.id, title: meetingTitle, durable: counts.durable, situational: counts.situational },
+          'Processed Nina/Daniel insights',
         );
       } else {
         logger.info(

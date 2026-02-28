@@ -69,7 +69,8 @@ async function main(): Promise<void> {
 
   for (const insight of insights) {
     const acct = insight.account_code ? ` [${insight.account_code}]` : "";
-    console.log(`  ${insight.type}${acct}: ${insight.title}`);
+    const dur = insight.durability === "situational" ? " (situational)" : "";
+    console.log(`  ${insight.type}${acct}${dur}: ${insight.title}`);
   }
 
   if (insights.length === 0) {
@@ -81,14 +82,14 @@ async function main(): Promise<void> {
   console.log("\n=== Sending for Slack approval ===\n");
   const { sendInsightsForApproval } = await import("../src/learning/insight-approval.js");
 
-  const count = await sendInsightsForApproval(
+  const counts = await sendInsightsForApproval(
     insights,
     meeting.id,
     meeting.title ?? "Nina & Daniel bi-weekly",
     meetingDate,
   );
 
-  console.log(`Sent ${count} insights for approval. Check your Slack DMs.`);
+  console.log(`Sent ${counts.durable} durable insights for approval, ${counts.situational} situational auto-saved. Check your Slack DMs.`);
 
   // Log to ingestion log so it doesn't get re-processed
   const { nanoid } = await import("nanoid");

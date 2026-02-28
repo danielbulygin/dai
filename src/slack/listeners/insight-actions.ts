@@ -13,6 +13,10 @@ import { getDaiSupabase } from "../../integrations/dai-supabase.js";
 import {
   handleBulkInsightAction,
   handleThreadReply,
+  handleFeedbackItems,
+  isInsightThread,
+  interpretFeedbackWithLLM,
+  parseFeedbackReply,
   updateApprovalMessage,
 } from "../../learning/insight-approval.js";
 
@@ -144,20 +148,60 @@ export function registerInsightActions(app: App): void {
     }
   });
 
-  // Thread reply listener — "reject 3, 7, 14" / "approve 1-5, 8"
+  // Thread reply listener — handles all replies on insight approval threads:
+  // 1. Structured: "reject 3, 7, 14" / "approve 1-5, 8"
+  // 2. Natural language: "15 is situational", "4 - sometimes true"
+  // 3. LLM fallback: anything else gets interpreted by Haiku
   app.message(async ({ message, say }) => {
     // Only handle threaded replies
     if (!("thread_ts" in message) || !message.thread_ts) return;
     if (!("text" in message) || !message.text) return;
+    // Skip bot messages
+    if ("bot_id" in message) return;
 
-    const text = message.text.toLowerCase().trim();
+    const threadTs = message.thread_ts;
+    const text = message.text;
 
-    // Quick check: must start with "approve" or "reject"
-    if (!text.startsWith("approve") && !text.startsWith("reject")) return;
+    // Check if this thread belongs to an insight approval message
+    const isInsight = await isInsightThread(threadTs);
+    if (!isInsight) return;
 
-    const result = await handleThreadReply(message.thread_ts, message.text);
-    if (result) {
-      await say({ text: result, thread_ts: message.thread_ts });
+    // 1. Try structured command: "approve 1-5" / "reject 3, 7"
+    const structuredResult = await handleThreadReply(threadTs, text);
+    if (structuredResult) {
+      await say({ text: structuredResult, thread_ts: threadTs });
+      return;
     }
+
+    // 2. Try natural language patterns: "15 is situational", "4 - reason"
+    const feedbackItems = parseFeedbackReply(text);
+    if (feedbackItems.length > 0) {
+      const feedbackResult = await handleFeedbackItems(threadTs, feedbackItems);
+      await say({ text: feedbackResult, thread_ts: threadTs });
+      return;
+    }
+
+    // 3. LLM fallback: ask Haiku to interpret
+    try {
+      const llmResult = await interpretFeedbackWithLLM(threadTs, text);
+      if (llmResult) {
+        await say({ text: llmResult, thread_ts: threadTs });
+        return;
+      }
+    } catch (err) {
+      logger.error({ err, threadTs }, "LLM feedback interpretation failed");
+    }
+
+    // Nothing matched — post help
+    await say({
+      text: [
+        "I couldn't interpret that feedback. Try:",
+        "\u2022 `reject 3, 7, 14` \u2014 reject by number",
+        "\u2022 `15 is situational` \u2014 reject as situational",
+        "\u2022 `19 is a duplicate of 13` \u2014 reject as duplicate",
+        "\u2022 `4 - your note here` \u2014 reject with reason",
+      ].join("\n"),
+      thread_ts: threadTs,
+    });
   });
 }
