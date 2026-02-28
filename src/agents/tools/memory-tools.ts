@@ -1,5 +1,6 @@
 import { nanoid } from "nanoid";
 import { logger } from "../../utils/logger.js";
+import { getDaiSupabase } from "../../integrations/dai-supabase.js";
 import { recall as memoryRecall } from "../../memory/search.js";
 import { addLearning, searchLearnings, findDuplicateLearning } from "../../memory/learnings.js";
 
@@ -119,6 +120,58 @@ export async function remember(params: {
   } catch (error) {
     logger.error({ error, category: params.category }, "Failed to save memory");
     return { id: nanoid(), saved: false };
+  }
+}
+
+export async function updateLearning(params: {
+  id: string;
+  content?: string;
+  client_code?: string;
+  category?: string;
+  confidence?: number;
+}): Promise<{ updated: boolean; id: string }> {
+  try {
+    const supabase = getDaiSupabase();
+
+    const updates: Record<string, unknown> = {};
+    if (params.content !== undefined) updates.content = params.content;
+    if (params.client_code !== undefined) updates.client_code = normalizeClientCode(params.client_code) ?? null;
+    if (params.category !== undefined) updates.category = params.category;
+    if (params.confidence !== undefined) updates.confidence = params.confidence;
+
+    if (Object.keys(updates).length === 0) {
+      return { updated: false, id: params.id };
+    }
+
+    const { error } = await supabase
+      .from("learnings")
+      .update(updates)
+      .eq("id", params.id);
+
+    if (error) {
+      logger.error({ error, id: params.id }, "Failed to update learning");
+      return { updated: false, id: params.id };
+    }
+
+    logger.info({ id: params.id, updates: Object.keys(updates) }, "Updated learning");
+    return { updated: true, id: params.id };
+  } catch (error) {
+    logger.error({ error, id: params.id }, "Failed to update learning");
+    return { updated: false, id: params.id };
+  }
+}
+
+export async function removeLearning(params: {
+  id: string;
+}): Promise<{ deleted: boolean; id: string }> {
+  try {
+    const { deleteLearning: del } = await import("../../memory/learnings.js");
+    await del(params.id);
+    logger.info({ id: params.id }, "Deleted learning");
+    return { deleted: true, id: params.id };
+  } catch (error) {
+    logger.error({ error, id: params.id }, "Failed to delete learning");
+    return { deleted: false, id: params.id };
   }
 }
 

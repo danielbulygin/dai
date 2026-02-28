@@ -14,6 +14,8 @@ export const toolProfiles = {
     'post_message', 'reply_in_thread',
     'log_decision',
     'search_methodology',
+    'correct_learning', 'delete_learning',
+    'correct_methodology', 'delete_methodology',
   ],
 } as const;
 

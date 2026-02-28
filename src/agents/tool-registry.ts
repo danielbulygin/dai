@@ -1245,6 +1245,147 @@ register({
 });
 
 // ---------------------------------------------------------------------------
+// Knowledge correction tools (learnings + methodology_knowledge)
+// ---------------------------------------------------------------------------
+
+register({
+  definition: {
+    name: 'correct_learning',
+    description:
+      'Update an existing learning record to fix mistakes — wrong client_code, incorrect content, bad category, or confidence. Use when you discover a learning is misattributed or contains errors. Search for the learning first with search_memories or recall to get its ID.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        id: {
+          type: 'string',
+          description: 'The learning ID to update',
+        },
+        content: {
+          type: 'string',
+          description: 'Corrected content text (optional — only if content itself is wrong)',
+        },
+        client_code: {
+          type: 'string',
+          description: 'Corrected client/account code (e.g. "audibene", "ninepine")',
+        },
+        category: {
+          type: 'string',
+          description: 'Corrected category',
+        },
+        confidence: {
+          type: 'number',
+          description: 'Updated confidence score (0-1)',
+        },
+      },
+      required: ['id'],
+    },
+  },
+  async execute(input) {
+    const result = await memoryTools.updateLearning({
+      id: input.id as string,
+      content: input.content as string | undefined,
+      client_code: input.client_code as string | undefined,
+      category: input.category as string | undefined,
+      confidence: input.confidence as number | undefined,
+    });
+    return JSON.stringify(result);
+  },
+});
+
+register({
+  definition: {
+    name: 'delete_learning',
+    description:
+      'Delete a learning that is wrong, obsolete, or duplicated. Use sparingly — prefer correct_learning to fix mistakes. Search for the learning first to get its ID.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        id: {
+          type: 'string',
+          description: 'The learning ID to delete',
+        },
+      },
+      required: ['id'],
+    },
+  },
+  async execute(input) {
+    const result = await memoryTools.removeLearning({
+      id: input.id as string,
+    });
+    return JSON.stringify(result);
+  },
+});
+
+register({
+  definition: {
+    name: 'correct_methodology',
+    description:
+      'Update a methodology knowledge record to fix mistakes — wrong account_code, incorrect title, bad category or type. Use when you discover a methodology insight is misattributed. Search with search_methodology first to get the record ID.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        id: {
+          type: 'string',
+          description: 'The methodology knowledge record ID (UUID)',
+        },
+        account_code: {
+          type: 'string',
+          description: 'Corrected account code (e.g. "audibene", "ninepine")',
+        },
+        title: {
+          type: 'string',
+          description: 'Corrected title text',
+        },
+        category: {
+          type: 'string',
+          description: 'Corrected category',
+        },
+        type: {
+          type: 'string',
+          enum: ['rule', 'insight', 'decision', 'creative_pattern', 'methodology'],
+          description: 'Corrected type',
+        },
+      },
+      required: ['id'],
+    },
+  },
+  async execute(input) {
+    const result = await methodologyTools.updateMethodologyKnowledge({
+      id: input.id as string,
+      account_code: input.account_code as string | undefined,
+      title: input.title as string | undefined,
+      category: input.category as string | undefined,
+      type: input.type as string | undefined,
+    });
+    return JSON.stringify(result);
+  },
+});
+
+register({
+  definition: {
+    name: 'delete_methodology',
+    description:
+      'Delete a methodology knowledge record that is wrong, obsolete, or duplicated. Use sparingly — prefer correct_methodology to fix mistakes.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        id: {
+          type: 'string',
+          description: 'The methodology knowledge record ID (UUID) to delete',
+        },
+      },
+      required: ['id'],
+    },
+  },
+  async execute(input) {
+    const result = await methodologyTools.deleteMethodologyKnowledge({
+      id: input.id as string,
+    });
+    return JSON.stringify(result);
+  },
+});
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
