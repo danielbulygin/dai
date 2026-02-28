@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS pending_insights (
   category TEXT,
   confidence TEXT CHECK (confidence IN ('high', 'medium')),
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
+  seq INTEGER,
   slack_message_ts TEXT,
   reviewed_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()

@@ -19,6 +19,7 @@ const envSchema = z.object({
   FIREFLIES_API_KEY: z.string().optional(),
   NOTION_TOKEN: z.string().optional(),
   NOTION_KANBAN_DB_ID: z.string().optional(),
+  SLACK_REVIEW_CHANNEL_ID: z.string().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;
