@@ -60,6 +60,9 @@ Keyword pre-filter → Supabase buffer → 15-min batch Claude analysis → DM D
 ### Phase 3: Calendar & Email Integration ✅
 7 tools: list_events, search_events, create_event, check_availability, search_emails, read_email, draft_email. Uses `googleapis` package with OAuth2 refresh tokens. Two accounts: work (adsontap.io, default) + personal (gmail). Availability checks and event search query both accounts in parallel. Emails always draft-only — never sends directly.
 
+### Dedicated Slack Bot ✅
+Jasmin runs as a separate Slack app (own bot token + app token in Socket Mode). Daniel can DM her directly under "Apps" without mentioning her name. All DMs route straight to the `jasmin` agent — no Otto, no router. The DAI bot keyword routing still works as a secondary entry point. Key files: `src/slack/app.ts` (conditional `jasminApp`), `src/slack/listeners/jasmin-dm.ts`, env vars `JASMIN_BOT_TOKEN` + `JASMIN_APP_TOKEN`.
+
 ---
 
 ## Remaining Phases

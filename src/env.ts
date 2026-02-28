@@ -25,6 +25,8 @@ const envSchema = z.object({
   GOOGLE_CLIENT_SECRET: z.string().optional(),
   GOOGLE_REFRESH_TOKEN_WORK: z.string().optional(),
   GOOGLE_REFRESH_TOKEN_PERSONAL: z.string().optional(),
+  JASMIN_BOT_TOKEN: z.string().optional(),
+  JASMIN_APP_TOKEN: z.string().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;
