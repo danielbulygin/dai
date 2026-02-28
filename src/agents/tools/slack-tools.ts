@@ -4,6 +4,12 @@ import { logger } from "../../utils/logger.js";
 
 const slack = new WebClient(env.SLACK_BOT_TOKEN);
 
+function getUserClient(): WebClient | null {
+  const token = env.SLACK_USER_TOKEN;
+  if (!token) return null;
+  return new WebClient(token);
+}
+
 export async function postMessage(params: {
   channel: string;
   text: string;
@@ -48,6 +54,74 @@ export async function addReaction(params: {
     return { ok: true };
   } catch (error) {
     logger.error({ error, channel: params.channel }, "Failed to add reaction");
+    return { ok: false };
+  }
+}
+
+export async function sendAsDaniel(params: {
+  channel: string;
+  text: string;
+  thread_ts?: string;
+}): Promise<{ ok: boolean; ts?: string }> {
+  const userClient = getUserClient();
+  if (!userClient) {
+    logger.error("SLACK_USER_TOKEN not configured — cannot send as Daniel");
+    return { ok: false };
+  }
+
+  try {
+    // Open the DM/channel if needed
+    const openResult = await userClient.conversations.open({
+      channel: params.channel,
+    });
+    const channelId = openResult.channel?.id ?? params.channel;
+
+    const result = await userClient.chat.postMessage({
+      channel: channelId,
+      text: params.text,
+      thread_ts: params.thread_ts,
+    });
+
+    logger.info(
+      { channel: channelId, ts: result.ts },
+      "Sent message as Daniel",
+    );
+
+    return { ok: true, ts: result.ts ?? undefined };
+  } catch (error) {
+    logger.error(
+      { error, channel: params.channel },
+      "Failed to send message as Daniel",
+    );
+    return { ok: false };
+  }
+}
+
+export async function readDMs(params: {
+  channel: string;
+  limit?: number;
+}): Promise<{ ok: boolean; messages?: Array<{ user: string; text: string; ts: string }> }> {
+  const userClient = getUserClient();
+  if (!userClient) {
+    logger.error("SLACK_USER_TOKEN not configured — cannot read DMs");
+    return { ok: false };
+  }
+
+  try {
+    const result = await userClient.conversations.history({
+      channel: params.channel,
+      limit: params.limit ?? 20,
+    });
+
+    const messages = (result.messages ?? []).map((m) => ({
+      user: m.user ?? "unknown",
+      text: m.text ?? "",
+      ts: m.ts ?? "",
+    }));
+
+    return { ok: true, messages };
+  } catch (error) {
+    logger.error({ error, channel: params.channel }, "Failed to read DMs");
     return { ok: false };
   }
 }

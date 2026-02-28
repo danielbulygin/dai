@@ -257,6 +257,69 @@ register({
 
 register({
   definition: {
+    name: 'send_as_daniel',
+    description:
+      'Send a Slack message as Daniel (using his user token). This posts from Daniel\'s account, not the bot. IMPORTANT: Only use when Daniel explicitly asks you to send a message on his behalf. Always confirm the exact message content with Daniel before sending.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        channel: {
+          type: 'string',
+          description: 'Slack channel ID to post to',
+        },
+        text: {
+          type: 'string',
+          description: 'Message text (supports Slack mrkdwn formatting)',
+        },
+        thread_ts: {
+          type: 'string',
+          description: 'Thread timestamp to reply in (optional)',
+        },
+      },
+      required: ['channel', 'text'],
+    },
+  },
+  async execute(input) {
+    const result = await slackTools.sendAsDaniel({
+      channel: input.channel as string,
+      text: input.text as string,
+      thread_ts: input.thread_ts as string | undefined,
+    });
+    return JSON.stringify(result);
+  },
+});
+
+register({
+  definition: {
+    name: 'read_dms',
+    description:
+      'Read recent messages from a Slack DM or channel using Daniel\'s user token. Use to check Daniel\'s private conversations when he asks.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        channel: {
+          type: 'string',
+          description: 'Slack channel or DM ID to read from',
+        },
+        limit: {
+          type: 'number',
+          description: 'Number of messages to fetch (default 20)',
+        },
+      },
+      required: ['channel'],
+    },
+  },
+  async execute(input) {
+    const result = await slackTools.readDMs({
+      channel: input.channel as string,
+      limit: input.limit as number | undefined,
+    });
+    return JSON.stringify(result);
+  },
+});
+
+register({
+  definition: {
     name: 'add_reaction',
     description: 'Add an emoji reaction to a Slack message.',
     input_schema: {
