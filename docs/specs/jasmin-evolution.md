@@ -15,14 +15,16 @@ Jasmin evolves from a capable assistant into Daniel's **always-on chief of staff
 - Fireflies meetings: search, summary, transcript, list_recent (4)
 - Notion tasks: query, create, update, comment, search (5)
 - Channel monitoring: get_channel_insights, get_recent_mentions, get_monitoring_history (3)
-- Briefings: generate_briefing — morning/EOD, persisted to Supabase (1)
+- Briefings: generate_briefing — morning/EOD/weekly, persisted to Supabase (1)
 - Google Calendar: list_events, search_events, create_event, check_availability (4)
 - Gmail: search_emails, read_email, draft_email (3)
 
 **What Jasmin does today:**
 - Responds to DMs and @mentions, delegates specialist work to Otto
 - Monitors public channels for blockers/urgent items (15-min batch analysis)
-- Generates morning (9am) and EOD (7pm) briefings automatically
+- Generates morning (9am), EOD (7pm), and weekly Monday (8am) briefings automatically
+- Briefings pull from 8 sources: channel insights, mentions, Notion tasks, Fireflies meetings, calendar, emails, Slack DMs, channel messages
+- Briefings are delivered via Jasmin's Slack bot identity (with DAI bot fallback)
 - Manages Notion tasks (query, create, update, comment)
 - Searches meeting transcripts and summaries
 - Sends messages as Daniel (with approval) and reads his DMs
@@ -63,40 +65,12 @@ Keyword pre-filter → Supabase buffer → 15-min batch Claude analysis → DM D
 ### Dedicated Slack Bot ✅
 Jasmin runs as a separate Slack app (own bot token + app token in Socket Mode). Daniel can DM her directly under "Apps" without mentioning her name. All DMs route straight to the `jasmin` agent — no Otto, no router. The DAI bot keyword routing still works as a secondary entry point. Key files: `src/slack/app.ts` (conditional `jasminApp`), `src/slack/listeners/jasmin-dm.ts`, env vars `JASMIN_BOT_TOKEN` + `JASMIN_APP_TOKEN`.
 
+### Phase 7: Enhanced Briefings ✅
+Upgraded briefings from channel highlight reel to chief-of-staff daily brief. Added 4 new data-gathering functions: `gatherCalendarEvents` (today/tomorrow/week, both calendars, conflict detection), `gatherImportantEmails` (unread from work+personal), `gatherSlackDMs` (user token, DM channel cache, user name resolution), `gatherSlackChannelMessages` (monitored channels from Supabase). Updated morning briefing prompt (Today's Schedule → Action Required → Tasks → Overnight Activity → Notable). Updated EOD briefing prompt (Completed Today → Still Needs Reply → Open Items → Tomorrow Preview → Wind Down). Added weekly Monday briefing (8am, `0 8 * * 1`) with week calendar, weekend catch-up, priorities, decisions needed. Briefings delivered via Jasmin bot identity with DAI bot fallback. All new sources are try/catch wrapped — failures never block the briefing. Key file: `src/scheduler/briefings.ts`.
+
 ---
 
 ## Remaining Phases
-
----
-
-### Phase 7: Enhanced Briefings
-
-**Goal:** Richer briefings that include calendar, email, and cross-source intelligence.
-**Prerequisites:** Phase 3 (Calendar & Email).
-
-#### Enhancements
-1. **Morning briefing additions:**
-   - Today's calendar (meetings, gaps, conflicts)
-   - Unread important emails (flagged, from key contacts)
-   - Yesterday's unfinished tasks
-   - Upcoming deadlines (next 3 days)
-
-2. **EOD briefing additions:**
-   - Tomorrow's calendar preview
-   - Tasks completed today vs planned
-   - Emails that still need replies
-
-3. **Weekly briefing** (Monday morning):
-   - Week ahead calendar overview
-   - Open tasks by priority
-   - Pending decisions/approvals
-   - Key meetings this week
-
-#### Key Files to Modify
-| File | Action |
-|------|--------|
-| `src/scheduler/briefings.ts` | Modify — add calendar/email data gathering, weekly briefing |
-| `src/scheduler/setup.ts` | Modify — register weekly briefing job |
 
 ---
 
@@ -182,7 +156,7 @@ src/monitoring/
 └── analyzer.ts             # Claude-powered batch analysis (15-min loop)
 
 src/scheduler/
-├── briefings.ts            # Morning/EOD briefing generation
+├── briefings.ts            # Morning/EOD/weekly briefing generation
 ├── learning-jobs.ts        # Scheduled learning loops
 ├── setup.ts                # Job registration
 └── index.ts                # Scheduler infrastructure

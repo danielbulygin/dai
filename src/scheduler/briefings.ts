@@ -1,19 +1,21 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { WebClient } from '@slack/web-api';
 import { env } from '../env.js';
 import { postMessage } from '../agents/tools/slack-tools.js';
 import { getDaiSupabase } from '../integrations/dai-supabase.js';
+import { jasminApp } from '../slack/app.js';
 import { logger } from '../utils/logger.js';
 import { registerJob } from './index.js';
 
 const BRIEFING_MODEL = 'claude-sonnet-4-20250514';
 
-let client: Anthropic | null = null;
+let anthropicClient: Anthropic | null = null;
 
 function getClient(): Anthropic {
-  if (!client) {
-    client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+  if (!anthropicClient) {
+    anthropicClient = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
   }
-  return client;
+  return anthropicClient;
 }
 
 function getTodayString(): string {
@@ -26,8 +28,92 @@ function getTodayString(): string {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function berlinDate(d: Date): string {
+  return d.toLocaleDateString('en-CA', { timeZone: 'Europe/Berlin' });
+}
+
+function formatEventTime(start: string, end: string): string {
+  if (!start.includes('T')) return 'All day';
+  const timeOpts: Intl.DateTimeFormatOptions = {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+    timeZone: 'Europe/Berlin',
+  };
+  const s = new Date(start).toLocaleTimeString('en-GB', timeOpts);
+  const e = new Date(end).toLocaleTimeString('en-GB', timeOpts);
+  return `${s}–${e}`;
+}
+
+function formatTimeAgo(tsSeconds: number): string {
+  const diff = Math.floor(Date.now() / 1000 - tsSeconds);
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return `${Math.floor(diff / 86400)}d ago`;
+}
+
+// User name cache (persists within process lifetime)
+const userNameCache = new Map<string, string>();
+
+async function resolveUserName(slackClient: WebClient, userId: string): Promise<string> {
+  if (userNameCache.has(userId)) return userNameCache.get(userId)!;
+  try {
+    const info = await slackClient.users.info({ user: userId });
+    const name = info.user?.real_name ?? info.user?.name ?? userId;
+    userNameCache.set(userId, name);
+    return name;
+  } catch {
+    userNameCache.set(userId, userId);
+    return userId;
+  }
+}
+
+// DM channels cache (refreshes every hour)
+let dmChannelsCache: { ids: string[]; fetchedAt: number } | null = null;
+const DM_CACHE_TTL = 3_600_000;
+
+async function getDmChannelIds(userClient: WebClient): Promise<string[]> {
+  if (dmChannelsCache && Date.now() - dmChannelsCache.fetchedAt < DM_CACHE_TTL) {
+    return dmChannelsCache.ids;
+  }
+  const result = await userClient.conversations.list({
+    types: 'im',
+    limit: 100,
+    exclude_archived: true,
+  });
+  const ids = (result.channels ?? [])
+    .map((c) => c.id)
+    .filter((id): id is string => Boolean(id));
+  dmChannelsCache = { ids, fetchedAt: Date.now() };
+  return ids;
+}
+
+/** Post briefing via Jasmin bot if available, otherwise via DAI bot. */
+async function postBriefing(text: string): Promise<void> {
+  if (jasminApp) {
+    try {
+      await jasminApp.client.chat.postMessage({
+        channel: env.SLACK_OWNER_USER_ID,
+        text,
+      });
+      return;
+    } catch (err) {
+      logger.debug({ err }, 'Failed to post briefing via Jasmin, falling back to DAI bot');
+    }
+  }
+  await postMessage({ channel: env.SLACK_OWNER_USER_ID, text });
+}
+
+// ---------------------------------------------------------------------------
+// Persistence
+// ---------------------------------------------------------------------------
+
 async function persistBriefing(
-  type: 'morning' | 'eod' | 'on_demand',
+  type: 'morning' | 'eod' | 'weekly' | 'on_demand',
   briefingText: string,
   dataSourcesUsed: number,
 ): Promise<void> {
@@ -154,6 +240,300 @@ async function gatherRecentMeetings(days: number): Promise<string | null> {
 }
 
 // ---------------------------------------------------------------------------
+// New data gathering: Calendar, Emails, DMs, Channel Messages
+// ---------------------------------------------------------------------------
+
+async function gatherCalendarEvents(
+  type: 'today' | 'tomorrow' | 'week',
+): Promise<string | null> {
+  try {
+    const { listEvents } = await import('../agents/tools/google-tools.js');
+
+    const now = new Date();
+    let startDate: string;
+    let endDate: string;
+
+    if (type === 'today') {
+      startDate = berlinDate(now);
+      endDate = berlinDate(new Date(now.getTime() + 86_400_000));
+    } else if (type === 'tomorrow') {
+      startDate = berlinDate(new Date(now.getTime() + 86_400_000));
+      endDate = berlinDate(new Date(now.getTime() + 2 * 86_400_000));
+    } else {
+      startDate = berlinDate(now);
+      endDate = berlinDate(new Date(now.getTime() + 7 * 86_400_000));
+    }
+
+    // Query both work and personal calendars in parallel
+    const results = await Promise.allSettled(
+      (['work', 'personal'] as const).map((account) =>
+        listEvents({ startDate, endDate, account }),
+      ),
+    );
+
+    interface CalEvent {
+      summary: string;
+      start: string;
+      end: string;
+      location?: string;
+      attendees?: Array<{ email: string; status: string }>;
+      account: string;
+    }
+
+    const events: CalEvent[] = [];
+    for (const r of results) {
+      if (r.status !== 'fulfilled') continue;
+      const data = JSON.parse(r.value);
+      if (data.error || !data.events) continue;
+      for (const e of data.events) {
+        events.push({
+          summary: e.summary ?? '(no title)',
+          start: e.start ?? '',
+          end: e.end ?? '',
+          location: e.location,
+          attendees: e.attendees,
+          account: data.account,
+        });
+      }
+    }
+
+    if (events.length === 0) return null;
+
+    // Sort by start time
+    events.sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
+
+    // Detect conflicts (overlapping events)
+    const conflicts: string[] = [];
+    for (let i = 0; i < events.length - 1; i++) {
+      if (!events[i].start.includes('T') || !events[i + 1].start.includes('T')) continue;
+      const endI = new Date(events[i].end).getTime();
+      const startNext = new Date(events[i + 1].start).getTime();
+      if (endI > startNext) {
+        conflicts.push(`"${events[i].summary}" overlaps with "${events[i + 1].summary}"`);
+      }
+    }
+
+    const label = type === 'today' ? "Today's" : type === 'tomorrow' ? "Tomorrow's" : "This Week's";
+    const parts: string[] = [`## ${label} Calendar (${events.length} events)`];
+
+    for (const e of events) {
+      const time = formatEventTime(e.start, e.end);
+      const attendeeCount = e.attendees?.length ? ` (${e.attendees.length} attendees)` : '';
+      const loc = e.location ? ` — ${e.location}` : '';
+      const acct = e.account === 'personal' ? ' [personal]' : '';
+      parts.push(`- ${time}: ${e.summary}${attendeeCount}${loc}${acct}`);
+    }
+
+    if (conflicts.length > 0) {
+      parts.push('Conflicts:');
+      for (const c of conflicts) parts.push(`- ${c}`);
+    }
+
+    return parts.join('\n');
+  } catch (err) {
+    logger.debug({ err }, 'Calendar events unavailable for briefing');
+    return null;
+  }
+}
+
+async function gatherImportantEmails(hours: number): Promise<string | null> {
+  try {
+    const { searchEmails } = await import('../agents/tools/google-tools.js');
+
+    const days = Math.max(1, Math.ceil(hours / 24));
+    const query = `is:unread newer_than:${days}d`;
+
+    // Query both work and personal accounts in parallel
+    const results = await Promise.allSettled(
+      (['work', 'personal'] as const).map((account) =>
+        searchEmails({ query, maxResults: 10, account }),
+      ),
+    );
+
+    interface EmailSummary {
+      subject: string;
+      from: string;
+      date: string;
+      snippet: string;
+      account: string;
+    }
+
+    const emails: EmailSummary[] = [];
+    for (const r of results) {
+      if (r.status !== 'fulfilled') continue;
+      const data = JSON.parse(r.value);
+      if (data.error || !data.emails) continue;
+      for (const e of data.emails) {
+        emails.push({
+          subject: e.subject ?? '(no subject)',
+          from: e.from ?? 'Unknown',
+          date: e.date ?? '',
+          snippet: e.snippet ?? '',
+          account: data.account,
+        });
+      }
+    }
+
+    if (emails.length === 0) return null;
+
+    // Cap at 15
+    const capped = emails.slice(0, 15);
+
+    const parts: string[] = [`## Unread Emails (${capped.length})`];
+    for (const e of capped) {
+      const acct = e.account === 'personal' ? ' [personal]' : '';
+      const snippet = e.snippet.length > 100 ? e.snippet.slice(0, 100) + '...' : e.snippet;
+      parts.push(`- **${e.from}**: ${e.subject}${acct}\n  ${snippet}`);
+    }
+
+    return parts.join('\n');
+  } catch (err) {
+    logger.debug({ err }, 'Emails unavailable for briefing');
+    return null;
+  }
+}
+
+async function gatherSlackDMs(hours: number): Promise<string | null> {
+  try {
+    const token = env.SLACK_USER_TOKEN;
+    if (!token) return null;
+
+    const userClient = new WebClient(token);
+    const oldest = String(Math.floor((Date.now() - hours * 3_600_000) / 1000));
+
+    // Get DM channels (cached)
+    const dmChannelIds = await getDmChannelIds(userClient);
+    if (dmChannelIds.length === 0) return null;
+
+    interface DmMessage {
+      user: string;
+      text: string;
+      ts: string;
+    }
+
+    // Read history from each DM channel in parallel
+    const channelResults = await Promise.allSettled(
+      dmChannelIds.map(async (channelId) => {
+        const history = await userClient.conversations.history({
+          channel: channelId,
+          oldest,
+          limit: 10,
+        });
+        return (history.messages ?? [])
+          .filter((msg) =>
+            msg.user &&
+            msg.user !== env.SLACK_OWNER_USER_ID &&
+            !msg.bot_id &&
+            !msg.subtype,
+          )
+          .map((msg): DmMessage => ({
+            user: msg.user!,
+            text: msg.text ?? '',
+            ts: msg.ts ?? '0',
+          }));
+      }),
+    );
+
+    const allMessages: DmMessage[] = channelResults
+      .flatMap((r) => (r.status === 'fulfilled' ? r.value : []));
+
+    if (allMessages.length === 0) return null;
+
+    // Sort by timestamp descending and cap at 20
+    allMessages.sort((a, b) => parseFloat(b.ts) - parseFloat(a.ts));
+    const capped = allMessages.slice(0, 20);
+
+    // Resolve user names
+    for (const msg of capped) {
+      await resolveUserName(userClient, msg.user);
+    }
+
+    const parts: string[] = [`## Slack DMs (${capped.length} messages)`];
+    for (const msg of capped) {
+      const name = userNameCache.get(msg.user) ?? msg.user;
+      const text = msg.text.length > 200 ? msg.text.slice(0, 200) + '...' : msg.text;
+      const timeAgo = formatTimeAgo(parseFloat(msg.ts));
+      parts.push(`- **${name}**: ${text} (${timeAgo})`);
+    }
+
+    return parts.join('\n');
+  } catch (err) {
+    logger.debug({ err }, 'Slack DMs unavailable for briefing');
+    return null;
+  }
+}
+
+async function gatherSlackChannelMessages(hours: number): Promise<string | null> {
+  try {
+    // Get monitored channels from Supabase
+    const supabase = getDaiSupabase();
+    const { data: monitors } = await supabase
+      .from('channel_monitor')
+      .select('channel_id')
+      .eq('active', true);
+
+    if (!monitors || monitors.length === 0) return null;
+
+    const channelIds = monitors.map((m) => m.channel_id as string);
+    const oldest = String(Math.floor((Date.now() - hours * 3_600_000) / 1000));
+
+    const slackClient = new WebClient(env.SLACK_BOT_TOKEN);
+
+    interface ChannelMessage {
+      channel: string;
+      user: string;
+      text: string;
+      ts: string;
+    }
+
+    // Read history from each channel in parallel
+    const channelResults = await Promise.allSettled(
+      channelIds.map(async (channelId) => {
+        const history = await slackClient.conversations.history({
+          channel: channelId,
+          oldest,
+          limit: 15,
+        });
+        return (history.messages ?? [])
+          .filter((msg) => !msg.bot_id && !msg.subtype)
+          .map((msg): ChannelMessage => ({
+            channel: channelId,
+            user: msg.user ?? 'unknown',
+            text: msg.text ?? '',
+            ts: msg.ts ?? '0',
+          }));
+      }),
+    );
+
+    const allMessages: ChannelMessage[] = channelResults
+      .flatMap((r) => (r.status === 'fulfilled' ? r.value : []));
+
+    if (allMessages.length === 0) return null;
+
+    // Sort by timestamp descending and cap at 30
+    allMessages.sort((a, b) => parseFloat(b.ts) - parseFloat(a.ts));
+    const capped = allMessages.slice(0, 30);
+
+    // Resolve user names
+    for (const msg of capped) {
+      await resolveUserName(slackClient, msg.user);
+    }
+
+    const parts: string[] = [`## Channel Activity (${capped.length} messages)`];
+    for (const msg of capped) {
+      const name = userNameCache.get(msg.user) ?? msg.user;
+      const text = msg.text.length > 150 ? msg.text.slice(0, 150) + '...' : msg.text;
+      parts.push(`- <#${msg.channel}> — **${name}**: ${text}`);
+    }
+
+    return parts.join('\n');
+  } catch (err) {
+    logger.debug({ err }, 'Channel messages unavailable for briefing');
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Morning briefing
 // ---------------------------------------------------------------------------
 
@@ -163,17 +543,28 @@ export async function generateMorningBriefing(): Promise<string> {
   const dataSections: string[] = [];
 
   // Gather data from all sources concurrently
-  const [insights, mentions, tasks, meetings] = await Promise.all([
+  const [
+    insights, mentions, tasks, meetings,
+    calendar, emails, dms, channelMessages,
+  ] = await Promise.all([
     gatherChannelInsights(),
-    gatherRecentMentions(14), // Since last EOD ~7pm
+    gatherRecentMentions(14),
     gatherNotionTasks(['In Progress', 'To Do'], 'Daniel'),
     gatherRecentMeetings(1),
+    gatherCalendarEvents('today'),
+    gatherImportantEmails(14),
+    gatherSlackDMs(14),
+    gatherSlackChannelMessages(14),
   ]);
 
+  if (calendar) dataSections.push(calendar);
+  if (emails) dataSections.push(emails);
+  if (dms) dataSections.push(dms);
   if (insights) dataSections.push(insights);
   if (mentions) dataSections.push(mentions);
   if (tasks) dataSections.push(tasks);
   if (meetings) dataSections.push(meetings);
+  if (channelMessages) dataSections.push(channelMessages);
 
   const dataSummary = dataSections.length > 0
     ? dataSections.join('\n\n')
@@ -182,16 +573,18 @@ export async function generateMorningBriefing(): Promise<string> {
   const today = getTodayString();
 
   const systemPrompt = [
-    'You are Jasmin, Daniel\'s personal assistant. Write a concise morning briefing for Daniel.',
-    `Today is ${today}. Daniel is based in Berlin (Europe/Berlin).`,
+    'You are Jasmin, Daniel\'s personal assistant and chief of staff. Write a concise morning briefing.',
+    `Today is ${today}. Daniel is based in Berlin (Europe/Berlin), works 9am–7pm.`,
     '',
     'Structure the briefing as:',
-    '1. **Top Priority** — The single most important thing to address first',
-    '2. **Blockers & Urgent** — Things people are waiting on Daniel for, time-sensitive items',
-    '3. **Today\'s Tasks** — What\'s on Daniel\'s plate (from Notion)',
-    '4. **Meetings** — Any meetings from yesterday with unresolved action items',
-    '5. **Notable** — Important but not urgent updates',
+    '1. **Today\'s Schedule** — Calendar events, flag any conflicts or back-to-back meetings, note gaps',
+    '2. **Action Required** — Unreplied DMs, emails needing response, blockers from channels. Prioritize by urgency.',
+    '3. **Tasks** — Notion in-progress and to-do items, highlight overdue items',
+    '4. **Overnight Activity** — Key Slack messages, channel highlights, meeting follow-ups since last EOD',
+    '5. **Notable** — FYI items that don\'t need action but Daniel should be aware of',
     '',
+    'IMPORTANT: Prioritize actionable items and group by urgency, not by source.',
+    'Tell Daniel what needs his attention, not just dump data.',
     'Keep it scannable — use bullet points, bold key names/items. No fluff.',
     'If a data source is unavailable, skip that section silently.',
     'End with a brief motivational note or reminder (keep it natural, not cheesy).',
@@ -220,17 +613,10 @@ export async function generateMorningBriefing(): Promise<string> {
       'Morning briefing generated',
     );
 
-    // Post to Daniel's DM
-    await postMessage({
-      channel: env.SLACK_OWNER_USER_ID,
-      text: `:sunrise: *Morning Briefing*\n\n${briefingText}`,
-    });
-
+    await postBriefing(`:sunrise: *Morning Briefing*\n\n${briefingText}`);
     logger.info('Morning briefing sent to Daniel');
 
-    // Persist to Supabase (best-effort)
     await persistBriefing('morning', briefingText, dataSections.length);
-
     return briefingText;
   } catch (err) {
     logger.error({ err }, 'Failed to generate morning briefing');
@@ -248,17 +634,26 @@ export async function generateEodBriefing(): Promise<string> {
   const dataSections: string[] = [];
 
   // Gather data from all sources concurrently
-  const [insights, mentions, tasks, meetings] = await Promise.all([
+  const [
+    insights, mentions, tasks, meetings,
+    calendar, emails, dms,
+  ] = await Promise.all([
     gatherChannelInsights(),
-    gatherRecentMentions(10), // Today's mentions
-    gatherNotionTasks(['Done', 'In Progress']),
+    gatherRecentMentions(10),
+    gatherNotionTasks(['Done', 'In Progress', 'Blocked']),
     gatherRecentMeetings(1),
+    gatherCalendarEvents('tomorrow'),
+    gatherImportantEmails(10),
+    gatherSlackDMs(10),
   ]);
 
+  if (tasks) dataSections.push(tasks);
+  if (dms) dataSections.push(dms);
+  if (emails) dataSections.push(emails);
   if (insights) dataSections.push(insights);
   if (mentions) dataSections.push(mentions);
-  if (tasks) dataSections.push(tasks);
   if (meetings) dataSections.push(meetings);
+  if (calendar) dataSections.push(calendar);
 
   const dataSummary = dataSections.length > 0
     ? dataSections.join('\n\n')
@@ -267,17 +662,19 @@ export async function generateEodBriefing(): Promise<string> {
   const today = getTodayString();
 
   const systemPrompt = [
-    'You are Jasmin, Daniel\'s personal assistant. Write a concise end-of-day summary.',
-    `Today is ${today}.`,
+    'You are Jasmin, Daniel\'s personal assistant and chief of staff. Write a concise end-of-day summary.',
+    `Today is ${today}. Daniel is based in Berlin.`,
     '',
     'Structure:',
-    '1. **Completed Today** — What got done',
-    '2. **Still Open** — What\'s still in progress or unresolved',
-    '3. **Unresolved Blockers** — Anything people are still waiting on Daniel for',
-    '4. **Tomorrow Preview** — Quick look at what\'s coming',
+    '1. **Completed Today** — What got done (from Notion "Done" tasks)',
+    '2. **Still Needs Your Reply** — Unreplied DMs and emails from today',
+    '3. **Open Items** — Unresolved blockers, in-progress tasks, anything people are still waiting on',
+    '4. **Tomorrow Preview** — Tomorrow\'s calendar + what\'s coming up',
+    '5. **Wind Down** — Brief note on what can wait till tomorrow (or Monday if it\'s Friday)',
     '',
-    'Keep it brief and scannable. Focus on closure — what can Daniel stop thinking about,',
-    'and what should he pick up tomorrow.',
+    'Focus on closure — what can Daniel stop thinking about, and what should he pick up tomorrow.',
+    'Keep it brief and scannable. Prioritize actionable items.',
+    'If a data source is unavailable, skip that section silently.',
   ].join('\n');
 
   try {
@@ -303,20 +700,97 @@ export async function generateEodBriefing(): Promise<string> {
       'EOD briefing generated',
     );
 
-    // Post to Daniel's DM
-    await postMessage({
-      channel: env.SLACK_OWNER_USER_ID,
-      text: `:moon: *End-of-Day Summary*\n\n${briefingText}`,
-    });
-
+    await postBriefing(`:moon: *End-of-Day Summary*\n\n${briefingText}`);
     logger.info('EOD briefing sent to Daniel');
 
-    // Persist to Supabase (best-effort)
     await persistBriefing('eod', briefingText, dataSections.length);
-
     return briefingText;
   } catch (err) {
     logger.error({ err }, 'Failed to generate EOD briefing');
+    throw err;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Weekly briefing (Monday mornings)
+// ---------------------------------------------------------------------------
+
+export async function generateWeeklyBriefing(): Promise<string> {
+  logger.info('Generating weekly briefing');
+
+  const dataSections: string[] = [];
+
+  // Gather data from all sources concurrently
+  const [
+    calendar, tasks, emails, dms, channelMessages, meetings,
+  ] = await Promise.all([
+    gatherCalendarEvents('week'),
+    gatherNotionTasks(['To Do', 'In Progress', 'Blocked']),
+    gatherImportantEmails(72),
+    gatherSlackDMs(72),
+    gatherSlackChannelMessages(72),
+    gatherRecentMeetings(3),
+  ]);
+
+  if (calendar) dataSections.push(calendar);
+  if (dms) dataSections.push(dms);
+  if (emails) dataSections.push(emails);
+  if (channelMessages) dataSections.push(channelMessages);
+  if (tasks) dataSections.push(tasks);
+  if (meetings) dataSections.push(meetings);
+
+  const dataSummary = dataSections.length > 0
+    ? dataSections.join('\n\n')
+    : 'No data available from any source at this time.';
+
+  const today = getTodayString();
+
+  const systemPrompt = [
+    'You are Jasmin, Daniel\'s personal assistant and chief of staff. Write a Monday morning weekly overview.',
+    `Today is ${today}. Daniel is based in Berlin (Europe/Berlin), works 9am–7pm weekdays.`,
+    '',
+    'Structure:',
+    '1. **This Week\'s Calendar** — Day-by-day overview of the week ahead, highlight key meetings and busy days',
+    '2. **Weekend Catch-up** — What happened over the weekend: DMs, emails, channel activity, meetings',
+    '3. **Week Priorities** — Open tasks organized by priority, flag anything with deadlines this week',
+    '4. **Decisions Needed** — Anything pending Daniel\'s input or approval',
+    '',
+    'This is a strategic overview for the week — help Daniel plan and prioritize.',
+    'Keep it scannable, use bullet points, bold key items.',
+    'If a data source is unavailable, skip that section silently.',
+    'End with a brief note to set the tone for the week.',
+  ].join('\n');
+
+  try {
+    const response = await getClient().messages.create({
+      model: BRIEFING_MODEL,
+      max_tokens: 3072,
+      system: systemPrompt,
+      messages: [
+        {
+          role: 'user',
+          content: `Here is the data gathered for this week's Monday overview:\n\n${dataSummary}`,
+        },
+      ],
+    });
+
+    const briefingText = response.content
+      .filter((block): block is Anthropic.TextBlock => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n');
+
+    logger.info(
+      { briefingLength: briefingText.length, dataSources: dataSections.length },
+      'Weekly briefing generated',
+    );
+
+    await postBriefing(`:calendar: *Weekly Overview*\n\n${briefingText}`);
+    logger.info('Weekly briefing sent to Daniel');
+
+    await persistBriefing('weekly', briefingText, dataSections.length);
+    return briefingText;
+  } catch (err) {
+    logger.error({ err }, 'Failed to generate weekly briefing');
     throw err;
   }
 }
@@ -326,6 +800,13 @@ export async function generateEodBriefing(): Promise<string> {
 // ---------------------------------------------------------------------------
 
 export function registerBriefingJobs(): void {
+  registerJob(
+    'weekly-briefing',
+    '0 8 * * 1', // 8am Monday
+    'Europe/Berlin',
+    async () => { await generateWeeklyBriefing(); },
+  );
+
   registerJob(
     'morning-briefing',
     '0 9 * * 1-5', // 9am weekdays
