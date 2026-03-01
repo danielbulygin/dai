@@ -141,7 +141,6 @@ async function ensureSchema(): Promise<{ titleProp: string; propMap: Record<stri
         );
       } else {
         propsToCreate[logicalName] = spec.config;
-        map[logicalName] = logicalName;
       }
     }
   }
@@ -152,10 +151,27 @@ async function ensureSchema(): Promise<{ titleProp: string; propMap: Record<stri
       { properties: Object.keys(propsToCreate) },
       'Auto-creating missing Notion database properties',
     );
-    await notion.databases.update({
-      database_id: dbId,
-      properties: propsToCreate as Parameters<typeof notion.databases.update>[0]['properties'],
-    });
+    try {
+      await notion.databases.update({
+        database_id: dbId,
+        properties: propsToCreate as Parameters<typeof notion.databases.update>[0]['properties'],
+      });
+
+      // Re-fetch schema after creation to confirm properties exist
+      const dbAfter = await notion.databases.retrieve({ database_id: dbId });
+      const propsAfter = 'properties' in dbAfter ? dbAfter.properties : {};
+      for (const [name, prop] of Object.entries(propsAfter)) {
+        const propType = (prop as { type: string }).type;
+        if (propType !== 'title') {
+          map[name] = name;
+        }
+      }
+    } catch (err) {
+      logger.error({ error: err instanceof Error ? err.message : String(err) }, 'Failed to auto-create Notion properties');
+    }
+  } else {
+    // All required properties exist (except possibly Status)
+    // map was already populated above
   }
 
   schemaMap = map;
