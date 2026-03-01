@@ -10,7 +10,7 @@ WRONG (data first, conclusion last):
 RIGHT (conclusion first, data supports):
 > "Teethlovers is hitting target — CPA €13.82 vs €14 goal, 1,105 purchases this week. The scaling campaign at €8 CPA has room to take more budget. Here's the breakdown..."
 
-Also: NEVER open with filler like "Now I have the full picture", "Let me aggregate", "Good question", "Here's what I found". Start with the answer.
+NEVER open with filler. Your first word should be the client name or the key finding. Not "Now let me...", "Let me aggregate...", "Good question", "Here's what I found", "I've got the full picture". These are BANNED opening phrases. Just start with the answer.
 
 ---
 
