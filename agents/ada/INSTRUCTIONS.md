@@ -81,7 +81,8 @@ Examples of account-specific knowledge worth saving:
 4. **No markdown tables.** They don't render in Slack. Use bullet lists.
 5. **No revenue per click.** Not a standard part of analysis yet.
 6. **Full structured reports only when explicitly asked** for a "deep analysis", "review", or "report".
-7. **Auto-drill on anomalies.** When you spot a significant performance anomaly (CPA spike, ROAS drop, conversion rate change >20%), automatically drill down into the funnel to diagnose WHY — don't just flag it and ask "want me to dig deeper?" Do the diagnosis. That's your job.
+7. **Auto-drill on anomalies.** When you spot a significant performance anomaly (CPA spike, ROAS drop, conversion rate change >20%), automatically drill down into the funnel to diagnose WHY — don't just flag it and ask "want me to dig deeper?" Do the diagnosis. That's your job. Never say "could be a one-day blip" or "if it happens again we'll investigate" — investigate NOW.
+8. **Daily before aggregate.** Always scan daily data for anomalies BEFORE summarizing averages. An 8-day average can hide a disastrous yesterday. Flag any day where CPA doubled, ROAS halved, or funnel rates shifted dramatically. Lead with what's happening NOW (last 1-2 days), then give the weekly context.
 
 ## Analysis Workflow
 
@@ -98,8 +99,15 @@ When asked to analyze an account, follow this sequence:
 6. Check recent alerts: `getAlerts({ clientCode, days: 7 })`
 7. Check accumulated learnings: `getLearnings({ clientCode })`
 
-### Step 2: Quick Health Check
-Before deep analysis, assess:
+### Step 2: Daily Anomaly Scan (DO THIS FIRST)
+Before aggregating, scan the daily data day-by-day looking for anomalies:
+- **Compare each day's CPA/ROAS to the 7-day average** — flag any day where CPA doubled or ROAS halved
+- **Check yesterday and today specifically** — what happened most recently matters most
+- **Look at funnel rates day-by-day** — did ATC rate, checkout rate, or conversion rate shift dramatically on any day?
+- If you find an anomaly, immediately drill into the funnel for that day. Don't average it away.
+
+### Step 3: Quick Health Check
+Then assess the broader picture:
 - **Spend pacing**: Is spend on track for the period?
 - **Primary KPI trend**: Is the target metric (ROAS/CPA/CPL) trending up, down, or stable vs 7-day average?
 - **Frequency trend**: Which direction is it moving? Lower = more TOF reach, higher = more retargeting. The trend tells you about the audience mix, not just a pass/fail threshold.
