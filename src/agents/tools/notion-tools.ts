@@ -17,13 +17,176 @@ function getKanbanDbId(): string {
   return dbId;
 }
 
-function extractPageData(page: PageObjectResponse) {
+// ---------------------------------------------------------------------------
+// Schema auto-discovery & provisioning
+// ---------------------------------------------------------------------------
+
+// Logical field -> expected Notion property type
+const REQUIRED_PROPERTIES: Record<string, { type: string; config: unknown }> = {
+  Status: {
+    type: 'status',
+    config: {
+      status: {
+        options: [
+          { name: 'To Do', color: 'default' },
+          { name: 'In Progress', color: 'blue' },
+          { name: 'Blocked', color: 'orange' },
+          { name: 'Done', color: 'green' },
+        ],
+        groups: [
+          { name: 'To do', option_ids: [] },
+          { name: 'In progress', option_ids: [] },
+          { name: 'Complete', option_ids: [] },
+        ],
+      },
+    },
+  },
+  Assignee: {
+    type: 'select',
+    config: {
+      select: {
+        options: [
+          { name: 'Daniel', color: 'blue' },
+          { name: 'Jasmin', color: 'purple' },
+          { name: 'Ada', color: 'orange' },
+          { name: 'Otto', color: 'green' },
+          { name: 'Coda', color: 'pink' },
+          { name: 'Rex', color: 'yellow' },
+          { name: 'Sage', color: 'gray' },
+        ],
+      },
+    },
+  },
+  Priority: {
+    type: 'select',
+    config: {
+      select: {
+        options: [
+          { name: 'Low', color: 'green' },
+          { name: 'Medium', color: 'yellow' },
+          { name: 'High', color: 'orange' },
+          { name: 'Urgent', color: 'red' },
+        ],
+      },
+    },
+  },
+  'Due Date': { type: 'date', config: { date: {} } },
+  Labels: {
+    type: 'multi_select',
+    config: {
+      multi_select: {
+        options: [
+          { name: 'personal', color: 'blue' },
+          { name: 'work', color: 'orange' },
+          { name: 'dai', color: 'purple' },
+          { name: 'bmad', color: 'pink' },
+          { name: 'agency', color: 'green' },
+          { name: 'follow-up', color: 'yellow' },
+          { name: 'waiting', color: 'gray' },
+        ],
+      },
+    },
+  },
+};
+
+// Cache: maps logical field name -> actual property name in the database
+let schemaMap: Record<string, string> | null = null;
+let titlePropName: string | null = null;
+
+/**
+ * Fetch the database schema, build a map from logical names to actual property names,
+ * and auto-create any missing properties.
+ */
+async function ensureSchema(): Promise<{ titleProp: string; propMap: Record<string, string> }> {
+  if (schemaMap && titlePropName) {
+    return { titleProp: titlePropName, propMap: schemaMap };
+  }
+
+  const dbId = getKanbanDbId();
+  const notion = getNotion();
+
+  const db = await notion.databases.retrieve({ database_id: dbId });
+  const existingProps = 'properties' in db ? db.properties : {};
+
+  // Find the title property (whatever it's called)
+  let foundTitle = 'Name';
+  for (const [name, prop] of Object.entries(existingProps)) {
+    if ((prop as { type: string }).type === 'title') {
+      foundTitle = name;
+      break;
+    }
+  }
+
+  // Build map of existing properties by type
+  const existingByName = new Map<string, string>();
+  for (const [name, prop] of Object.entries(existingProps)) {
+    existingByName.set(name, (prop as { type: string }).type);
+  }
+
+  // Check each required property and create if missing
+  const map: Record<string, string> = {};
+  const propsToCreate: Record<string, unknown> = {};
+
+  for (const [logicalName, spec] of Object.entries(REQUIRED_PROPERTIES)) {
+    const existingType = existingByName.get(logicalName);
+    if (existingType) {
+      map[logicalName] = logicalName;
+    } else {
+      // Property doesn't exist — queue for creation
+      // Note: status properties can't be created via API, so we skip them
+      if (spec.type === 'status') {
+        logger.warn(
+          { property: logicalName },
+          'Status property missing — must be created manually in Notion UI',
+        );
+      } else {
+        propsToCreate[logicalName] = spec.config;
+        map[logicalName] = logicalName;
+      }
+    }
+  }
+
+  // Create missing properties in one API call
+  if (Object.keys(propsToCreate).length > 0) {
+    logger.info(
+      { properties: Object.keys(propsToCreate) },
+      'Auto-creating missing Notion database properties',
+    );
+    await notion.databases.update({
+      database_id: dbId,
+      properties: propsToCreate as Parameters<typeof notion.databases.update>[0]['properties'],
+    });
+  }
+
+  schemaMap = map;
+  titlePropName = foundTitle;
+
+  logger.info(
+    { titleProp: foundTitle, mappedProperties: Object.keys(map), created: Object.keys(propsToCreate) },
+    'Notion schema verified',
+  );
+
+  return { titleProp: foundTitle, propMap: map };
+}
+
+/** Reset cached schema (useful after manual DB changes) */
+export function resetSchemaCache(): void {
+  schemaMap = null;
+  titlePropName = null;
+}
+
+// ---------------------------------------------------------------------------
+// Data extraction
+// ---------------------------------------------------------------------------
+
+function extractPageData(page: PageObjectResponse, titleProp: string) {
   const props = page.properties;
 
-  const titleProp = props['Title'];
+  // Title — use discovered property name
+  const tp = props[titleProp];
   const title =
-    titleProp && titleProp.type === 'title'
-      ? titleProp.title.map((t: { plain_text: string }) => t.plain_text).join('')
+    tp && tp.type === 'title'
+      ? tp.title.map((t: { plain_text: string }) => t.plain_text).join('')
       : '';
 
   const statusProp = props['Status'];
@@ -69,6 +232,10 @@ function extractPageData(page: PageObjectResponse) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Tools
+// ---------------------------------------------------------------------------
+
 export async function queryTasks(params: {
   status?: string;
   assignee?: string;
@@ -79,6 +246,7 @@ export async function queryTasks(params: {
     const limit = params.limit ?? 20;
     const dbId = getKanbanDbId();
     const notion = getNotion();
+    const { titleProp } = await ensureSchema();
 
     logger.debug(
       { status: params.status, assignee: params.assignee, priority: params.priority, limit },
@@ -104,15 +272,15 @@ export async function queryTasks(params: {
       filter = { and: filters };
     }
 
-    const response = await notion.dataSources.query({
-      data_source_id: dbId,
+    const response = await notion.databases.query({
+      database_id: dbId,
       page_size: limit,
       ...(filter ? { filter } : {}),
     });
 
     const tasks = response.results
       .filter((page): page is PageObjectResponse => page.object === 'page' && 'properties' in page)
-      .map(extractPageData);
+      .map((page) => extractPageData(page, titleProp));
 
     logger.debug({ count: tasks.length }, 'Queried Notion tasks');
     return JSON.stringify(tasks);
@@ -135,6 +303,7 @@ export async function createTask(params: {
   try {
     const dbId = getKanbanDbId();
     const notion = getNotion();
+    const { titleProp, propMap } = await ensureSchema();
 
     logger.debug(
       { title: params.title, status: params.status, assignee: params.assignee },
@@ -142,31 +311,38 @@ export async function createTask(params: {
     );
 
     const properties: Record<string, unknown> = {
-      Title: {
+      [titleProp]: {
         title: [{ text: { content: params.title } }],
-      },
-      Status: {
-        status: { name: params.status ?? 'To Do' },
-      },
-      Priority: {
-        select: { name: params.priority ?? 'Medium' },
       },
     };
 
-    if (params.assignee) {
-      properties['Assignee'] = {
+    // Only set properties that exist in the database
+    if (propMap['Status']) {
+      properties[propMap['Status']] = {
+        status: { name: params.status ?? 'To Do' },
+      };
+    }
+
+    if (propMap['Priority']) {
+      properties[propMap['Priority']] = {
+        select: { name: params.priority ?? 'Medium' },
+      };
+    }
+
+    if (params.assignee && propMap['Assignee']) {
+      properties[propMap['Assignee']] = {
         select: { name: params.assignee },
       };
     }
 
-    if (params.dueDate) {
-      properties['Due Date'] = {
+    if (params.dueDate && propMap['Due Date']) {
+      properties[propMap['Due Date']] = {
         date: { start: params.dueDate },
       };
     }
 
-    if (params.labels && params.labels.length > 0) {
-      properties['Labels'] = {
+    if (params.labels && params.labels.length > 0 && propMap['Labels']) {
+      properties[propMap['Labels']] = {
         multi_select: params.labels.map((name) => ({ name })),
       };
     }
@@ -217,6 +393,7 @@ export async function updateTask(params: {
 }): Promise<string> {
   try {
     const notion = getNotion();
+    const { propMap } = await ensureSchema();
 
     logger.debug(
       { pageId: params.pageId, status: params.status },
@@ -225,32 +402,32 @@ export async function updateTask(params: {
 
     const properties: Record<string, unknown> = {};
 
-    if (params.status) {
-      properties['Status'] = {
+    if (params.status && propMap['Status']) {
+      properties[propMap['Status']] = {
         status: { name: params.status },
       };
     }
 
-    if (params.assignee) {
-      properties['Assignee'] = {
+    if (params.assignee && propMap['Assignee']) {
+      properties[propMap['Assignee']] = {
         select: { name: params.assignee },
       };
     }
 
-    if (params.priority) {
-      properties['Priority'] = {
+    if (params.priority && propMap['Priority']) {
+      properties[propMap['Priority']] = {
         select: { name: params.priority },
       };
     }
 
-    if (params.dueDate) {
-      properties['Due Date'] = {
+    if (params.dueDate && propMap['Due Date']) {
+      properties[propMap['Due Date']] = {
         date: { start: params.dueDate },
       };
     }
 
-    if (params.labels) {
-      properties['Labels'] = {
+    if (params.labels && propMap['Labels']) {
+      properties[propMap['Labels']] = {
         multi_select: params.labels.map((name) => ({ name })),
       };
     }
