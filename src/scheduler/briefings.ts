@@ -144,7 +144,7 @@ async function gatherChannelInsights(): Promise<string | null> {
     const result = await getChannelInsights();
     if (!result.analysis) return null;
 
-    const parts: string[] = ['## Channel Monitoring Insights'];
+    const parts: string[] = ['*Channel Monitoring Insights*'];
     if (result.analysis.blockers.length > 0) {
       parts.push('Blockers on Daniel:');
       for (const item of result.analysis.blockers) parts.push(`- ${item}`);
@@ -175,7 +175,7 @@ async function gatherRecentMentions(hours: number): Promise<string | null> {
     const result = await getRecentMentions({ hours });
     if (result.count === 0) return null;
 
-    const parts: string[] = [`## Recent Mentions (last ${hours}h) — ${result.count} total`];
+    const parts: string[] = [`*Recent Mentions (last ${hours}h)* — ${result.count} total`];
     for (const mention of result.mentions.slice(0, 15)) {
       const text = mention.text.length > 200 ? mention.text.slice(0, 200) + '...' : mention.text;
       parts.push(`- [${mention.priority}] <@${mention.user_id}> in <#${mention.channel_id}>: ${text}`);
@@ -193,7 +193,7 @@ async function gatherNotionTasks(
 ): Promise<string | null> {
   try {
     const { queryTasks } = await import('../agents/tools/notion-tools.js');
-    const parts: string[] = ['## Notion Tasks'];
+    const parts: string[] = ['*Notion Tasks*'];
 
     for (const status of statuses) {
       const params: { status: string; assignee?: string } = { status };
@@ -202,7 +202,7 @@ async function gatherNotionTasks(
       const tasks = JSON.parse(rawResult);
 
       if (Array.isArray(tasks) && tasks.length > 0) {
-        parts.push(`### ${status} (${tasks.length})`);
+        parts.push(`_${status}_ (${tasks.length})`);
         for (const task of tasks.slice(0, 10)) {
           const priority = task.priority ? ` [${task.priority}]` : '';
           const due = task.dueDate ? ` (due: ${task.dueDate})` : '';
@@ -226,7 +226,7 @@ async function gatherRecentMeetings(days: number): Promise<string | null> {
 
     if (!Array.isArray(meetings) || meetings.length === 0) return null;
 
-    const parts: string[] = [`## Recent Meetings (last ${days} day${days === 1 ? '' : 's'})`];
+    const parts: string[] = [`*Recent Meetings (last ${days} day${days === 1 ? '' : 's'})*`];
     for (const meeting of meetings.slice(0, 10)) {
       const date = meeting.date ? new Date(meeting.date).toLocaleDateString() : '';
       const summary = meeting.short_summary ?? '';
@@ -314,7 +314,7 @@ async function gatherCalendarEvents(
     }
 
     const label = type === 'today' ? "Today's" : type === 'tomorrow' ? "Tomorrow's" : "This Week's";
-    const parts: string[] = [`## ${label} Calendar (${events.length} events)`];
+    const parts: string[] = [`*${label} Calendar* (${events.length} events)`];
 
     for (const e of events) {
       const time = formatEventTime(e.start, e.end);
@@ -379,11 +379,11 @@ async function gatherImportantEmails(hours: number): Promise<string | null> {
     // Cap at 15
     const capped = emails.slice(0, 15);
 
-    const parts: string[] = [`## Unread Emails (${capped.length})`];
+    const parts: string[] = [`*Unread Emails* (${capped.length})`];
     for (const e of capped) {
       const acct = e.account === 'personal' ? ' [personal]' : '';
       const snippet = e.snippet.length > 100 ? e.snippet.slice(0, 100) + '...' : e.snippet;
-      parts.push(`- **${e.from}**: ${e.subject}${acct}\n  ${snippet}`);
+      parts.push(`- *${e.from}*: ${e.subject}${acct}\n  ${snippet}`);
     }
 
     return parts.join('\n');
@@ -448,12 +448,12 @@ async function gatherSlackDMs(hours: number): Promise<string | null> {
       await resolveUserName(userClient, msg.user);
     }
 
-    const parts: string[] = [`## Slack DMs (${capped.length} messages)`];
+    const parts: string[] = [`*Slack DMs* (${capped.length} messages)`];
     for (const msg of capped) {
       const name = userNameCache.get(msg.user) ?? msg.user;
       const text = msg.text.length > 200 ? msg.text.slice(0, 200) + '...' : msg.text;
       const timeAgo = formatTimeAgo(parseFloat(msg.ts));
-      parts.push(`- **${name}**: ${text} (${timeAgo})`);
+      parts.push(`- *${name}*: ${text} (${timeAgo})`);
     }
 
     return parts.join('\n');
@@ -519,11 +519,11 @@ async function gatherSlackChannelMessages(hours: number): Promise<string | null>
       await resolveUserName(slackClient, msg.user);
     }
 
-    const parts: string[] = [`## Channel Activity (${capped.length} messages)`];
+    const parts: string[] = [`*Channel Activity* (${capped.length} messages)`];
     for (const msg of capped) {
       const name = userNameCache.get(msg.user) ?? msg.user;
       const text = msg.text.length > 150 ? msg.text.slice(0, 150) + '...' : msg.text;
-      parts.push(`- <#${msg.channel}> — **${name}**: ${text}`);
+      parts.push(`- <#${msg.channel}> — *${name}*: ${text}`);
     }
 
     return parts.join('\n');
@@ -576,16 +576,23 @@ export async function generateMorningBriefing(): Promise<string> {
     'You are Jasmin, Daniel\'s personal assistant and chief of staff. Write a concise morning briefing.',
     `Today is ${today}. Daniel is based in Berlin (Europe/Berlin), works 9am–7pm.`,
     '',
+    'FORMATTING: This message will be posted in Slack. Use Slack mrkdwn:',
+    '- *bold* for emphasis (single asterisk, NOT double)',
+    '- _italic_ for secondary emphasis',
+    '- Use bullet points (•) for lists',
+    '- NO markdown headers (# or ##) — use *Bold Section Title* instead',
+    '- Keep line breaks clean, no excessive whitespace',
+    '',
     'Structure the briefing as:',
-    '1. **Today\'s Schedule** — Calendar events, flag any conflicts or back-to-back meetings, note gaps',
-    '2. **Action Required** — Unreplied DMs, emails needing response, blockers from channels. Prioritize by urgency.',
-    '3. **Tasks** — Notion in-progress and to-do items, highlight overdue items',
-    '4. **Overnight Activity** — Key Slack messages, channel highlights, meeting follow-ups since last EOD',
-    '5. **Notable** — FYI items that don\'t need action but Daniel should be aware of',
+    '1. *Today\'s Schedule* — Calendar events, flag any conflicts or back-to-back meetings, note gaps',
+    '2. *Action Required* — Unreplied DMs, emails needing response, blockers from channels. Prioritize by urgency.',
+    '3. *Tasks* — Notion in-progress and to-do items, highlight overdue items',
+    '4. *Overnight Activity* — Key Slack messages, channel highlights, meeting follow-ups since last EOD',
+    '5. *Notable* — FYI items that don\'t need action but Daniel should be aware of',
     '',
     'IMPORTANT: Prioritize actionable items and group by urgency, not by source.',
     'Tell Daniel what needs his attention, not just dump data.',
-    'Keep it scannable — use bullet points, bold key names/items. No fluff.',
+    'Keep it scannable. No fluff.',
     'If a data source is unavailable, skip that section silently.',
     'End with a brief motivational note or reminder (keep it natural, not cheesy).',
   ].join('\n');
@@ -665,12 +672,18 @@ export async function generateEodBriefing(): Promise<string> {
     'You are Jasmin, Daniel\'s personal assistant and chief of staff. Write a concise end-of-day summary.',
     `Today is ${today}. Daniel is based in Berlin.`,
     '',
+    'FORMATTING: This message will be posted in Slack. Use Slack mrkdwn:',
+    '- *bold* for emphasis (single asterisk, NOT double)',
+    '- _italic_ for secondary emphasis',
+    '- Use bullet points (•) for lists',
+    '- NO markdown headers (# or ##) — use *Bold Section Title* instead',
+    '',
     'Structure:',
-    '1. **Completed Today** — What got done (from Notion "Done" tasks)',
-    '2. **Still Needs Your Reply** — Unreplied DMs and emails from today',
-    '3. **Open Items** — Unresolved blockers, in-progress tasks, anything people are still waiting on',
-    '4. **Tomorrow Preview** — Tomorrow\'s calendar + what\'s coming up',
-    '5. **Wind Down** — Brief note on what can wait till tomorrow (or Monday if it\'s Friday)',
+    '1. *Completed Today* — What got done (from Notion "Done" tasks)',
+    '2. *Still Needs Your Reply* — Unreplied DMs and emails from today',
+    '3. *Open Items* — Unresolved blockers, in-progress tasks, anything people are still waiting on',
+    '4. *Tomorrow Preview* — Tomorrow\'s calendar + what\'s coming up',
+    '5. *Wind Down* — Brief note on what can wait till tomorrow (or Monday if it\'s Friday)',
     '',
     'Focus on closure — what can Daniel stop thinking about, and what should he pick up tomorrow.',
     'Keep it brief and scannable. Prioritize actionable items.',
@@ -749,11 +762,17 @@ export async function generateWeeklyBriefing(): Promise<string> {
     'You are Jasmin, Daniel\'s personal assistant and chief of staff. Write a Monday morning weekly overview.',
     `Today is ${today}. Daniel is based in Berlin (Europe/Berlin), works 9am–7pm weekdays.`,
     '',
+    'FORMATTING: This message will be posted in Slack. Use Slack mrkdwn:',
+    '- *bold* for emphasis (single asterisk, NOT double)',
+    '- _italic_ for secondary emphasis',
+    '- Use bullet points (•) for lists',
+    '- NO markdown headers (# or ##) — use *Bold Section Title* instead',
+    '',
     'Structure:',
-    '1. **This Week\'s Calendar** — Day-by-day overview of the week ahead, highlight key meetings and busy days',
-    '2. **Weekend Catch-up** — What happened over the weekend: DMs, emails, channel activity, meetings',
-    '3. **Week Priorities** — Open tasks organized by priority, flag anything with deadlines this week',
-    '4. **Decisions Needed** — Anything pending Daniel\'s input or approval',
+    '1. *This Week\'s Calendar* — Day-by-day overview of the week ahead, highlight key meetings and busy days',
+    '2. *Weekend Catch-up* — What happened over the weekend: DMs, emails, channel activity, meetings',
+    '3. *Week Priorities* — Open tasks organized by priority, flag anything with deadlines this week',
+    '4. *Decisions Needed* — Anything pending Daniel\'s input or approval',
     '',
     'This is a strategic overview for the week — help Daniel plan and prioritize.',
     'Keep it scannable, use bullet points, bold key items.',
