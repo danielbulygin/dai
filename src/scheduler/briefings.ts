@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { WebClient } from '@slack/web-api';
 import { env } from '../env.js';
-import { postMessage } from '../agents/tools/slack-tools.js';
+import { postMessage, getUnreadDMs } from '../agents/tools/slack-tools.js';
 import { getDaiSupabase } from '../integrations/dai-supabase.js';
 import { jasminApp } from '../slack/app.js';
 import { logger } from '../utils/logger.js';
@@ -463,6 +463,32 @@ async function gatherSlackDMs(hours: number): Promise<string | null> {
   }
 }
 
+async function gatherUnreadDMs(): Promise<string | null> {
+  try {
+    const result = await getUnreadDMs({ limit: 20 });
+    if (!result.ok || !result.conversations || result.conversations.length === 0) return null;
+
+    const parts: string[] = [
+      `*Unread DMs* (${result.total_unread} messages across ${result.conversations.length} conversations)`,
+    ];
+
+    for (const conv of result.conversations) {
+      const who = conv.participants.join(', ');
+      const label = conv.type === 'group_dm' ? ' [group]' : '';
+      parts.push(`\n_${who}${label}_ — ${conv.unread_count} unread:`);
+      for (const msg of conv.messages.slice(0, 5)) {
+        const text = msg.text.length > 200 ? msg.text.slice(0, 200) + '...' : msg.text;
+        parts.push(`  • *${msg.user}*: ${text}`);
+      }
+    }
+
+    return parts.join('\n');
+  } catch (err) {
+    logger.debug({ err }, 'Unread DMs unavailable for briefing');
+    return null;
+  }
+}
+
 async function gatherSlackChannelMessages(hours: number): Promise<string | null> {
   try {
     // Get monitored channels from Supabase
@@ -545,7 +571,7 @@ export async function generateMorningBriefing(): Promise<string> {
   // Gather data from all sources concurrently
   const [
     insights, mentions, tasks, meetings,
-    calendar, emails, dms, channelMessages,
+    calendar, emails, dms, unreadDms, channelMessages,
   ] = await Promise.all([
     gatherChannelInsights(),
     gatherRecentMentions(14),
@@ -554,10 +580,12 @@ export async function generateMorningBriefing(): Promise<string> {
     gatherCalendarEvents('today'),
     gatherImportantEmails(14),
     gatherSlackDMs(14),
+    gatherUnreadDMs(),
     gatherSlackChannelMessages(14),
   ]);
 
   if (calendar) dataSections.push(calendar);
+  if (unreadDms) dataSections.push(unreadDms);
   if (emails) dataSections.push(emails);
   if (dms) dataSections.push(dms);
   if (insights) dataSections.push(insights);
@@ -643,7 +671,7 @@ export async function generateEodBriefing(): Promise<string> {
   // Gather data from all sources concurrently
   const [
     insights, mentions, tasks, meetings,
-    calendar, emails, dms,
+    calendar, emails, dms, unreadDms,
   ] = await Promise.all([
     gatherChannelInsights(),
     gatherRecentMentions(10),
@@ -652,9 +680,11 @@ export async function generateEodBriefing(): Promise<string> {
     gatherCalendarEvents('tomorrow'),
     gatherImportantEmails(10),
     gatherSlackDMs(10),
+    gatherUnreadDMs(),
   ]);
 
   if (tasks) dataSections.push(tasks);
+  if (unreadDms) dataSections.push(unreadDms);
   if (dms) dataSections.push(dms);
   if (emails) dataSections.push(emails);
   if (insights) dataSections.push(insights);
@@ -735,17 +765,19 @@ export async function generateWeeklyBriefing(): Promise<string> {
 
   // Gather data from all sources concurrently
   const [
-    calendar, tasks, emails, dms, channelMessages, meetings,
+    calendar, tasks, emails, dms, unreadDms, channelMessages, meetings,
   ] = await Promise.all([
     gatherCalendarEvents('week'),
     gatherNotionTasks(['To Do', 'In Progress', 'Blocked']),
     gatherImportantEmails(72),
     gatherSlackDMs(72),
+    gatherUnreadDMs(),
     gatherSlackChannelMessages(72),
     gatherRecentMeetings(3),
   ]);
 
   if (calendar) dataSections.push(calendar);
+  if (unreadDms) dataSections.push(unreadDms);
   if (dms) dataSections.push(dms);
   if (emails) dataSections.push(emails);
   if (channelMessages) dataSections.push(channelMessages);
