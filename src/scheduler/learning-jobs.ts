@@ -36,4 +36,18 @@ export function registerLearningJobs(): void {
     const { monitorNinaDanielCalls } = await import('../learning/transcript-ingestor.js');
     await monitorNinaDanielCalls();
   });
+
+  // Jasmin daily preference extraction (11pm Berlin — end of day, after all interactions)
+  registerJob('jasmin-preference-extraction', '0 23 * * *', 'Europe/Berlin', async () => {
+    const { extractPreferencesFromSessions, extractPreferencesFromBriefingReactions } =
+      await import('../learning/jasmin-learning.js');
+    await extractPreferencesFromSessions();
+    await extractPreferencesFromBriefingReactions();
+  });
+
+  // Jasmin weekly preference synthesis (Sundays 10am Berlin)
+  registerJob('jasmin-preference-synthesis', '0 10 * * 0', 'Europe/Berlin', async () => {
+    const { synthesizeJasminPreferences } = await import('../learning/jasmin-learning.js');
+    await synthesizeJasminPreferences();
+  });
 }

@@ -29,6 +29,7 @@ Jasmin evolves from a capable assistant into Daniel's **always-on chief of staff
 - Searches meeting transcripts and summaries
 - Sends messages as Daniel (with approval) and reads his DMs
 - Remembers preferences and patterns across sessions
+- Learns Daniel's preferences automatically from conversations and briefing reactions (daily extraction + weekly synthesis)
 
 **Infrastructure:**
 - Runs on DigitalOcean droplet (139.59.144.194, fra1) via systemd
@@ -101,30 +102,32 @@ Upgraded briefings from channel highlight reel to chief-of-staff daily brief. Ad
 
 ---
 
-### Phase 9: Self-Learning
+### Phase 9: Self-Learning ✅
 
 **Goal:** Jasmin learns Daniel's preferences, patterns, and communication style over time.
-**Prerequisites:** Phases 3, 8.
 
-#### Learning Signals
-- **Approval patterns**: Which proposals Daniel approves/rejects/edits → learn thresholds
-- **Briefing feedback**: Reactions to briefing items → learn what matters
-- **Communication style**: How Daniel edits drafts → learn his writing voice
-- **Scheduling patterns**: Meeting preferences, buffer times, busy hours
-- **Priority signals**: What Daniel acts on immediately vs defers
+#### What Was Built
+- **Daily preference extraction** (11pm Berlin): Haiku analyzes Jasmin's conversations from the last 24h, extracts explicit/implicit preferences and corrections. Also analyzes briefing reactions (👍/👎) to learn what Daniel finds useful.
+- **Weekly preference synthesis** (Sun 10am Berlin): Sonnet consolidates preferences — merges duplicates, resolves conflicts, expires stale entries, generates a "Understanding of Daniel" summary.
+- **Context injection**: Jasmin sessions inject `<daniels_preferences>` block with the summary + all confirmed preferences (confidence >= 0.7). Gets top 15 learnings instead of default 5.
+- **Confidence tiers**: Tentative (0.3–0.49, observe only), Emerging (0.5–0.69, start applying), Confirmed (0.7–0.89, apply by default), Strong (0.9–0.95, treat as given).
+- Preferences stored in `learnings` table with `preference_*` categories, no schema changes needed.
 
-#### Implementation
-- Track approval/rejection rates per action type
-- Store learned preferences in memory (via `remember` tool)
-- Periodic synthesis: weekly job that reviews recent interactions and extracts patterns
-- Confidence tiers: tentative → confirmed → strong (based on consistency)
+#### 5 Learning Signals
+1. **Conversation patterns**: Repeated requests, vocabulary, what Daniel ignores/follows up on
+2. **Briefing reactions**: Slack reactions on briefing messages (positive/negative)
+3. **Email draft edits**: (TODO — requires sent-email tracking)
+4. **Scheduling preferences**: Meeting times, buffers, calendar choices
+5. **Delegation patterns**: What Daniel delegates vs handles himself
 
-#### Key Files to Create/Modify
+#### Key Files
 | File | Action |
 |------|--------|
-| `src/learning/jasmin-learning.ts` | Create — preference extraction and synthesis |
-| `src/scheduler/learning-jobs.ts` | Modify — add Jasmin preference synthesis job |
-| `agents/jasmin/INSTRUCTIONS.md` | Modify — reference learned preferences |
+| `src/learning/jasmin-learning.ts` | Created — extractPreferencesFromSessions, extractPreferencesFromBriefingReactions, synthesizeJasminPreferences |
+| `src/scheduler/learning-jobs.ts` | Modified — 2 new jobs (daily extraction, weekly synthesis) |
+| `src/agents/hooks/session-lifecycle.ts` | Modified — enhanced Jasmin context injection |
+| `agents/jasmin/INSTRUCTIONS.md` | Modified — learning & preferences section |
+| `agents/jasmin/SOUL.md` | Modified — learning behavior note |
 
 ---
 
@@ -155,9 +158,12 @@ src/monitoring/
 ├── buffer.ts               # Supabase message buffer for channel monitoring
 └── analyzer.ts             # Claude-powered batch analysis (15-min loop)
 
+src/learning/
+└── jasmin-learning.ts      # Jasmin preference extraction + synthesis
+
 src/scheduler/
 ├── briefings.ts            # Morning/EOD/weekly briefing generation
-├── learning-jobs.ts        # Scheduled learning loops
+├── learning-jobs.ts        # Scheduled learning loops (incl. Jasmin daily/weekly)
 ├── setup.ts                # Job registration
 └── index.ts                # Scheduler infrastructure
 
