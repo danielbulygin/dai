@@ -164,6 +164,52 @@ export async function findUser(params: {
       cursor = result.response_metadata?.next_cursor || undefined;
     } while (cursor);
 
+    // Fallback: if no matches in users.list, search DM conversations
+    // This catches external/guest users (Slack Connect) who don't appear in users.list
+    if (allMatches.length === 0 && userClient) {
+      logger.debug({ query }, "No matches in users.list, searching DM conversations");
+      let dmCursor: string | undefined;
+      do {
+        const result = await userClient.conversations.list({
+          types: "im,mpim",
+          limit: 200,
+          cursor: dmCursor,
+          exclude_archived: true,
+        });
+
+        for (const ch of result.channels ?? []) {
+          const userId = (ch as { user?: string }).user;
+          if (!userId) continue;
+
+          try {
+            const userInfo = await client.users.info({ user: userId });
+            const u = userInfo.user;
+            if (!u || u.deleted) continue;
+
+            const realName = (u.real_name ?? "").toLowerCase();
+            const displayName = (u.profile?.display_name ?? "").toLowerCase();
+            const userName = (u.name ?? "").toLowerCase();
+            if (
+              realName.includes(query) ||
+              displayName.includes(query) ||
+              userName.includes(query)
+            ) {
+              allMatches.push({
+                id: u.id!,
+                name: u.name ?? "",
+                real_name: u.real_name ?? "",
+                display_name: u.profile?.display_name ?? "",
+              });
+            }
+          } catch {
+            // Skip inaccessible users
+          }
+        }
+
+        dmCursor = result.response_metadata?.next_cursor || undefined;
+      } while (dmCursor && allMatches.length === 0);
+    }
+
     // For each match, try to open a DM channel so Jasmin can use it directly
     const users = [];
     for (const m of allMatches.slice(0, 5)) {
@@ -236,14 +282,11 @@ export async function getUnreadDMs(params: {
 
     // List all DM and group DM channels (im = 1:1, mpim = group)
     let cursor: string | undefined;
-    const allChannels: Array<{
+    const allChannelIds: Array<{
       id: string;
       is_im: boolean;
       is_mpim: boolean;
       user?: string;
-      unread_count?: number;
-      last_read?: string;
-      latest?: { ts?: string };
     }> = [];
 
     do {
@@ -255,39 +298,49 @@ export async function getUnreadDMs(params: {
       });
 
       for (const ch of result.channels ?? []) {
-        allChannels.push({
+        allChannelIds.push({
           id: ch.id!,
           is_im: ch.is_im ?? false,
           is_mpim: ch.is_mpim ?? false,
           user: (ch as { user?: string }).user,
-          unread_count: (ch as { unread_count?: number }).unread_count,
-          last_read: (ch as { last_read?: string }).last_read,
-          latest: (ch as { latest?: { ts?: string } }).latest,
         });
       }
 
       cursor = result.response_metadata?.next_cursor || undefined;
     } while (cursor);
 
-    // Filter to channels with unread messages
-    // conversations.list may not always have unread_count, so also check via history
-    for (const ch of allChannels) {
+    logger.info({ channelCount: allChannelIds.length }, "Listed DM/MPIM channels");
+
+    // Use conversations.info per channel for reliable unread_count and last_read
+    for (const ch of allChannelIds) {
       if (unreadConversations.length >= maxConversations) break;
 
-      // Skip channels with no recent activity
-      if (!ch.latest?.ts) continue;
-
-      // If unread_count is available and zero, skip
-      if (ch.unread_count !== undefined && ch.unread_count === 0) continue;
-
-      // Fetch messages since last_read to get unreads
       try {
+        const info = await userClient.conversations.info({ channel: ch.id });
+        const channelInfo = info.channel as {
+          unread_count?: number;
+          unread_count_display?: number;
+          last_read?: string;
+          latest?: { ts?: string; text?: string; user?: string };
+          is_im?: boolean;
+          is_mpim?: boolean;
+        } | undefined;
+
+        if (!channelInfo) continue;
+
+        // unread_count_display excludes messages from yourself
+        const unreadCount = channelInfo.unread_count_display ?? channelInfo.unread_count ?? 0;
+        if (unreadCount === 0) continue;
+
+        const lastRead = channelInfo.last_read;
+
+        // Fetch unread messages (since last_read)
         const historyParams: { channel: string; limit: number; oldest?: string } = {
           channel: ch.id,
-          limit: 10,
+          limit: Math.min(unreadCount + 2, 20), // fetch a few extra for safety
         };
-        if (ch.last_read) {
-          historyParams.oldest = ch.last_read;
+        if (lastRead) {
+          historyParams.oldest = lastRead;
         }
 
         const history = await userClient.conversations.history(historyParams);
