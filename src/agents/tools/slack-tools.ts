@@ -192,6 +192,163 @@ export async function findUser(params: {
   }
 }
 
+interface UnreadConversation {
+  channel_id: string;
+  type: "dm" | "group_dm";
+  participants: string[];
+  unread_count: number;
+  messages: Array<{ user: string; text: string; ts: string }>;
+}
+
+// Cache user ID → display name to avoid repeated lookups
+const userNameCache = new Map<string, string>();
+
+async function resolveUserName(client: WebClient, userId: string): Promise<string> {
+  const cached = userNameCache.get(userId);
+  if (cached) return cached;
+
+  try {
+    const result = await client.users.info({ user: userId });
+    const name =
+      result.user?.profile?.display_name ||
+      result.user?.real_name ||
+      result.user?.name ||
+      userId;
+    userNameCache.set(userId, name);
+    return name;
+  } catch {
+    return userId;
+  }
+}
+
+export async function getUnreadDMs(params: {
+  limit?: number;
+}): Promise<{ ok: boolean; conversations?: UnreadConversation[]; total_unread?: number }> {
+  const userClient = getUserClient();
+  if (!userClient) {
+    logger.error("SLACK_USER_TOKEN not configured — cannot check unread DMs");
+    return { ok: false };
+  }
+
+  try {
+    const maxConversations = params.limit ?? 15;
+    const unreadConversations: UnreadConversation[] = [];
+
+    // List all DM and group DM channels (im = 1:1, mpim = group)
+    let cursor: string | undefined;
+    const allChannels: Array<{
+      id: string;
+      is_im: boolean;
+      is_mpim: boolean;
+      user?: string;
+      unread_count?: number;
+      last_read?: string;
+      latest?: { ts?: string };
+    }> = [];
+
+    do {
+      const result = await userClient.conversations.list({
+        types: "im,mpim",
+        limit: 200,
+        cursor,
+        exclude_archived: true,
+      });
+
+      for (const ch of result.channels ?? []) {
+        allChannels.push({
+          id: ch.id!,
+          is_im: ch.is_im ?? false,
+          is_mpim: ch.is_mpim ?? false,
+          user: (ch as { user?: string }).user,
+          unread_count: (ch as { unread_count?: number }).unread_count,
+          last_read: (ch as { last_read?: string }).last_read,
+          latest: (ch as { latest?: { ts?: string } }).latest,
+        });
+      }
+
+      cursor = result.response_metadata?.next_cursor || undefined;
+    } while (cursor);
+
+    // Filter to channels with unread messages
+    // conversations.list may not always have unread_count, so also check via history
+    for (const ch of allChannels) {
+      if (unreadConversations.length >= maxConversations) break;
+
+      // Skip channels with no recent activity
+      if (!ch.latest?.ts) continue;
+
+      // If unread_count is available and zero, skip
+      if (ch.unread_count !== undefined && ch.unread_count === 0) continue;
+
+      // Fetch messages since last_read to get unreads
+      try {
+        const historyParams: { channel: string; limit: number; oldest?: string } = {
+          channel: ch.id,
+          limit: 10,
+        };
+        if (ch.last_read) {
+          historyParams.oldest = ch.last_read;
+        }
+
+        const history = await userClient.conversations.history(historyParams);
+        const messages = (history.messages ?? []).filter(
+          (m) => m.user !== env.SLACK_OWNER_USER_ID, // Skip Daniel's own messages
+        );
+
+        if (messages.length === 0) continue;
+
+        // Resolve participant names
+        const participantIds = new Set<string>();
+        for (const m of messages) {
+          if (m.user) participantIds.add(m.user);
+        }
+        if (ch.user) participantIds.add(ch.user);
+
+        const participantNames: string[] = [];
+        for (const uid of participantIds) {
+          participantNames.push(await resolveUserName(userClient, uid));
+        }
+
+        unreadConversations.push({
+          channel_id: ch.id,
+          type: ch.is_mpim ? "group_dm" : "dm",
+          participants: participantNames,
+          unread_count: messages.length,
+          messages: messages.map((m) => ({
+            user: m.user ?? "unknown",
+            text: m.text ?? "",
+            ts: m.ts ?? "",
+          })),
+        });
+      } catch {
+        // Channel might be inaccessible — skip
+        continue;
+      }
+    }
+
+    // Resolve user IDs in messages to names
+    for (const conv of unreadConversations) {
+      for (const msg of conv.messages) {
+        if (msg.user !== "unknown") {
+          msg.user = await resolveUserName(userClient, msg.user);
+        }
+      }
+    }
+
+    const totalUnread = unreadConversations.reduce((sum, c) => sum + c.unread_count, 0);
+
+    logger.info(
+      { conversationCount: unreadConversations.length, totalUnread },
+      "Fetched unread DMs",
+    );
+
+    return { ok: true, conversations: unreadConversations, total_unread: totalUnread };
+  } catch (error) {
+    logger.error({ error }, "Failed to get unread DMs");
+    return { ok: false };
+  }
+}
+
 export async function replyInThread(params: {
   channel: string;
   thread_ts: string;

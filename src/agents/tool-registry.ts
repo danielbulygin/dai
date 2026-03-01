@@ -346,6 +346,30 @@ register({
 
 register({
   definition: {
+    name: 'get_unread_dms',
+    description:
+      'Scan all of Daniel\'s DM and group DM conversations for unread messages. Returns conversations with unread messages, participant names, and message content. Does NOT mark messages as read. Use this to triage Daniel\'s inbox or check what he\'s missed.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        limit: {
+          type: 'number',
+          description: 'Max number of conversations to return (default 15)',
+        },
+      },
+      required: [],
+    },
+  },
+  async execute(input) {
+    const result = await slackTools.getUnreadDMs({
+      limit: input.limit as number | undefined,
+    });
+    return JSON.stringify(result);
+  },
+});
+
+register({
+  definition: {
     name: 'add_reaction',
     description: 'Add an emoji reaction to a Slack message.',
     input_schema: {
