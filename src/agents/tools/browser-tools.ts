@@ -53,7 +53,7 @@ interface PageSummary {
 // These functions run inside the browser via page.evaluate — defined as strings
 // to avoid TypeScript checking DOM types in this Node.js project.
 
-const EXTRACT_TEXT_JS = `() => {
+const EXTRACT_TEXT_JS = `(() => {
   const body = document.body;
   if (!body) return '';
   const clone = body.cloneNode(true);
@@ -61,9 +61,9 @@ const EXTRACT_TEXT_JS = `() => {
     el.remove();
   }
   return (clone.innerText || clone.textContent || '').replace(/\\n{3,}/g, '\\n\\n').trim();
-}`;
+})()`;
 
-const EXTRACT_ELEMENTS_JS = `() => {
+const EXTRACT_ELEMENTS_JS = `(() => {
   const elements = [];
   const sel = 'a[href], button, input, textarea, select, [role="button"], [role="link"], [onclick]';
   const nodes = document.querySelectorAll(sel);
@@ -98,7 +98,7 @@ const EXTRACT_ELEMENTS_JS = `() => {
     }
   }
   return elements;
-}`;
+})()`;
 
 async function extractPageSummary(page: Page, maxTextLength = 8000): Promise<PageSummary> {
   const url = page.url();
