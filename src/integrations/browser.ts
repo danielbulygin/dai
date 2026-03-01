@@ -43,6 +43,7 @@ async function launchBrowser(): Promise<Browser> {
       '--disable-dev-shm-usage',
       '--disable-gpu',
       '--disable-extensions',
+      '--disable-blink-features=AutomationControlled',
     ],
   });
 
