@@ -3,9 +3,8 @@ import { getNotion } from '../../integrations/notion.js';
 import { env } from '../../env.js';
 import { logger } from '../../utils/logger.js';
 
-type StatusFilter = { property: string; status: { equals: string }; type?: 'status' };
-type SelectFilter = { property: string; select: { equals: string }; type?: 'select' };
-type PropertyFilter = StatusFilter | SelectFilter;
+type SelectFilter = { property: string; select: { equals: string } };
+type PropertyFilter = SelectFilter;
 
 function getKanbanDbId(): string {
   const dbId = env.NOTION_KANBAN_DB_ID;
@@ -24,19 +23,14 @@ function getKanbanDbId(): string {
 // Logical field -> expected Notion property type
 const REQUIRED_PROPERTIES: Record<string, { type: string; config: unknown }> = {
   Status: {
-    type: 'status',
+    type: 'select',
     config: {
-      status: {
+      select: {
         options: [
           { name: 'To Do', color: 'default' },
           { name: 'In Progress', color: 'blue' },
           { name: 'Blocked', color: 'orange' },
           { name: 'Done', color: 'green' },
-        ],
-        groups: [
-          { name: 'To do', option_ids: [] },
-          { name: 'In progress', option_ids: [] },
-          { name: 'Complete', option_ids: [] },
         ],
       },
     },
@@ -133,15 +127,7 @@ async function ensureSchema(): Promise<{ titleProp: string; propMap: Record<stri
       map[logicalName] = logicalName;
     } else {
       // Property doesn't exist — queue for creation
-      // Note: status properties can't be created via API, so we skip them
-      if (spec.type === 'status') {
-        logger.warn(
-          { property: logicalName },
-          'Status property missing — must be created manually in Notion UI',
-        );
-      } else {
-        propsToCreate[logicalName] = spec.config;
-      }
+      propsToCreate[logicalName] = spec.config;
     }
   }
 
@@ -207,9 +193,11 @@ function extractPageData(page: PageObjectResponse, titleProp: string) {
 
   const statusProp = props['Status'];
   const status =
-    statusProp && statusProp.type === 'status'
-      ? statusProp.status?.name ?? null
-      : null;
+    statusProp && statusProp.type === 'select'
+      ? statusProp.select?.name ?? null
+      : statusProp && statusProp.type === 'status'
+        ? statusProp.status?.name ?? null
+        : null;
 
   const assigneeProp = props['Assignee'];
   const assignee =
@@ -272,7 +260,7 @@ export async function queryTasks(params: {
     const filters: PropertyFilter[] = [];
 
     if (params.status) {
-      filters.push({ property: 'Status', status: { equals: params.status } });
+      filters.push({ property: 'Status', select: { equals: params.status } });
     }
     if (params.assignee) {
       filters.push({ property: 'Assignee', select: { equals: params.assignee } });
@@ -335,7 +323,7 @@ export async function createTask(params: {
     // Only set properties that exist in the database
     if (propMap['Status']) {
       properties[propMap['Status']] = {
-        status: { name: params.status ?? 'To Do' },
+        select: { name: params.status ?? 'To Do' },
       };
     }
 
@@ -420,7 +408,7 @@ export async function updateTask(params: {
 
     if (params.status && propMap['Status']) {
       properties[propMap['Status']] = {
-        status: { name: params.status },
+        select: { name: params.status },
       };
     }
 
