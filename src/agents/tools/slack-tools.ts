@@ -133,26 +133,40 @@ export async function findUser(params: {
   const client = userClient ?? slack;
 
   try {
-    // Search for users by name
-    const result = await client.users.list({ limit: 200 });
-    const members = result.members ?? [];
-
     const query = params.name.toLowerCase();
-    const matches = members.filter((m) => {
-      if (m.deleted || m.is_bot) return false;
-      const realName = (m.real_name ?? "").toLowerCase();
-      const displayName = (m.profile?.display_name ?? "").toLowerCase();
-      const userName = (m.name ?? "").toLowerCase();
-      return (
-        realName.includes(query) ||
-        displayName.includes(query) ||
-        userName.includes(query)
-      );
-    });
+    const allMatches: Array<{ id: string; name: string; real_name: string; display_name: string }> = [];
+
+    // Paginate through all workspace members
+    let cursor: string | undefined;
+    do {
+      const result = await client.users.list({ limit: 200, cursor });
+      const members = result.members ?? [];
+
+      for (const m of members) {
+        if (m.deleted || m.is_bot) continue;
+        const realName = (m.real_name ?? "").toLowerCase();
+        const displayName = (m.profile?.display_name ?? "").toLowerCase();
+        const userName = (m.name ?? "").toLowerCase();
+        if (
+          realName.includes(query) ||
+          displayName.includes(query) ||
+          userName.includes(query)
+        ) {
+          allMatches.push({
+            id: m.id!,
+            name: m.name ?? "",
+            real_name: m.real_name ?? "",
+            display_name: m.profile?.display_name ?? "",
+          });
+        }
+      }
+
+      cursor = result.response_metadata?.next_cursor || undefined;
+    } while (cursor);
 
     // For each match, try to open a DM channel so Jasmin can use it directly
     const users = [];
-    for (const m of matches.slice(0, 5)) {
+    for (const m of allMatches.slice(0, 5)) {
       let dmChannel: string | undefined;
       if (userClient) {
         try {
@@ -163,9 +177,9 @@ export async function findUser(params: {
         }
       }
       users.push({
-        id: m.id!,
-        name: m.name ?? "",
-        real_name: m.real_name ?? "",
+        id: m.id,
+        name: m.name,
+        real_name: m.real_name,
         dm_channel: dmChannel,
       });
     }
