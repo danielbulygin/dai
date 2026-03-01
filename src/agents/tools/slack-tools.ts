@@ -126,6 +126,58 @@ export async function readDMs(params: {
   }
 }
 
+export async function findUser(params: {
+  name: string;
+}): Promise<{ ok: boolean; users?: Array<{ id: string; name: string; real_name: string; dm_channel?: string }> }> {
+  const userClient = getUserClient();
+  const client = userClient ?? slack;
+
+  try {
+    // Search for users by name
+    const result = await client.users.list({ limit: 200 });
+    const members = result.members ?? [];
+
+    const query = params.name.toLowerCase();
+    const matches = members.filter((m) => {
+      if (m.deleted || m.is_bot) return false;
+      const realName = (m.real_name ?? "").toLowerCase();
+      const displayName = (m.profile?.display_name ?? "").toLowerCase();
+      const userName = (m.name ?? "").toLowerCase();
+      return (
+        realName.includes(query) ||
+        displayName.includes(query) ||
+        userName.includes(query)
+      );
+    });
+
+    // For each match, try to open a DM channel so Jasmin can use it directly
+    const users = [];
+    for (const m of matches.slice(0, 5)) {
+      let dmChannel: string | undefined;
+      if (userClient) {
+        try {
+          const conv = await userClient.conversations.open({ users: m.id });
+          dmChannel = conv.channel?.id;
+        } catch {
+          // Not critical — user can still use the user ID
+        }
+      }
+      users.push({
+        id: m.id!,
+        name: m.name ?? "",
+        real_name: m.real_name ?? "",
+        dm_channel: dmChannel,
+      });
+    }
+
+    logger.debug({ query: params.name, matchCount: users.length }, "Found Slack users");
+    return { ok: true, users };
+  } catch (error) {
+    logger.error({ error, name: params.name }, "Failed to find user");
+    return { ok: false };
+  }
+}
+
 export async function replyInThread(params: {
   channel: string;
   thread_ts: string;

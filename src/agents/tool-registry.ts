@@ -11,6 +11,7 @@ import * as decisionTools from './tools/decision-tools.js';
 import * as clientConfigTools from './tools/client-config-tools.js';
 import * as methodologyTools from './tools/methodology-tools.js';
 import * as googleTools from './tools/google-tools.js';
+import * as browserTools from './tools/browser-tools.js';
 import { logger } from '../utils/logger.js';
 
 // ---------------------------------------------------------------------------
@@ -294,7 +295,7 @@ register({
   definition: {
     name: 'read_dms',
     description:
-      'Read recent messages from a Slack DM or channel using Daniel\'s user token. Use to check Daniel\'s private conversations when he asks.',
+      'Read recent messages from a Slack DM or channel using Daniel\'s user token. Use to check Daniel\'s private conversations when he asks. Use find_user first to get the DM channel ID if you only have a person\'s name.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -314,6 +315,30 @@ register({
     const result = await slackTools.readDMs({
       channel: input.channel as string,
       limit: input.limit as number | undefined,
+    });
+    return JSON.stringify(result);
+  },
+});
+
+register({
+  definition: {
+    name: 'find_user',
+    description:
+      'Look up a Slack user by name. Returns their user ID, real name, and DM channel ID. Use this when you need to find someone\'s DM channel to read messages or send as Daniel.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        name: {
+          type: 'string',
+          description: 'Name to search for (first name, last name, display name, or username)',
+        },
+      },
+      required: ['name'],
+    },
+  },
+  async execute(input) {
+    const result = await slackTools.findUser({
+      name: input.name as string,
     });
     return JSON.stringify(result);
   },
@@ -1694,6 +1719,207 @@ register({
     }
 
     return JSON.stringify({ count: filtered.length, categories: grouped });
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Browser tools (Playwright)
+// ---------------------------------------------------------------------------
+
+register({
+  definition: {
+    name: 'browse_navigate',
+    description:
+      'Navigate to a URL in a headless browser. Returns the page title, visible text content, and interactive elements with CSS selectors you can use in subsequent browse_click/browse_type calls.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        url: {
+          type: 'string',
+          description: 'The URL to navigate to (must be http or https)',
+        },
+      },
+      required: ['url'],
+    },
+  },
+  async execute(input, context) {
+    return await browserTools.browseNavigate({
+      url: input.url as string,
+      agentId: context.agentId,
+      channelId: context.channelId,
+      threadTs: context.threadTs,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'browse_click',
+    description:
+      'Click an element on the current page by CSS selector or visible text. Returns the updated page summary after clicking. Use selectors from browse_navigate/browse_read_page results.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        selector: {
+          type: 'string',
+          description: 'CSS selector of the element to click (from previous page summary)',
+        },
+        text: {
+          type: 'string',
+          description: 'Visible text of the element to click (alternative to selector)',
+        },
+      },
+    },
+  },
+  async execute(input, context) {
+    return await browserTools.browseClick({
+      selector: input.selector as string | undefined,
+      text: input.text as string | undefined,
+      agentId: context.agentId,
+      channelId: context.channelId,
+      threadTs: context.threadTs,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'browse_type',
+    description:
+      'Type text into an input field on the current page. Use the selector from browse_navigate/browse_read_page results. Optionally submit (press Enter) after typing.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        selector: {
+          type: 'string',
+          description: 'CSS selector of the input field',
+        },
+        text: {
+          type: 'string',
+          description: 'Text to type into the field',
+        },
+        submit: {
+          type: 'boolean',
+          description: 'Press Enter after typing (default: false)',
+        },
+        clearFirst: {
+          type: 'boolean',
+          description: 'Clear the field before typing (default: false)',
+        },
+      },
+      required: ['selector', 'text'],
+    },
+  },
+  async execute(input, context) {
+    return await browserTools.browseType({
+      selector: input.selector as string,
+      text: input.text as string,
+      submit: input.submit as boolean | undefined,
+      clearFirst: input.clearFirst as boolean | undefined,
+      agentId: context.agentId,
+      channelId: context.channelId,
+      threadTs: context.threadTs,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'browse_read_page',
+    description:
+      'Read the full text content and interactive elements of the current page. Use when you need more content than browse_navigate returned, or to re-read after interactions.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        maxLength: {
+          type: 'number',
+          description: 'Maximum text length to extract (default: 12000)',
+        },
+      },
+    },
+  },
+  async execute(input, context) {
+    return await browserTools.browseReadPage({
+      maxLength: input.maxLength as number | undefined,
+      agentId: context.agentId,
+      channelId: context.channelId,
+      threadTs: context.threadTs,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'browse_screenshot',
+    description:
+      'Take a PNG screenshot of the current page. Returns the image for visual inspection. Prefer browse_read_page for text content — use screenshots only when visual layout matters.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        fullPage: {
+          type: 'boolean',
+          description: 'Capture the full scrollable page (default: false, viewport only)',
+        },
+      },
+    },
+  },
+  async execute(input, context) {
+    return await browserTools.browseScreenshot({
+      fullPage: input.fullPage as boolean | undefined,
+      agentId: context.agentId,
+      channelId: context.channelId,
+      threadTs: context.threadTs,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'browse_select',
+    description:
+      'Select an option from a dropdown (<select>) element on the current page.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        selector: {
+          type: 'string',
+          description: 'CSS selector of the <select> element',
+        },
+        value: {
+          type: 'string',
+          description: 'The option value or visible text to select',
+        },
+      },
+      required: ['selector', 'value'],
+    },
+  },
+  async execute(input, context) {
+    return await browserTools.browseSelect({
+      selector: input.selector as string,
+      value: input.value as string,
+      agentId: context.agentId,
+      channelId: context.channelId,
+      threadTs: context.threadTs,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'browse_close',
+    description:
+      'Close the current browser session and free resources. Always call this when you are done browsing.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {},
+    },
+  },
+  async execute(_input, context) {
+    return await browserTools.browseClose({
+      agentId: context.agentId,
+      channelId: context.channelId,
+      threadTs: context.threadTs,
+    });
   },
 });
 
