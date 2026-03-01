@@ -309,10 +309,36 @@ async function runWithTools(
           toolContext,
         );
 
+        // Check for multimodal screenshot content
+        let content: string | Anthropic.ToolResultBlockParam['content'] = result;
+        if (!isError) {
+          try {
+            const parsed = JSON.parse(result);
+            if (parsed?.screenshot?.type === 'base64') {
+              content = [
+                {
+                  type: 'text' as const,
+                  text: `Screenshot of ${parsed.url || 'page'} (${parsed.title || 'untitled'})`,
+                },
+                {
+                  type: 'image' as const,
+                  source: {
+                    type: 'base64' as const,
+                    media_type: parsed.screenshot.media_type,
+                    data: parsed.screenshot.data,
+                  },
+                },
+              ];
+            }
+          } catch {
+            // Not JSON or no screenshot — use raw string
+          }
+        }
+
         toolResults.push({
           type: 'tool_result',
           tool_use_id: block.id,
-          content: result,
+          content,
           is_error: isError,
         });
       }

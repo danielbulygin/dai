@@ -33,3 +33,12 @@ export {
   readEmail,
   draftEmail,
 } from "./google-tools.js";
+export {
+  browseNavigate,
+  browseClick,
+  browseType,
+  browseReadPage,
+  browseScreenshot,
+  browseSelect,
+  browseClose,
+} from "./browser-tools.js";

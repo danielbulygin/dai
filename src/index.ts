@@ -8,6 +8,7 @@ import { getDaiSupabase } from './integrations/dai-supabase.js';
 import { startMonitoringLoop, stopMonitoringLoop } from './monitoring/analyzer.js';
 import { setupScheduledJobs } from './scheduler/setup.js';
 import { startScheduler, stopScheduler } from './scheduler/index.js';
+import { shutdownBrowser } from './integrations/browser.js';
 
 async function start(): Promise<void> {
   // Verify Supabase connectivity
@@ -52,6 +53,9 @@ function shutdown(signal: string): void {
   logger.info({ signal }, 'Shutting down gracefully');
   stopScheduler();
   stopMonitoringLoop();
+  shutdownBrowser().catch((err: unknown) =>
+    logger.error({ err }, 'Error shutting down browser'),
+  );
   Promise.all([slackApp.stop(), jasminApp?.stop()].filter(Boolean))
     .then(() => {
       logger.info('DAI stopped');
