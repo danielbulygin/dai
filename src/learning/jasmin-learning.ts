@@ -437,11 +437,75 @@ export async function synthesizeJasminPreferences(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// 4. Confidence decay (called before weekly synthesis)
+// ---------------------------------------------------------------------------
+
+export async function applyConfidenceDecay(): Promise<void> {
+  const log = logger.child({ job: "jasmin-confidence-decay" });
+
+  try {
+    const supabase = getDaiSupabase();
+    const { data, error } = await supabase.rpc("decay_jasmin_confidence");
+
+    if (error) {
+      log.error({ error: error.message }, "Confidence decay RPC failed");
+      return;
+    }
+
+    log.info({ decayed: data }, "Applied confidence decay to stale preferences");
+  } catch (err) {
+    log.error({ err }, "Confidence decay failed");
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 const CONFIDENCE_INCREMENT = 0.15;
 const MAX_CONFIDENCE = 0.95;
+
+/**
+ * Semantic dedup: when FTS finds nothing, ask Haiku if any existing
+ * same-category preference is semantically equivalent.
+ */
+async function findSemanticDuplicate(
+  category: string,
+  content: string,
+): Promise<Learning | undefined> {
+  try {
+    const existing = await getLearnings("jasmin", category, 5);
+    if (existing.length === 0) return undefined;
+
+    const existingList = existing
+      .map((l, i) => `${i + 1}. [id=${l.id}] ${l.content}`)
+      .join("\n");
+
+    const response = await getClient().messages.create({
+      model: EXTRACTION_MODEL,
+      max_tokens: 100,
+      system:
+        "You compare preferences for semantic equivalence. Given a new preference and existing ones, return the ID of the duplicate if one exists, or 'none'. Return ONLY the id string or 'none', nothing else.",
+      messages: [
+        {
+          role: "user",
+          content: `New: ${content}\n\nExisting:\n${existingList}`,
+        },
+      ],
+    });
+
+    const answer = response.content
+      .filter((b): b is Anthropic.TextBlock => b.type === "text")
+      .map((b) => b.text)
+      .join("")
+      .trim();
+
+    if (answer === "none") return undefined;
+    return existing.find((l) => l.id === answer);
+  } catch {
+    return undefined;
+  }
+}
 
 async function savePreference(
   pref: ExtractedPreference,
@@ -453,15 +517,18 @@ async function savePreference(
   // Check for existing similar preference
   const existing = await findDuplicateLearning("jasmin", category, pref.content, null);
 
-  if (existing) {
+  // Fallback: semantic dedup if FTS finds nothing
+  const match = existing ?? (await findSemanticDuplicate(category, pref.content));
+
+  if (match) {
     // Boost confidence for repeated observation
     const newConfidence = Math.min(
-      existing.confidence + CONFIDENCE_INCREMENT,
+      match.confidence + CONFIDENCE_INCREMENT,
       MAX_CONFIDENCE,
     );
-    await updateLearningConfidence(existing.id, newConfidence);
+    await updateLearningConfidence(match.id, newConfidence);
     log.debug(
-      { id: existing.id, oldConfidence: existing.confidence, newConfidence },
+      { id: match.id, oldConfidence: match.confidence, newConfidence },
       "Boosted existing preference confidence",
     );
   } else {

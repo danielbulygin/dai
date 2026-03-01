@@ -30,11 +30,14 @@ export interface StreamResponderHandle {
 // Constants
 // ---------------------------------------------------------------------------
 
-/** Minimum accumulated characters before we push a progressive update. */
-const STREAM_UPDATE_THRESHOLD = 1500;
+/** Characters needed before the very first progressive update (show text fast). */
+const FIRST_UPDATE_THRESHOLD = 50;
+
+/** Characters accumulated since last update before pushing another update. */
+const STREAM_UPDATE_THRESHOLD = 200;
 
 /** Minimum time (ms) between progressive Slack updates to avoid rate-limits. */
-const MIN_UPDATE_INTERVAL_MS = 1200;
+const MIN_UPDATE_INTERVAL_MS = 800;
 
 // ---------------------------------------------------------------------------
 // Cost estimation (Claude Opus 4.6 pricing)
@@ -104,6 +107,7 @@ export function createStreamResponder(
   let lastUpdateLen = 0;
   let lastUpdateTime = 0;
   let updateInFlight = false;
+  let firstUpdateDone = false;
 
   // ------ helpers ----------------------------------------------------------
 
@@ -150,9 +154,13 @@ export function createStreamResponder(
     const delta = accumulated.length - lastUpdateLen;
     const elapsed = now - lastUpdateTime;
 
-    if (delta < STREAM_UPDATE_THRESHOLD) return;
-    if (elapsed < MIN_UPDATE_INTERVAL_MS) return;
+    // First update fires fast (50 chars, no time gate) so the user
+    // sees real text replace "is thinking..." as soon as possible.
+    const threshold = firstUpdateDone ? STREAM_UPDATE_THRESHOLD : FIRST_UPDATE_THRESHOLD;
+    if (delta < threshold) return;
+    if (firstUpdateDone && elapsed < MIN_UPDATE_INTERVAL_MS) return;
 
+    firstUpdateDone = true;
     updateInFlight = true;
     lastUpdateLen = accumulated.length;
     lastUpdateTime = now;

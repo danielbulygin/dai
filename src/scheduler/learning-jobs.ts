@@ -46,8 +46,10 @@ export function registerLearningJobs(): void {
   });
 
   // Jasmin weekly preference synthesis (Sundays 10am Berlin)
+  // Decay first, then synthesize
   registerJob('jasmin-preference-synthesis', '0 10 * * 0', 'Europe/Berlin', async () => {
-    const { synthesizeJasminPreferences } = await import('../learning/jasmin-learning.js');
+    const { applyConfidenceDecay, synthesizeJasminPreferences } = await import('../learning/jasmin-learning.js');
+    await applyConfidenceDecay();
     await synthesizeJasminPreferences();
   });
 }

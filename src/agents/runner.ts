@@ -11,6 +11,8 @@ import { getToolsForProfile, executeTool } from './tool-registry.js';
 import type { ToolContext } from './tool-registry.js';
 import { logger } from '../utils/logger.js';
 import { env } from '../env.js';
+import { buildJasminPreferenceContext } from './hooks/session-lifecycle.js';
+import { incrementApplied } from '../memory/learnings.js';
 import type { Session } from '../memory/sessions.js';
 import type { QuickContext } from '../memory/search.js';
 import type { ChatMessage } from '../memory/messages.js';
@@ -126,6 +128,42 @@ async function resolveSession(
 }
 
 // ---------------------------------------------------------------------------
+// Session summary generation (Jasmin-only, fire-and-forget)
+// ---------------------------------------------------------------------------
+
+const SUMMARY_MODEL = 'claude-haiku-4-5-20251001';
+
+async function generateSessionSummary(sessionId: string): Promise<void> {
+  try {
+    const messages = await getMessages(sessionId, 10);
+    if (messages.length < 2) return;
+
+    const transcript = messages
+      .map((m) => `${m.role === 'user' ? 'Daniel' : 'Jasmin'}: ${m.content.slice(0, 300)}`)
+      .join('\n');
+
+    const apiClient = getClient();
+    const response = await apiClient.messages.create({
+      model: SUMMARY_MODEL,
+      max_tokens: 150,
+      system: 'Summarize this conversation in 1-2 sentences. Focus on what was discussed and any decisions or actions taken. Be concise.',
+      messages: [{ role: 'user', content: transcript }],
+    });
+
+    const summary = response.content
+      .filter((b): b is Anthropic.TextBlock => b.type === 'text')
+      .map((b) => b.text)
+      .join('');
+
+    if (summary) {
+      await updateSession(sessionId, { summary });
+    }
+  } catch (err) {
+    logger.warn({ err, sessionId }, 'Failed to generate session summary');
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Simple path (no tools) — existing behavior, zero regression risk
 // ---------------------------------------------------------------------------
 
@@ -212,7 +250,6 @@ async function runWithTools(
 
   for (let turn = 0; turn < maxTurns; turn++) {
     let turnText = '';
-    const turnChunks: string[] = [];
 
     const stream = apiClient.messages.stream({
       model,
@@ -222,10 +259,10 @@ async function runWithTools(
       tools: cachedTools,
     });
 
-    // Buffer text chunks — we decide after the turn whether to show them
+    // Stream text to Slack in real-time so the user sees progress immediately
     stream.on('text', (text) => {
       turnText += text;
-      turnChunks.push(text);
+      onText?.(text);
     });
 
     const msg = await stream.finalMessage();
@@ -236,10 +273,7 @@ async function runWithTools(
     totalCacheCreation += cacheUsage.cache_creation_input_tokens ?? 0;
 
     if (msg.stop_reason !== 'tool_use') {
-      // Final turn — replay buffered chunks for progressive Slack display
-      for (const chunk of turnChunks) {
-        onText?.(chunk);
-      }
+      // Final turn — text already streamed via onText
       if (turnText.trim()) {
         responseText += (responseText ? '\n\n' : '') + turnText;
       }
@@ -250,12 +284,9 @@ async function runWithTools(
       };
     }
 
-    // Intermediate tool-use turn — accumulate substantial text, skip short reasoning
+    // Intermediate tool-use turn — accumulate substantial text for final response
+    // (text was already streamed to Slack progressively)
     if (turnText.trim().length >= REASONING_THRESHOLD) {
-      // Substantial text (analysis, etc.) — stream it and accumulate
-      for (const chunk of turnChunks) {
-        onText?.(chunk);
-      }
       responseText += (responseText ? '\n\n' : '') + turnText;
     }
 
@@ -336,12 +367,33 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
   );
 
   const context = await getQuickContext(agent.config.id, userId);
+
+  // Jasmin: inject preference context and fetch more learnings
+  const extras = agent.extras ? [...agent.extras] : [];
+  if (agent.config.id === 'jasmin') {
+    const prefContext = await buildJasminPreferenceContext();
+    if (prefContext) {
+      extras.push({ name: 'preferences', content: prefContext });
+    }
+    // Override topLearnings with 15 instead of default 5
+    const { getTopLearnings } = await import('../memory/learnings.js');
+    context.topLearnings = await getTopLearnings('jasmin', 15);
+  }
+
   const systemPrompt = buildSystemPrompt(
     agent.persona,
     agent.instructions,
     context,
-    agent.extras,
+    extras,
   );
+
+  // Fire-and-forget: increment applied_count for all injected learnings
+  const allInjected = [...context.topLearnings, ...context.userLearnings];
+  if (allInjected.length > 0) {
+    Promise.all(allInjected.map((l) => incrementApplied(l.id))).catch((err) =>
+      logger.warn({ err }, 'Failed to increment applied_count for learnings'),
+    );
+  }
 
   // Load prior conversation history from this session (last 20 messages)
   const priorMessages = await getMessages(session.id, 20);
@@ -408,6 +460,18 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
     await updateSession(session.id, {
       total_turns: session.total_turns + result.turns,
     });
+
+    // Jasmin: generate real session summary + realtime learning (fire-and-forget)
+    if (agent.config.id === 'jasmin') {
+      generateSessionSummary(session.id).catch((err) =>
+        logger.warn({ err }, 'Session summary generation failed'),
+      );
+      import('../learning/realtime-learning.js').then(({ detectAndLearn }) =>
+        detectAndLearn(userMessage, result.responseText),
+      ).catch((err) =>
+        logger.warn({ err }, 'Realtime learning failed'),
+      );
+    }
 
     logger.info(
       {

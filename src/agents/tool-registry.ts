@@ -1647,6 +1647,57 @@ register({
 });
 
 // ---------------------------------------------------------------------------
+// Jasmin: review learned preferences
+// ---------------------------------------------------------------------------
+
+register({
+  definition: {
+    name: 'review_my_learnings',
+    description:
+      'Show Daniel all learned preferences Jasmin has stored. Groups by category with IDs, confidence, and last updated dates. Use when Daniel asks "what have you learned about me?" or "show my preferences".',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        category: {
+          type: 'string',
+          description: 'Optional category filter (e.g. "communication", "scheduling", "briefing")',
+        },
+      },
+      required: [],
+    },
+  },
+  async execute(input) {
+    const { getLearnings } = await import('../memory/learnings.js');
+    const allPrefs = await getLearnings('jasmin', undefined, 100);
+    const prefs = allPrefs.filter((l) => l.category.startsWith('preference_'));
+
+    const categoryFilter = input.category as string | undefined;
+    const filtered = categoryFilter
+      ? prefs.filter((l) => l.category === `preference_${categoryFilter}`)
+      : prefs;
+
+    if (filtered.length === 0) {
+      return JSON.stringify({ message: 'No learned preferences found.', count: 0 });
+    }
+
+    // Group by category
+    const grouped: Record<string, Array<{ id: string; content: string; confidence: number; updated_at: string }>> = {};
+    for (const pref of filtered) {
+      const cat = pref.category.replace('preference_', '');
+      if (!grouped[cat]) grouped[cat] = [];
+      grouped[cat].push({
+        id: pref.id,
+        content: pref.content,
+        confidence: pref.confidence,
+        updated_at: pref.updated_at,
+      });
+    }
+
+    return JSON.stringify({ count: filtered.length, categories: grouped });
+  },
+});
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 

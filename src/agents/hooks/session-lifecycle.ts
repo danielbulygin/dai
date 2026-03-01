@@ -118,7 +118,7 @@ export async function onSessionEnd(params: {
  * Build Jasmin's preference context block from learned preferences.
  * Returns the <daniels_preferences> XML block, or null if no preferences exist.
  */
-async function buildJasminPreferenceContext(): Promise<string | null> {
+export async function buildJasminPreferenceContext(): Promise<string | null> {
   try {
     // Fetch the preference summary (synthesized weekly)
     const summaries = await getLearnings("jasmin", "preference_summary", 1);

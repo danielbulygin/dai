@@ -47,6 +47,7 @@ export function registerReactionListener(app: App): void {
       // Fetch the reacted-to message to confirm it's a bot message
       let isBotMsg = false;
       let messageThreadTs: string | undefined;
+      let messageText: string | undefined;
       try {
         const result = await client.conversations.history({
           channel,
@@ -61,6 +62,9 @@ export function registerReactionListener(app: App): void {
         }
         if (msg && "thread_ts" in msg) {
           messageThreadTs = msg.thread_ts as string;
+        }
+        if (msg && "text" in msg && typeof msg.text === "string") {
+          messageText = msg.text.slice(0, 500);
         }
       } catch (fetchErr) {
         logger.warn(
@@ -79,13 +83,17 @@ export function registerReactionListener(app: App): void {
       const session = await findRecentSessionForChannel(channel, messageThreadTs ?? itemTs);
       const agentId = session?.agent_id ?? "unknown";
 
+      const feedbackContent = messageText
+        ? `:${reaction}: on message: ${messageText}`
+        : `:${reaction}:`;
+
       await addFeedback({
         agent_id: agentId,
         session_id: session?.id ?? undefined,
         user_id: userId,
         type: "reaction",
         sentiment,
-        content: `:${reaction}:`,
+        content: feedbackContent,
         message_ts: itemTs,
       });
 
