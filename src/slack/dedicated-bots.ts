@@ -48,13 +48,21 @@ function getDedicatedBotConfigs(): DedicatedBotConfig[] {
 }
 
 // ---------------------------------------------------------------------------
-// Running bot instances
+// Running bot instances + thread tracking
 // ---------------------------------------------------------------------------
 
 const runningBots = new Map<string, App>();
 
+/** Tracks threads each dedicated bot has participated in (agentId → Set<threadTs>) */
+const activeThreads = new Map<string, Set<string>>();
+
+function trackThread(agentId: string, threadTs: string): void {
+  if (!activeThreads.has(agentId)) activeThreads.set(agentId, new Set());
+  activeThreads.get(agentId)!.add(threadTs);
+}
+
 // ---------------------------------------------------------------------------
-// Generic listener registration (DMs + @mentions → runAgent)
+// Generic listener registration (DMs + @mentions + thread replies → runAgent)
 // ---------------------------------------------------------------------------
 
 function stripMention(text: string, botUserId: string): string {
@@ -109,6 +117,38 @@ function registerDedicatedBotListeners(app: App, agentId: string): void {
       source: 'mention',
     });
   });
+
+  // Channel thread replies — continue conversation without requiring @mention
+  app.message(async ({ message, client }) => {
+    const msg = message as unknown as Record<string, unknown>;
+
+    // Only channel thread replies (DMs handled above)
+    if (msg.channel_type === 'im') return;
+    if (!msg.thread_ts) return;
+    if ('bot_id' in message) return;
+    if ('subtype' in message) return;
+
+    const threadTs = msg.thread_ts as string;
+    const threads = activeThreads.get(agentId);
+    if (!threads?.has(threadTs)) return;
+
+    const text = msg.text as string | undefined;
+    const userId = msg.user as string | undefined;
+    const messageTs = msg.ts as string | undefined;
+
+    if (!text || !userId || !messageTs) return;
+
+    await handleDedicatedBotMessage({
+      client,
+      agentId,
+      text,
+      userId,
+      channel: msg.channel as string,
+      messageTs,
+      threadTs,
+      source: 'thread',
+    });
+  });
 }
 
 async function handleDedicatedBotMessage(opts: {
@@ -155,6 +195,7 @@ async function handleDedicatedBotMessage(opts: {
     );
 
     await responder.finalize(result.response, result.usage);
+    trackThread(agentId, threadTs ?? messageTs);
   } catch (err) {
     logger.error({ err, channel, user: userId, agentId }, `${agent.config.display_name} ${source} agent run failed`);
     await responder.onError(err);
