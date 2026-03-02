@@ -65,9 +65,11 @@ const server = http.createServer(async (req, res) => {
     res.end('<h1>Success!</h1><p>You can close this tab. Check your terminal for the refresh token.</p>');
 
     console.log('=== Token received ===\n');
-    console.log('Add this to your .env file:\n');
+    console.log('Add this to your .env file (use the appropriate key for your account):\n');
     console.log(`GOOGLE_REFRESH_TOKEN_WORK=${tokens.refresh_token}`);
-    console.log('\n(Run this script again for your personal account and use GOOGLE_REFRESH_TOKEN_PERSONAL instead)\n');
+    console.log(`GOOGLE_REFRESH_TOKEN_PERSONAL=${tokens.refresh_token}`);
+    console.log(`GOOGLE_REFRESH_TOKEN_JASMIN=${tokens.refresh_token}`);
+    console.log('\n(Copy the line matching the account you just authorized — WORK, PERSONAL, or JASMIN)\n');
 
     server.close();
     process.exit(0);

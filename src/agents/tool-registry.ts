@@ -1610,7 +1610,7 @@ register({
         },
         account: {
           type: 'string',
-          enum: ['work', 'personal'],
+          enum: ['work', 'personal', 'jasmin'],
           description: 'Google account (default: work)',
         },
       },
@@ -1643,7 +1643,7 @@ register({
         },
         account: {
           type: 'string',
-          enum: ['work', 'personal'],
+          enum: ['work', 'personal', 'jasmin'],
           description: 'Google account (default: work)',
         },
       },
@@ -1676,7 +1676,7 @@ register({
         },
         account: {
           type: 'string',
-          enum: ['work', 'personal'],
+          enum: ['work', 'personal', 'jasmin'],
           description: 'Google account to create draft in (default: work)',
         },
       },
@@ -1685,6 +1685,44 @@ register({
   },
   async execute(input) {
     return await googleTools.draftEmail({
+      to: input.to as string,
+      subject: input.subject as string,
+      body: input.body as string,
+      cc: input.cc as string | undefined,
+      threadId: input.threadId as string | undefined,
+      account: input.account as string | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'send_email',
+    description:
+      'Send an email. From Jasmin\'s own account: sends directly. From Daniel\'s accounts (work/personal): creates a draft and posts an approval request in Slack — Daniel must click Send. Default account is jasmin.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        to: { type: 'string', description: 'Recipient email address' },
+        subject: { type: 'string', description: 'Email subject line' },
+        body: { type: 'string', description: 'Email body (plain text)' },
+        cc: { type: 'string', description: 'CC email address' },
+        threadId: {
+          type: 'string',
+          description: 'Thread ID to reply to (from search_emails or read_email)',
+        },
+        account: {
+          type: 'string',
+          enum: ['jasmin', 'work', 'personal'],
+          description:
+            'Account to send from. jasmin = send directly from Jasmin\'s email. work/personal = draft + Slack approval. Default: jasmin.',
+        },
+      },
+      required: ['to', 'subject', 'body'],
+    },
+  },
+  async execute(input) {
+    return await googleTools.sendEmail({
       to: input.to as string,
       subject: input.subject as string,
       body: input.body as string,

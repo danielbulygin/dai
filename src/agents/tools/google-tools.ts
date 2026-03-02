@@ -2,7 +2,7 @@ import type { gmail_v1 } from 'googleapis';
 import { getCalendar, getGmail } from '../../integrations/google.js';
 import { logger } from '../../utils/logger.js';
 
-type GoogleAccount = 'work' | 'personal';
+type GoogleAccount = 'work' | 'personal' | 'jasmin';
 
 const TZ = 'Europe/Berlin';
 
@@ -360,6 +360,82 @@ export async function draftEmail(params: {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.error({ err: msg }, 'draftEmail failed');
+    return JSON.stringify({ error: msg });
+  }
+}
+
+export async function sendEmail(params: {
+  to: string;
+  subject: string;
+  body: string;
+  cc?: string;
+  threadId?: string;
+  account?: string;
+}): Promise<string> {
+  try {
+    const account = (params.account ?? 'jasmin') as GoogleAccount;
+
+    // Jasmin's own account — send directly
+    if (account === 'jasmin') {
+      const gmail = getGmail('jasmin');
+
+      const lines = [
+        `To: ${params.to}`,
+        params.cc ? `Cc: ${params.cc}` : null,
+        `Subject: ${params.subject}`,
+        'Content-Type: text/plain; charset="UTF-8"',
+        '',
+        params.body,
+      ]
+        .filter(Boolean)
+        .join('\r\n');
+
+      const raw = Buffer.from(lines).toString('base64url');
+
+      const res = await gmail.users.messages.send({
+        userId: 'me',
+        requestBody: { raw, threadId: params.threadId },
+      });
+
+      return JSON.stringify({
+        status: 'sent',
+        messageId: res.data.id,
+        threadId: res.data.threadId,
+        account,
+      });
+    }
+
+    // Daniel's accounts — create draft + post approval to Slack
+    const draftResult = await draftEmail({
+      to: params.to,
+      subject: params.subject,
+      body: params.body,
+      cc: params.cc,
+      threadId: params.threadId,
+      account,
+    });
+
+    const draft = JSON.parse(draftResult);
+    if (draft.error) return draftResult;
+
+    const { postEmailApproval } = await import('../../slack/listeners/email-actions.js');
+    await postEmailApproval({
+      draftId: draft.draftId,
+      account,
+      to: params.to,
+      cc: params.cc,
+      subject: params.subject,
+      body: params.body,
+    });
+
+    return JSON.stringify({
+      status: 'pending_approval',
+      draftId: draft.draftId,
+      account,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ err: msg }, 'sendEmail failed');
     return JSON.stringify({ error: msg });
   }
 }

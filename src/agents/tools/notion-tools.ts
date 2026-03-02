@@ -154,12 +154,14 @@ async function ensureSchema(): Promise<{ titleProp: string; propMap: Record<stri
       }
     } catch (err) {
       logger.error({ error: err instanceof Error ? err.message : String(err) }, 'Failed to auto-create Notion properties');
+      // Return partial map for this call but don't cache — next call will retry
+      return { titleProp: foundTitle, propMap: map };
     }
   } else {
-    // All required properties exist (except possibly Status)
-    // map was already populated above
+    // All required properties exist — map was already populated above
   }
 
+  // Only cache on full success
   schemaMap = map;
   titlePropName = foundTitle;
 

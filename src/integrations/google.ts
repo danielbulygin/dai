@@ -2,7 +2,7 @@ import { google, calendar_v3, gmail_v1 } from 'googleapis';
 import { env } from '../env.js';
 import { logger } from '../utils/logger.js';
 
-type GoogleAccount = 'work' | 'personal';
+type GoogleAccount = 'work' | 'personal' | 'jasmin';
 
 const authClients = new Map<GoogleAccount, InstanceType<typeof google.auth.OAuth2>>();
 
@@ -16,8 +16,12 @@ function getAuthClient(account: GoogleAccount): InstanceType<typeof google.auth.
     );
   }
 
-  const refreshToken =
-    account === 'work' ? env.GOOGLE_REFRESH_TOKEN_WORK : env.GOOGLE_REFRESH_TOKEN_PERSONAL;
+  const refreshTokenMap: Record<GoogleAccount, string | undefined> = {
+    work: env.GOOGLE_REFRESH_TOKEN_WORK,
+    personal: env.GOOGLE_REFRESH_TOKEN_PERSONAL,
+    jasmin: env.GOOGLE_REFRESH_TOKEN_JASMIN,
+  };
+  const refreshToken = refreshTokenMap[account];
 
   if (!refreshToken) {
     throw new Error(

@@ -5,10 +5,13 @@
 set -euo pipefail
 
 HOST="root@139.59.144.194"
+SSH_OPTS="-p 443"
+# SSH uses port 443 to bypass ISP blocks on port 22
+# When phone tethering blocks ALL connections, use DigitalOcean web console instead
 
 echo "Deploying DAI to $HOST..."
 
-ssh "$HOST" "cd /root/dai \
+ssh $SSH_OPTS "$HOST" "cd /root/dai \
   && git pull \
   && pnpm install --frozen-lockfile \
   && pnpm build \
@@ -18,4 +21,4 @@ ssh "$HOST" "cd /root/dai \
 
 echo ""
 echo "Deploy complete. Tailing logs (Ctrl+C to stop):"
-ssh "$HOST" "journalctl -u dai -n 20 --no-pager"
+ssh $SSH_OPTS "$HOST" "journalctl -u dai -n 20 --no-pager"
