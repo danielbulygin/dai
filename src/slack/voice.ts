@@ -23,6 +23,7 @@ export async function transcribeAudioFiles(
           mimetype: f.mimetype as string,
           size: f.size as number,
           url_private: f.url_private as string,
+          url_private_download: f.url_private_download as string | undefined,
           subtype: f.subtype as string | undefined,
         }) satisfies SlackFile,
     )
@@ -30,11 +31,15 @@ export async function transcribeAudioFiles(
 
   if (!audioFiles.length) return null;
 
-  // Get the bot token for downloading files from Slack
-  const botToken = (client as unknown as { token: string }).token;
+  // Use the main bot token for file downloads — dedicated bot tokens
+  // (Jasmin, Ada) may lack files:read scope. User token as last resort.
+  const downloadToken =
+    env.SLACK_BOT_TOKEN ||
+    env.SLACK_USER_TOKEN ||
+    (client as unknown as { token: string }).token;
 
-  if (!botToken) {
-    logger.warn('No bot token available for audio download');
+  if (!downloadToken) {
+    logger.warn('No token available for audio download');
     return null;
   }
 
@@ -47,7 +52,7 @@ export async function transcribeAudioFiles(
   const transcripts: string[] = [];
   for (const file of audioFiles) {
     try {
-      const text = await transcribeSlackAudio(file, botToken);
+      const text = await transcribeSlackAudio(file, downloadToken);
       if (text) transcripts.push(text);
     } catch (err) {
       logger.error({ err, file: file.name }, 'Voice note transcription failed');

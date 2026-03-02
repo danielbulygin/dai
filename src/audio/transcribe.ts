@@ -35,6 +35,7 @@ export interface SlackFile {
   mimetype: string;
   size: number;
   url_private: string;
+  url_private_download?: string;
   subtype?: string;
 }
 
@@ -54,17 +55,26 @@ export async function transcribeSlackAudio(
 
   logger.info({ file: file.name, mimetype: file.mimetype, sizeMb: sizeMb.toFixed(1) }, 'Transcribing voice note');
 
-  // Download from Slack (private URL requires auth)
-  const response = await fetch(file.url_private, {
+  // Download from Slack — prefer url_private_download (direct file)
+  // over url_private (can return HTML preview page)
+  const downloadUrl = file.url_private_download || file.url_private;
+  const response = await fetch(downloadUrl, {
     headers: { Authorization: `Bearer ${botToken}` },
   });
 
   if (!response.ok) {
-    logger.error({ status: response.status, file: file.name }, 'Failed to download audio from Slack');
+    logger.error({ status: response.status, file: file.name, url: downloadUrl }, 'Failed to download audio from Slack');
     return null;
   }
 
   const audioBuffer = Buffer.from(await response.arrayBuffer());
+
+  // Sanity check: make sure we got audio, not an HTML error page
+  const contentType = response.headers.get('content-type') || '';
+  if (contentType.includes('text/html')) {
+    logger.error({ file: file.name, contentType }, 'Slack returned HTML instead of audio — token may lack files:read scope');
+    return null;
+  }
 
   // Transcribe via AssemblyAI
   const aai = getClient();
