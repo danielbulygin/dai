@@ -1,8 +1,8 @@
 import { env } from './env.js';
 import { logger } from './utils/logger.js';
-import { slackApp, jasminApp } from './slack/app.js';
+import { slackApp } from './slack/app.js';
 import { registerAllListeners } from './slack/listeners/index.js';
-import { registerJasminListeners } from './slack/listeners/jasmin-dm.js';
+import { startDedicatedBots, stopDedicatedBots } from './slack/dedicated-bots.js';
 import { loadAgentRegistry } from './agents/registry.js';
 import { getDaiSupabase } from './integrations/dai-supabase.js';
 import { startMonitoringLoop, stopMonitoringLoop } from './monitoring/analyzer.js';
@@ -29,12 +29,8 @@ async function start(): Promise<void> {
   // Start the Slack app
   await slackApp.start();
 
-  // Start Jasmin's dedicated bot if configured
-  if (jasminApp) {
-    registerJasminListeners(jasminApp);
-    await jasminApp.start();
-    logger.info('Jasmin bot is running in Socket Mode');
-  }
+  // Start dedicated agent bots (Jasmin, Ada, etc.) if configured
+  await startDedicatedBots();
 
   // Start the channel monitoring loop (analyzes buffered messages every 15 minutes)
   startMonitoringLoop(15);
@@ -56,7 +52,7 @@ function shutdown(signal: string): void {
   shutdownBrowser().catch((err: unknown) =>
     logger.error({ err }, 'Error shutting down browser'),
   );
-  Promise.all([slackApp.stop(), jasminApp?.stop()].filter(Boolean))
+  Promise.all([slackApp.stop(), stopDedicatedBots()])
     .then(() => {
       logger.info('DAI stopped');
       process.exit(0);

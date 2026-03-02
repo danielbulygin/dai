@@ -14,7 +14,7 @@ import { env } from "../env.js";
 import { logger } from "../utils/logger.js";
 import { getDaiSupabase } from "../integrations/dai-supabase.js";
 import { addLearning } from "../memory/learnings.js";
-import { slackApp } from "../slack/app.js";
+import { getDedicatedBotClient } from "../slack/dedicated-bots.js";
 import type { MethodologyInsight } from "./methodology-extractor.js";
 
 const ADA_AGENT_ID = "ada";
@@ -124,7 +124,7 @@ export async function sendInsightsForApproval(
       .slice(0, 3)
       .map((i) => i.title)
       .join("; ");
-    await slackApp.client.chat.postMessage({
+    await getDedicatedBotClient('ada').chat.postMessage({
       channel,
       text: `_"${meetingTitle}" (${meetingDate}) — ${situationalInsights.length} situational observations auto-saved (e.g. ${examples})_`,
     });
@@ -190,7 +190,7 @@ export async function sendInsightsForApproval(
 
   // Post to review channel
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const result = await slackApp.client.chat.postMessage({
+  const result = await getDedicatedBotClient('ada').chat.postMessage({
     channel,
     blocks: blocks as any,
     text: `${durableInsights.length} methodology insights extracted from "${meetingTitle}" — review and approve/reject`,
@@ -205,7 +205,7 @@ export async function sendInsightsForApproval(
       .in("id", ids);
 
     // Post a helper message in the thread
-    await slackApp.client.chat.postMessage({
+    await getDedicatedBotClient('ada').chat.postMessage({
       channel,
       thread_ts: result.ts,
       text: [
@@ -594,7 +594,7 @@ export async function updateApprovalMessage(
 ): Promise<void> {
   try {
     // Post a reply in the thread rather than replacing the message
-    await slackApp.client.chat.postMessage({
+    await getDedicatedBotClient('ada').chat.postMessage({
       channel,
       thread_ts: messageTs,
       text: summary,

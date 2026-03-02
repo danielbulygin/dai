@@ -27,6 +27,8 @@ const envSchema = z.object({
   GOOGLE_REFRESH_TOKEN_PERSONAL: z.string().optional(),
   JASMIN_BOT_TOKEN: z.string().optional(),
   JASMIN_APP_TOKEN: z.string().optional(),
+  ADA_BOT_TOKEN: z.string().optional(),
+  ADA_APP_TOKEN: z.string().optional(),
   CHROMIUM_PATH: z.string().optional(),
 });
 

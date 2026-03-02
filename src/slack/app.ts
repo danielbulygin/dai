@@ -7,12 +7,3 @@ export const slackApp = new App({
   signingSecret: env.SLACK_SIGNING_SECRET,
   socketMode: true,
 });
-
-export const jasminApp: App | null =
-  env.JASMIN_BOT_TOKEN && env.JASMIN_APP_TOKEN
-    ? new App({
-        token: env.JASMIN_BOT_TOKEN,
-        appToken: env.JASMIN_APP_TOKEN,
-        socketMode: true,
-      })
-    : null;

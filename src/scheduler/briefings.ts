@@ -3,7 +3,7 @@ import { WebClient } from '@slack/web-api';
 import { env } from '../env.js';
 import { postMessage, getUnreadDMs } from '../agents/tools/slack-tools.js';
 import { getDaiSupabase } from '../integrations/dai-supabase.js';
-import { jasminApp } from '../slack/app.js';
+import { getDedicatedBotClient } from '../slack/dedicated-bots.js';
 import { logger } from '../utils/logger.js';
 import { registerJob } from './index.js';
 
@@ -92,20 +92,17 @@ async function getDmChannelIds(userClient: WebClient): Promise<string[]> {
   return ids;
 }
 
-/** Post briefing via Jasmin bot if available, otherwise via DAI bot. */
+/** Post briefing via Jasmin's dedicated bot (falls back to DAI bot automatically). */
 async function postBriefing(text: string): Promise<void> {
-  if (jasminApp) {
-    try {
-      await jasminApp.client.chat.postMessage({
-        channel: env.SLACK_OWNER_USER_ID,
-        text,
-      });
-      return;
-    } catch (err) {
-      logger.debug({ err }, 'Failed to post briefing via Jasmin, falling back to DAI bot');
-    }
+  try {
+    await getDedicatedBotClient('jasmin').chat.postMessage({
+      channel: env.SLACK_OWNER_USER_ID,
+      text,
+    });
+  } catch (err) {
+    logger.debug({ err }, 'Failed to post briefing via dedicated bot, falling back to DAI bot');
+    await postMessage({ channel: env.SLACK_OWNER_USER_ID, text });
   }
-  await postMessage({ channel: env.SLACK_OWNER_USER_ID, text });
 }
 
 // ---------------------------------------------------------------------------
