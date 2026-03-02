@@ -278,8 +278,8 @@ export async function queryTasks(params: {
       filter = { and: filters };
     }
 
-    const response = await notion.databases.query({
-      database_id: dbId,
+    const response = await notion.dataSources.query({
+      data_source_id: dbId,
       page_size: limit,
       ...(filter ? { filter } : {}),
     });
