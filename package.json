@@ -32,6 +32,7 @@
     "@slack/bolt": "^4.6.0",
     "@slack/web-api": "^7.14.1",
     "@supabase/supabase-js": "^2.97.0",
+    "assemblyai": "^4.23.1",
     "googleapis": "^171.4.0",
     "gray-matter": "^4.0.3",
     "js-yaml": "^4.1.1",

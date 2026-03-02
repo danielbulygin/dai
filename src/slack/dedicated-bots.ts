@@ -17,7 +17,9 @@ import { agentQueue } from '../orchestrator/queue.js';
 import { createStreamResponder } from './stream-responder.js';
 import { registerReactionListener } from './listeners/reactions.js';
 import { registerInsightActions } from './listeners/insight-actions.js';
+import { registerEmailActions } from './listeners/email-actions.js';
 import { slackApp } from './app.js';
+import { transcribeAudioFiles } from './voice.js';
 
 // ---------------------------------------------------------------------------
 // Config
@@ -37,6 +39,7 @@ function getDedicatedBotConfigs(): DedicatedBotConfig[] {
       agentId: 'jasmin',
       botToken: env.JASMIN_BOT_TOKEN,
       appToken: env.JASMIN_APP_TOKEN,
+      extraListeners: [registerEmailActions],
     },
     {
       agentId: 'ada',
@@ -76,14 +79,25 @@ function registerDedicatedBotListeners(app: App, agentId: string): void {
 
     if (msg.channel_type !== 'im') return;
     if ('bot_id' in message) return;
-    if ('subtype' in message) return;
+    // Allow file_share subtype (voice notes), skip everything else
+    const subtype = msg.subtype as string | undefined;
+    if (subtype && subtype !== 'file_share') return;
 
-    const text = msg.text as string | undefined;
+    let text = msg.text as string | undefined;
     const userId = msg.user as string | undefined;
     const messageTs = msg.ts as string | undefined;
     const threadTs = msg.thread_ts as string | undefined;
+    const files = msg.files as Array<Record<string, unknown>> | undefined;
 
-    if (!text || !userId || !messageTs) return;
+    if (!userId || !messageTs) return;
+
+    // Transcribe voice notes if present
+    const transcript = await transcribeAudioFiles(files, client);
+    if (transcript) {
+      text = text ? `${text}\n\n[Voice note]: ${transcript}` : transcript;
+    }
+
+    if (!text) return;
 
     await handleDedicatedBotMessage({
       client,
@@ -93,7 +107,7 @@ function registerDedicatedBotListeners(app: App, agentId: string): void {
       channel: msg.channel as string,
       messageTs,
       threadTs,
-      source: 'DM',
+      source: transcript ? 'voice DM' : 'DM',
     });
   });
 

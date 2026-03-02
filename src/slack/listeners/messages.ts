@@ -7,6 +7,7 @@ import { agentQueue } from '../../orchestrator/queue.js';
 import { createStreamResponder } from '../stream-responder.js';
 import { findThreadOwner } from '../../memory/sessions.js';
 import { isInsightThread } from '../../learning/insight-approval.js';
+import { transcribeAudioFiles } from '../voice.js';
 
 export function registerMessageListener(app: App): void {
   app.message(async ({ message, client }) => {
@@ -16,16 +17,26 @@ export function registerMessageListener(app: App): void {
 
     // Skip bot messages to avoid loops
     if ('bot_id' in message) return;
-    // Also skip message subtypes (edits, joins, etc.)
-    if ('subtype' in message) return;
+    // Allow file_share subtype (voice notes), skip everything else
+    const subtype = (message as unknown as Record<string, unknown>).subtype as string | undefined;
+    if (subtype && subtype !== 'file_share') return;
 
     const msg = message as unknown as Record<string, unknown>;
-    const text = msg.text as string | undefined;
+    let text = msg.text as string | undefined;
     const userId = msg.user as string | undefined;
     const messageTs = msg.ts as string | undefined;
     const threadTs = msg.thread_ts as string | undefined;
+    const files = msg.files as Array<Record<string, unknown>> | undefined;
 
-    if (!text || !userId || !messageTs) return;
+    if (!userId || !messageTs) return;
+
+    // Transcribe voice notes if present
+    const transcript = await transcribeAudioFiles(files, client);
+    if (transcript) {
+      text = text ? `${text}\n\n[Voice note]: ${transcript}` : transcript;
+    }
+
+    if (!text) return;
 
     // Skip insight approval threads — handled by insight-actions.ts
     if (threadTs) {
