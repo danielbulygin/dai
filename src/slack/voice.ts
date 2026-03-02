@@ -31,12 +31,8 @@ export async function transcribeAudioFiles(
 
   if (!audioFiles.length) return null;
 
-  // Use the main bot token for file downloads — dedicated bot tokens
-  // (Jasmin, Ada) may lack files:read scope. User token as last resort.
-  const downloadToken =
-    env.SLACK_BOT_TOKEN ||
-    env.SLACK_USER_TOKEN ||
-    (client as unknown as { token: string }).token;
+  // Use the bot's own token for file downloads (requires files:read scope)
+  const downloadToken = (client as unknown as { token: string }).token;
 
   if (!downloadToken) {
     logger.warn('No token available for audio download');
