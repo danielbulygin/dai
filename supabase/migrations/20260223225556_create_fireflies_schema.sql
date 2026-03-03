@@ -8,7 +8,7 @@ CREATE TABLE meetings (
   id TEXT PRIMARY KEY,                  -- Fireflies meeting ID
   title TEXT,
   date TIMESTAMPTZ,
-  duration REAL,                        -- seconds
+  duration REAL,                        -- minutes (from Fireflies API)
   organizer_email TEXT,
   speakers TEXT[],
   participant_emails TEXT[],

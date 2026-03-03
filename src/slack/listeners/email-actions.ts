@@ -32,7 +32,24 @@ export async function postEmailApproval(params: EmailApprovalParams): Promise<vo
   const { draftId, account, to, cc, subject, body } = params;
   const payload = JSON.stringify({ draftId, account });
 
-  const bodyPreview = body.length > 500 ? body.slice(0, 500) + '...' : body;
+  // Split body into chunks that fit Slack's 3000-char section limit
+  // (accounting for markup overhead: "*Body:*\n```" prefix + "```" suffix ≈ 20 chars)
+  const CHUNK_LIMIT = 2900;
+  const bodyChunks: string[] = [];
+  for (let i = 0; i < body.length; i += CHUNK_LIMIT) {
+    bodyChunks.push(body.slice(i, i + CHUNK_LIMIT));
+  }
+  if (bodyChunks.length === 0) bodyChunks.push('(empty)');
+
+  const bodyBlocks: SlackBlock[] = bodyChunks.map((chunk, idx) => ({
+    type: 'section',
+    text: {
+      type: 'mrkdwn',
+      text: idx === 0
+        ? `*Body:*\n\`\`\`${chunk}\`\`\``
+        : `\`\`\`${chunk}\`\`\``,
+    },
+  }));
 
   const blocks: SlackBlock[] = [
     {
@@ -50,10 +67,7 @@ export async function postEmailApproval(params: EmailApprovalParams): Promise<vo
       type: 'section',
       text: { type: 'mrkdwn', text: `*Subject:*\n${subject}` },
     },
-    {
-      type: 'section',
-      text: { type: 'mrkdwn', text: `*Body:*\n\`\`\`${bodyPreview}\`\`\`` },
-    },
+    ...bodyBlocks,
     { type: 'divider' },
     {
       type: 'actions',

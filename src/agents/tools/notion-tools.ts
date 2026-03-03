@@ -4,7 +4,10 @@ import { env } from '../../env.js';
 import { logger } from '../../utils/logger.js';
 
 type SelectFilter = { property: string; select: { equals: string } };
-type PropertyFilter = SelectFilter;
+type RelationFilter = { property: string; relation: { contains: string } };
+type DateBeforeFilter = { property: string; date: { before: string } };
+type StatusNotEqualsFilter = { property: string; select: { does_not_equal: string } };
+type PropertyFilter = SelectFilter | RelationFilter | DateBeforeFilter | StatusNotEqualsFilter;
 
 function getKanbanDbId(): string {
   const dbId = env.NOTION_KANBAN_DB_ID;
@@ -81,6 +84,17 @@ const REQUIRED_PROPERTIES: Record<string, { type: string; config: unknown }> = {
       },
     },
   },
+  Type: {
+    type: 'select',
+    config: {
+      select: {
+        options: [
+          { name: 'Task', color: 'default' },
+          { name: 'Project', color: 'purple' },
+        ],
+      },
+    },
+  },
 };
 
 // Cache: maps logical field name -> actual property name in the database
@@ -131,6 +145,16 @@ async function ensureSchema(): Promise<{ titleProp: string; propMap: Record<stri
     }
   }
 
+  // Check if "Parent" relation property exists — if not, create it dynamically
+  const hasParent = existingByName.has('Parent');
+  if (hasParent) {
+    map['Parent'] = 'Parent';
+  }
+  // "Sub-items" is auto-created by Notion as the reverse of Parent
+  if (existingByName.has('Sub-items')) {
+    map['Sub-items'] = 'Sub-items';
+  }
+
   // Create missing properties in one API call
   if (Object.keys(propsToCreate).length > 0) {
     logger.info(
@@ -159,6 +183,32 @@ async function ensureSchema(): Promise<{ titleProp: string; propMap: Record<stri
     }
   } else {
     // All required properties exist — map was already populated above
+  }
+
+  // Create "Parent" relation property if missing (must be separate API call)
+  if (!hasParent) {
+    logger.info('Auto-creating Parent relation property');
+    try {
+      await notion.databases.update({
+        database_id: dbId,
+        properties: {
+          Parent: {
+            relation: {
+              database_id: dbId,
+              type: 'dual_property',
+              dual_property: { synced_property_name: 'Sub-items' },
+            },
+          },
+        } as Parameters<typeof notion.databases.update>[0]['properties'],
+      });
+      map['Parent'] = 'Parent';
+      map['Sub-items'] = 'Sub-items';
+    } catch (err) {
+      logger.error(
+        { error: err instanceof Error ? err.message : String(err) },
+        'Failed to auto-create Parent relation property',
+      );
+    }
   }
 
   // Only cache on full success
@@ -225,6 +275,22 @@ function extractPageData(page: PageObjectResponse, titleProp: string) {
       ? labelsProp.multi_select.map((l: { name: string }) => l.name)
       : [];
 
+  const typeProp = props['Type'];
+  const type =
+    typeProp && typeProp.type === 'select'
+      ? typeProp.select?.name ?? 'Task'
+      : 'Task';
+
+  const parentProp = props['Parent'];
+  const parentRelations = parentProp && parentProp.type === 'relation' ? parentProp.relation : [];
+  const parentId = parentRelations.length > 0 ? (parentRelations[0] as { id: string }).id : null;
+
+  const subItemsProp = props['Sub-items'];
+  const subItemIds =
+    subItemsProp && subItemsProp.type === 'relation'
+      ? subItemsProp.relation.map((r: { id: string }) => r.id)
+      : [];
+
   return {
     id: page.id,
     title,
@@ -233,7 +299,11 @@ function extractPageData(page: PageObjectResponse, titleProp: string) {
     priority,
     dueDate,
     labels,
+    type,
+    parentId,
+    subItemIds,
     createdTime: page.created_time,
+    lastEditedTime: page.last_edited_time,
     url: page.url,
   };
 }
@@ -246,6 +316,8 @@ export async function queryTasks(params: {
   status?: string;
   assignee?: string;
   priority?: string;
+  type?: string;
+  parentId?: string;
   limit?: number;
 }): Promise<string> {
   try {
@@ -255,7 +327,7 @@ export async function queryTasks(params: {
     const { titleProp } = await ensureSchema();
 
     logger.debug(
-      { status: params.status, assignee: params.assignee, priority: params.priority, limit },
+      { status: params.status, assignee: params.assignee, priority: params.priority, type: params.type, limit },
       'Querying Notion tasks',
     );
 
@@ -269,6 +341,12 @@ export async function queryTasks(params: {
     }
     if (params.priority) {
       filters.push({ property: 'Priority', select: { equals: params.priority } });
+    }
+    if (params.type) {
+      filters.push({ property: 'Type', select: { equals: params.type } });
+    }
+    if (params.parentId) {
+      filters.push({ property: 'Parent', relation: { contains: params.parentId } });
     }
 
     let filter: PropertyFilter | { and: PropertyFilter[] } | undefined;
@@ -305,6 +383,8 @@ export async function createTask(params: {
   dueDate?: string;
   description?: string;
   labels?: string[];
+  type?: string;
+  parentId?: string;
 }): Promise<string> {
   try {
     const dbId = getKanbanDbId();
@@ -312,7 +392,7 @@ export async function createTask(params: {
     const { titleProp, propMap } = await ensureSchema();
 
     logger.debug(
-      { title: params.title, status: params.status, assignee: params.assignee },
+      { title: params.title, status: params.status, assignee: params.assignee, type: params.type },
       'Creating Notion task',
     );
 
@@ -350,6 +430,18 @@ export async function createTask(params: {
     if (params.labels && params.labels.length > 0 && propMap['Labels']) {
       properties[propMap['Labels']] = {
         multi_select: params.labels.map((name) => ({ name })),
+      };
+    }
+
+    if (propMap['Type']) {
+      properties[propMap['Type']] = {
+        select: { name: params.type ?? 'Task' },
+      };
+    }
+
+    if (params.parentId && propMap['Parent']) {
+      properties[propMap['Parent']] = {
+        relation: [{ id: params.parentId }],
       };
     }
 
@@ -396,6 +488,8 @@ export async function updateTask(params: {
   priority?: string;
   dueDate?: string;
   labels?: string[];
+  type?: string;
+  parentId?: string;
 }): Promise<string> {
   try {
     const notion = getNotion();
@@ -438,6 +532,18 @@ export async function updateTask(params: {
       };
     }
 
+    if (params.type && propMap['Type']) {
+      properties[propMap['Type']] = {
+        select: { name: params.type },
+      };
+    }
+
+    if (params.parentId && propMap['Parent']) {
+      properties[propMap['Parent']] = {
+        relation: [{ id: params.parentId }],
+      };
+    }
+
     await notion.pages.update({
       page_id: params.pageId,
       properties: properties as Parameters<typeof notion.pages.update>[0]['properties'],
@@ -450,6 +556,112 @@ export async function updateTask(params: {
     logger.error({ error: msg }, 'updateTask failed');
     return JSON.stringify({ error: msg });
   }
+}
+
+export async function getProjectSummary(projectPageId: string): Promise<{
+  title: string;
+  status: string | null;
+  priority: string | null;
+  dueDate: string | null;
+  totalTasks: number;
+  doneCount: number;
+  overdueCount: number;
+  nextDueDate: string | null;
+}> {
+  const dbId = getKanbanDbId();
+  const notion = getNotion();
+  const { titleProp } = await ensureSchema();
+
+  // Fetch the project page itself
+  const projectPage = await notion.pages.retrieve({ page_id: projectPageId }) as PageObjectResponse;
+  const projectData = extractPageData(projectPage, titleProp);
+
+  // Fetch sub-items
+  const response = await notion.dataSources.query({
+    data_source_id: dbId,
+    page_size: 100,
+    filter: { property: 'Parent', relation: { contains: projectPageId } },
+  });
+
+  const subItems = response.results
+    .filter((page): page is PageObjectResponse => page.object === 'page' && 'properties' in page)
+    .map((page) => extractPageData(page, titleProp));
+
+  const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/Berlin' });
+  const doneCount = subItems.filter((t) => t.status === 'Done').length;
+  const overdueCount = subItems.filter(
+    (t) => t.dueDate && t.dueDate < todayStr && t.status !== 'Done',
+  ).length;
+
+  const upcomingDueDates = subItems
+    .filter((t) => t.dueDate && t.dueDate >= todayStr && t.status !== 'Done')
+    .map((t) => t.dueDate!)
+    .sort();
+
+  return {
+    title: projectData.title,
+    status: projectData.status,
+    priority: projectData.priority,
+    dueDate: projectData.dueDate,
+    totalTasks: subItems.length,
+    doneCount,
+    overdueCount,
+    nextDueDate: upcomingDueDates[0] ?? null,
+  };
+}
+
+export async function getOverdueTasks(assignee?: string): Promise<Array<{
+  id: string;
+  title: string;
+  status: string | null;
+  assignee: string | null;
+  priority: string | null;
+  dueDate: string;
+  daysOverdue: number;
+  type: string;
+  url: string;
+}>> {
+  const dbId = getKanbanDbId();
+  const notion = getNotion();
+  const { titleProp } = await ensureSchema();
+
+  const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/Berlin' });
+
+  const filters: PropertyFilter[] = [
+    { property: 'Due Date', date: { before: todayStr } },
+    { property: 'Status', select: { does_not_equal: 'Done' } },
+  ];
+
+  if (assignee) {
+    filters.push({ property: 'Assignee', select: { equals: assignee } });
+  }
+
+  const response = await notion.dataSources.query({
+    data_source_id: dbId,
+    page_size: 50,
+    filter: { and: filters },
+  });
+
+  const todayMs = new Date(todayStr).getTime();
+
+  return response.results
+    .filter((page): page is PageObjectResponse => page.object === 'page' && 'properties' in page)
+    .map((page) => {
+      const data = extractPageData(page, titleProp);
+      const daysOverdue = Math.floor((todayMs - new Date(data.dueDate!).getTime()) / 86_400_000);
+      return {
+        id: data.id,
+        title: data.title,
+        status: data.status,
+        assignee: data.assignee,
+        priority: data.priority,
+        dueDate: data.dueDate!,
+        daysOverdue,
+        type: data.type,
+        url: data.url,
+      };
+    })
+    .sort((a, b) => b.daysOverdue - a.daysOverdue);
 }
 
 export async function addTaskComment(params: {

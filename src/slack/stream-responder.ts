@@ -1,4 +1,5 @@
 import type { WebClient } from '@slack/web-api';
+import Anthropic from '@anthropic-ai/sdk';
 import { logger } from '../utils/logger.js';
 import { markdownToMrkdwn, chunkMessage } from './formatters/index.js';
 
@@ -64,30 +65,36 @@ function estimateCost(
 // Error classification
 // ---------------------------------------------------------------------------
 
-function classifyError(err: unknown): string {
-  if (err instanceof Error) {
-    const msg = err.message.toLowerCase();
+function truncate(s: string, max = 200): string {
+  return s.length > max ? s.slice(0, max) + '…' : s;
+}
 
-    if (msg.includes('rate') || msg.includes('429')) {
-      return 'Rate limit exceeded. Please wait a moment and try again.';
-    }
-    if (msg.includes('auth') || msg.includes('401') || msg.includes('permission')) {
-      return 'Authentication error. The API key may be invalid or expired.';
-    }
-    if (msg.includes('timeout') || msg.includes('timed out')) {
-      return 'Request timed out. Please try again.';
-    }
-    if (msg.includes('overloaded') || msg.includes('529')) {
+function classifyError(err: unknown): string {
+  // Use Anthropic SDK error types for precise classification
+  if (err instanceof Anthropic.RateLimitError) {
+    return 'Rate limit exceeded. Please wait a moment and try again.';
+  }
+  if (err instanceof Anthropic.AuthenticationError) {
+    return 'Authentication error. The API key may be invalid or expired.';
+  }
+  if (err instanceof Anthropic.APIConnectionTimeoutError) {
+    return 'Request timed out. Please try again.';
+  }
+  if (err instanceof Anthropic.APIConnectionError) {
+    return 'Connection error. Please try again.';
+  }
+  if (err instanceof Anthropic.APIError) {
+    if (err.status === 529 || /overloaded_error/.test(err.message)) {
       return 'The AI service is overloaded. Please try again in a moment.';
     }
-    if (msg.includes('invalid') || msg.includes('400')) {
-      return 'Invalid request. The message may be too long or contain unsupported content.';
+    if (/prompt is too long/.test(err.message)) {
+      return 'The data from tool calls was too large. Try asking about a shorter time period or a specific campaign.';
     }
-    if (msg.includes('context') || msg.includes('token')) {
-      return 'Context length exceeded. Try a shorter message or start a new thread.';
-    }
-
-    return `Unexpected error: ${err.message}`;
+    // Show the actual API error so we can diagnose issues
+    return `API error (${err.status}): ${truncate(err.message)}`;
+  }
+  if (err instanceof Error) {
+    return `Error: ${truncate(err.message)}`;
   }
 
   return 'An unknown error occurred. Please try again.';

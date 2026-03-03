@@ -6,6 +6,20 @@ type GoogleAccount = 'work' | 'personal' | 'jasmin';
 
 const TZ = 'Europe/Berlin';
 
+/** Ensure a datetime string carries the Berlin UTC offset so Google APIs
+ *  interpret it as Berlin local time. If the string already has tz info,
+ *  it is returned as-is. */
+function withBerlinOffset(input: string): string {
+  if (/[Zz]$|[+-]\d{2}(:\d{2})?$/.test(input)) return input;
+  // Use Intl to get Berlin's offset (handles CET/CEST automatically)
+  const refDate = new Date(input + 'Z');
+  const offsetStr =
+    new Intl.DateTimeFormat('en-GB', { timeZone: TZ, timeZoneName: 'longOffset' })
+      .formatToParts(refDate)
+      .find((p) => p.type === 'timeZoneName')?.value ?? 'GMT+01:00';
+  return `${input}${offsetStr.replace('GMT', '')}`;
+}
+
 // ---------------------------------------------------------------------------
 // Calendar tools
 // ---------------------------------------------------------------------------
@@ -126,8 +140,8 @@ export async function createEvent(params: {
         summary: params.summary,
         description: params.description,
         location: params.location,
-        start: { dateTime: new Date(params.startTime).toISOString(), timeZone: TZ },
-        end: { dateTime: new Date(params.endTime).toISOString(), timeZone: TZ },
+        start: { dateTime: withBerlinOffset(params.startTime), timeZone: TZ },
+        end: { dateTime: withBerlinOffset(params.endTime), timeZone: TZ },
         attendees: params.attendees?.map((email) => ({ email })),
       },
     });
@@ -143,6 +157,72 @@ export async function createEvent(params: {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.error({ err: msg }, 'createEvent failed');
+    return JSON.stringify({ error: msg });
+  }
+}
+
+export async function updateEvent(params: {
+  eventId: string;
+  summary?: string;
+  startTime?: string;
+  endTime?: string;
+  description?: string;
+  location?: string;
+  attendees?: string[];
+  account?: string;
+}): Promise<string> {
+  try {
+    const account = (params.account ?? 'work') as GoogleAccount;
+    const cal = getCalendar(account);
+
+    const requestBody: Record<string, unknown> = {};
+    if (params.summary !== undefined) requestBody.summary = params.summary;
+    if (params.description !== undefined) requestBody.description = params.description;
+    if (params.location !== undefined) requestBody.location = params.location;
+    if (params.startTime) requestBody.start = { dateTime: withBerlinOffset(params.startTime), timeZone: TZ };
+    if (params.endTime) requestBody.end = { dateTime: withBerlinOffset(params.endTime), timeZone: TZ };
+    if (params.attendees) requestBody.attendees = params.attendees.map((email) => ({ email }));
+
+    const res = await cal.events.patch({
+      calendarId: 'primary',
+      eventId: params.eventId,
+      sendUpdates: params.attendees?.length ? 'all' : 'none',
+      requestBody,
+    });
+
+    return JSON.stringify({
+      id: res.data.id,
+      summary: res.data.summary,
+      start: res.data.start?.dateTime ?? res.data.start?.date,
+      end: res.data.end?.dateTime ?? res.data.end?.date,
+      htmlLink: res.data.htmlLink,
+      account,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ err: msg }, 'updateEvent failed');
+    return JSON.stringify({ error: msg });
+  }
+}
+
+export async function deleteEvent(params: {
+  eventId: string;
+  account?: string;
+}): Promise<string> {
+  try {
+    const account = (params.account ?? 'work') as GoogleAccount;
+    const cal = getCalendar(account);
+
+    await cal.events.delete({
+      calendarId: 'primary',
+      eventId: params.eventId,
+      sendUpdates: 'none',
+    });
+
+    return JSON.stringify({ deleted: true, eventId: params.eventId, account });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ err: msg }, 'deleteEvent failed');
     return JSON.stringify({ error: msg });
   }
 }
@@ -336,7 +416,7 @@ export async function draftEmail(params: {
       '',
       params.body,
     ]
-      .filter(Boolean)
+      .filter((v): v is string => v !== null)
       .join('\r\n');
 
     const raw = Buffer.from(lines).toString('base64url');
@@ -387,7 +467,7 @@ export async function sendEmail(params: {
         '',
         params.body,
       ]
-        .filter(Boolean)
+        .filter((v): v is string => v !== null)
         .join('\r\n');
 
       const raw = Buffer.from(lines).toString('base64url');

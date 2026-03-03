@@ -127,10 +127,6 @@ export async function listRecentMeetings(params: {
       .order("date", { ascending: false })
       .limit(limit);
 
-    if (params.speaker) {
-      query = query.contains("speakers", [params.speaker]);
-    }
-
     const { data, error } = await query;
 
     if (error) {
@@ -138,8 +134,18 @@ export async function listRecentMeetings(params: {
       return JSON.stringify({ error: error.message });
     }
 
-    logger.debug({ count: data?.length }, "Listed recent meetings");
-    return JSON.stringify(data);
+    // Filter by speaker client-side for case-insensitive partial matching
+    // e.g. "Kousha" matches "Kousha Torabi"
+    let results = data ?? [];
+    if (params.speaker) {
+      const needle = params.speaker.toLowerCase();
+      results = results.filter((m: { speakers?: string[] }) =>
+        m.speakers?.some((s) => s.toLowerCase().includes(needle)),
+      );
+    }
+
+    logger.debug({ count: results.length }, "Listed recent meetings");
+    return JSON.stringify(results);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.error({ error: msg }, "listRecentMeetings failed");
