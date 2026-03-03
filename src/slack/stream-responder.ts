@@ -172,14 +172,18 @@ export function createStreamResponder(
     lastUpdateLen = accumulated.length;
     lastUpdateTime = now;
 
-    let partialMrkdwn = markdownToMrkdwn(accumulated);
+    const mrkdwn = markdownToMrkdwn(accumulated);
     const suffix = `\n\n:hourglass_flowing_sand: _${agentName} is still typing..._`;
-    // Slack messages cap at ~4000 chars — truncate progressive preview to fit
-    const MAX_PREVIEW_CHARS = 3800;
-    if (partialMrkdwn.length + suffix.length > MAX_PREVIEW_CHARS) {
-      partialMrkdwn = partialMrkdwn.slice(0, MAX_PREVIEW_CHARS - suffix.length - 30) + '\n\n_[... response continues]_';
+
+    // Slack chat.update can hit msg_too_long for large messages.
+    // Once the response needs chunking, stop updating the preview — just show progress indicator.
+    const SAFE_PREVIEW_LIMIT = 3000;
+    let preview: string;
+    if (mrkdwn.length > SAFE_PREVIEW_LIMIT) {
+      preview = mrkdwn.slice(0, SAFE_PREVIEW_LIMIT) + `\n\n_[... still generating — full response will appear when done]_`;
+    } else {
+      preview = `${mrkdwn}${suffix}`;
     }
-    const preview = `${partialMrkdwn}${suffix}`;
 
     updateMessage(preview)
       .catch((err: unknown) => {
