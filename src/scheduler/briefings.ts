@@ -215,6 +215,67 @@ async function gatherNotionTasks(
   }
 }
 
+async function gatherProjectProgress(): Promise<string | null> {
+  try {
+    const { queryTasks, getProjectSummary } = await import('../agents/tools/notion-tools.js');
+
+    // Get all active projects (not Done)
+    const rawProjects = await queryTasks({ type: 'Project', limit: 50 });
+    const projects = JSON.parse(rawProjects);
+
+    if (!Array.isArray(projects) || projects.length === 0) return null;
+
+    const activeProjects = projects.filter(
+      (p: { status: string | null }) => p.status !== 'Done',
+    );
+
+    if (activeProjects.length === 0) return null;
+
+    const parts: string[] = [`*Project Progress* (${activeProjects.length} active)`];
+
+    for (const project of activeProjects) {
+      try {
+        const summary = await getProjectSummary(project.id);
+        const progress = summary.totalTasks > 0
+          ? `${summary.doneCount}/${summary.totalTasks} tasks done`
+          : 'no sub-tasks yet';
+        const priority = summary.priority ? ` [${summary.priority}]` : '';
+        const due = summary.dueDate ? ` (due: ${summary.dueDate})` : '';
+        const overdue = summary.overdueCount > 0 ? ` — ${summary.overdueCount} overdue` : '';
+        parts.push(`- ${summary.title}: ${progress}${priority}${due}${overdue}`);
+      } catch {
+        parts.push(`- ${project.title}: (could not fetch details)`);
+      }
+    }
+
+    return parts.join('\n');
+  } catch (err) {
+    logger.debug({ err }, 'Project progress unavailable for briefing');
+    return null;
+  }
+}
+
+async function gatherOverdueTasks(): Promise<string | null> {
+  try {
+    const { getOverdueTasks } = await import('../agents/tools/notion-tools.js');
+    const overdue = await getOverdueTasks();
+
+    if (overdue.length === 0) return null;
+
+    const parts: string[] = [`*Overdue Tasks* (${overdue.length})`];
+    for (const task of overdue) {
+      const priority = task.priority ? ` [${task.priority}]` : '';
+      const assignee = task.assignee ? ` (${task.assignee})` : '';
+      parts.push(`- ${task.title}${priority}${assignee} — ${task.daysOverdue}d overdue (was due ${task.dueDate})`);
+    }
+
+    return parts.join('\n');
+  } catch (err) {
+    logger.debug({ err }, 'Overdue tasks unavailable for briefing');
+    return null;
+  }
+}
+
 async function gatherRecentMeetings(days: number): Promise<string | null> {
   try {
     const { listRecentMeetings } = await import('../agents/tools/fireflies-tools.js');
@@ -402,55 +463,88 @@ async function gatherSlackDMs(hours: number): Promise<string | null> {
     const dmChannelIds = await getDmChannelIds(userClient);
     if (dmChannelIds.length === 0) return null;
 
-    interface DmMessage {
-      user: string;
-      text: string;
-      ts: string;
+    interface UnansweredConversation {
+      otherUser: string;
+      lastMessage: string;
+      lastTs: string;
+      unansweredCount: number;
     }
 
-    // Read history from each DM channel in parallel
+    // Read history from each DM channel, keeping Daniel's messages to detect replies
     const channelResults = await Promise.allSettled(
-      dmChannelIds.map(async (channelId) => {
+      dmChannelIds.map(async (channelId): Promise<UnansweredConversation | null> => {
         const history = await userClient.conversations.history({
           channel: channelId,
           oldest,
-          limit: 10,
+          limit: 15,
         });
-        return (history.messages ?? [])
-          .filter((msg) =>
-            msg.user &&
-            msg.user !== env.SLACK_OWNER_USER_ID &&
-            !msg.bot_id &&
-            !msg.subtype,
-          )
-          .map((msg): DmMessage => ({
-            user: msg.user!,
-            text: msg.text ?? '',
-            ts: msg.ts ?? '0',
-          }));
+        const messages = (history.messages ?? []).filter(
+          (msg) => !msg.bot_id && !msg.subtype && msg.user && msg.ts,
+        );
+        if (messages.length === 0) return null;
+
+        // Find the last message from Daniel vs last from the other person
+        let lastDanielTs = 0;
+        let lastOtherTs = 0;
+        let otherUser = '';
+        let lastOtherText = '';
+        let unansweredCount = 0;
+
+        for (const msg of messages) {
+          const ts = parseFloat(msg.ts!);
+          if (msg.user === env.SLACK_OWNER_USER_ID) {
+            if (ts > lastDanielTs) lastDanielTs = ts;
+          } else {
+            if (ts > lastOtherTs) {
+              lastOtherTs = ts;
+              otherUser = msg.user!;
+              lastOtherText = msg.text ?? '';
+            }
+          }
+        }
+
+        // Skip if no messages from others, or if Daniel replied after the last other message
+        if (lastOtherTs === 0) return null;
+        if (lastDanielTs >= lastOtherTs) return null;
+
+        // Count unanswered messages (those after Daniel's last reply)
+        for (const msg of messages) {
+          if (msg.user !== env.SLACK_OWNER_USER_ID && parseFloat(msg.ts!) > lastDanielTs) {
+            unansweredCount++;
+          }
+        }
+
+        return {
+          otherUser,
+          lastMessage: lastOtherText,
+          lastTs: String(lastOtherTs),
+          unansweredCount,
+        };
       }),
     );
 
-    const allMessages: DmMessage[] = channelResults
-      .flatMap((r) => (r.status === 'fulfilled' ? r.value : []));
+    const unanswered: UnansweredConversation[] = channelResults
+      .map((r) => (r.status === 'fulfilled' ? r.value : null))
+      .filter((c): c is UnansweredConversation => c !== null);
 
-    if (allMessages.length === 0) return null;
+    if (unanswered.length === 0) return null;
 
-    // Sort by timestamp descending and cap at 20
-    allMessages.sort((a, b) => parseFloat(b.ts) - parseFloat(a.ts));
-    const capped = allMessages.slice(0, 20);
+    // Sort by most recent unanswered message first
+    unanswered.sort((a, b) => parseFloat(b.lastTs) - parseFloat(a.lastTs));
+    const capped = unanswered.slice(0, 15);
 
     // Resolve user names
-    for (const msg of capped) {
-      await resolveUserName(userClient, msg.user);
+    for (const conv of capped) {
+      await resolveUserName(userClient, conv.otherUser);
     }
 
-    const parts: string[] = [`*Slack DMs* (${capped.length} messages)`];
-    for (const msg of capped) {
-      const name = userNameCache.get(msg.user) ?? msg.user;
-      const text = msg.text.length > 200 ? msg.text.slice(0, 200) + '...' : msg.text;
-      const timeAgo = formatTimeAgo(parseFloat(msg.ts));
-      parts.push(`- *${name}*: ${text} (${timeAgo})`);
+    const parts: string[] = [`*Unanswered DMs* (${capped.length} conversations)`];
+    for (const conv of capped) {
+      const name = userNameCache.get(conv.otherUser) ?? conv.otherUser;
+      const text = conv.lastMessage.length > 200 ? conv.lastMessage.slice(0, 200) + '...' : conv.lastMessage;
+      const timeAgo = formatTimeAgo(parseFloat(conv.lastTs));
+      const count = conv.unansweredCount > 1 ? ` (${conv.unansweredCount} msgs)` : '';
+      parts.push(`- *${name}*: ${text}${count} (${timeAgo})`);
     }
 
     return parts.join('\n');
@@ -486,76 +580,6 @@ async function gatherUnreadDMs(): Promise<string | null> {
   }
 }
 
-async function gatherSlackChannelMessages(hours: number): Promise<string | null> {
-  try {
-    // Get monitored channels from Supabase
-    const supabase = getDaiSupabase();
-    const { data: monitors } = await supabase
-      .from('channel_monitor')
-      .select('channel_id')
-      .eq('active', true);
-
-    if (!monitors || monitors.length === 0) return null;
-
-    const channelIds = monitors.map((m) => m.channel_id as string);
-    const oldest = String(Math.floor((Date.now() - hours * 3_600_000) / 1000));
-
-    const slackClient = new WebClient(env.SLACK_BOT_TOKEN);
-
-    interface ChannelMessage {
-      channel: string;
-      user: string;
-      text: string;
-      ts: string;
-    }
-
-    // Read history from each channel in parallel
-    const channelResults = await Promise.allSettled(
-      channelIds.map(async (channelId) => {
-        const history = await slackClient.conversations.history({
-          channel: channelId,
-          oldest,
-          limit: 15,
-        });
-        return (history.messages ?? [])
-          .filter((msg) => !msg.bot_id && !msg.subtype)
-          .map((msg): ChannelMessage => ({
-            channel: channelId,
-            user: msg.user ?? 'unknown',
-            text: msg.text ?? '',
-            ts: msg.ts ?? '0',
-          }));
-      }),
-    );
-
-    const allMessages: ChannelMessage[] = channelResults
-      .flatMap((r) => (r.status === 'fulfilled' ? r.value : []));
-
-    if (allMessages.length === 0) return null;
-
-    // Sort by timestamp descending and cap at 30
-    allMessages.sort((a, b) => parseFloat(b.ts) - parseFloat(a.ts));
-    const capped = allMessages.slice(0, 30);
-
-    // Resolve user names
-    for (const msg of capped) {
-      await resolveUserName(slackClient, msg.user);
-    }
-
-    const parts: string[] = [`*Channel Activity* (${capped.length} messages)`];
-    for (const msg of capped) {
-      const name = userNameCache.get(msg.user) ?? msg.user;
-      const text = msg.text.length > 150 ? msg.text.slice(0, 150) + '...' : msg.text;
-      parts.push(`- <#${msg.channel}> — *${name}*: ${text}`);
-    }
-
-    return parts.join('\n');
-  } catch (err) {
-    logger.debug({ err }, 'Channel messages unavailable for briefing');
-    return null;
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Morning briefing
 // ---------------------------------------------------------------------------
@@ -567,29 +591,30 @@ export async function generateMorningBriefing(): Promise<string> {
 
   // Gather data from all sources concurrently
   const [
-    insights, mentions, tasks, meetings,
-    calendar, emails, dms, unreadDms, channelMessages,
+    insights, tasks, meetings,
+    calendar, emails, dms, unreadDms,
+    projectProgress, overdueTasks,
   ] = await Promise.all([
     gatherChannelInsights(),
-    gatherRecentMentions(14),
     gatherNotionTasks(['In Progress', 'To Do'], 'Daniel'),
     gatherRecentMeetings(1),
     gatherCalendarEvents('today'),
     gatherImportantEmails(14),
     gatherSlackDMs(14),
     gatherUnreadDMs(),
-    gatherSlackChannelMessages(14),
+    gatherProjectProgress(),
+    gatherOverdueTasks(),
   ]);
 
   if (calendar) dataSections.push(calendar);
+  if (overdueTasks) dataSections.push(overdueTasks);
   if (unreadDms) dataSections.push(unreadDms);
   if (emails) dataSections.push(emails);
   if (dms) dataSections.push(dms);
   if (insights) dataSections.push(insights);
-  if (mentions) dataSections.push(mentions);
   if (tasks) dataSections.push(tasks);
+  if (projectProgress) dataSections.push(projectProgress);
   if (meetings) dataSections.push(meetings);
-  if (channelMessages) dataSections.push(channelMessages);
 
   const dataSummary = dataSections.length > 0
     ? dataSections.join('\n\n')
@@ -610,10 +635,11 @@ export async function generateMorningBriefing(): Promise<string> {
     '',
     'Structure the briefing as:',
     '1. *Today\'s Schedule* — Calendar events, flag any conflicts or back-to-back meetings, note gaps',
-    '2. *Action Required* — Unreplied DMs, emails needing response, blockers from channels. Prioritize by urgency.',
-    '3. *Tasks* — Notion in-progress and to-do items, highlight overdue items',
-    '4. *Overnight Activity* — Key Slack messages, channel highlights, meeting follow-ups since last EOD',
-    '5. *Notable* — FYI items that don\'t need action but Daniel should be aware of',
+    '2. *Overdue & Urgent* — Overdue tasks first (with days overdue), then other urgent items needing immediate attention',
+    '3. *Action Required* — Unreplied DMs, emails needing response, blockers from channels. Prioritize by urgency.',
+    '4. *Tasks & Projects* — Notion in-progress/to-do items, project progress (X/Y done), highlight stale projects',
+    '5. *Overnight Activity* — Key Slack messages, channel highlights, meeting follow-ups since last EOD',
+    '6. *Notable* — FYI items that don\'t need action but Daniel should be aware of',
     '',
     'IMPORTANT: Prioritize actionable items and group by urgency, not by source.',
     'Tell Daniel what needs his attention, not just dump data.',
@@ -667,25 +693,28 @@ export async function generateEodBriefing(): Promise<string> {
 
   // Gather data from all sources concurrently
   const [
-    insights, mentions, tasks, meetings,
+    insights, tasks, meetings,
     calendar, emails, dms, unreadDms,
+    projectProgress, overdueTasks,
   ] = await Promise.all([
     gatherChannelInsights(),
-    gatherRecentMentions(10),
     gatherNotionTasks(['Done', 'In Progress', 'Blocked']),
     gatherRecentMeetings(1),
     gatherCalendarEvents('tomorrow'),
     gatherImportantEmails(10),
     gatherSlackDMs(10),
     gatherUnreadDMs(),
+    gatherProjectProgress(),
+    gatherOverdueTasks(),
   ]);
 
   if (tasks) dataSections.push(tasks);
+  if (projectProgress) dataSections.push(projectProgress);
+  if (overdueTasks) dataSections.push(overdueTasks);
   if (unreadDms) dataSections.push(unreadDms);
   if (dms) dataSections.push(dms);
   if (emails) dataSections.push(emails);
   if (insights) dataSections.push(insights);
-  if (mentions) dataSections.push(mentions);
   if (meetings) dataSections.push(meetings);
   if (calendar) dataSections.push(calendar);
 
@@ -706,9 +735,9 @@ export async function generateEodBriefing(): Promise<string> {
     '- NO markdown headers (# or ##) — use *Bold Section Title* instead',
     '',
     'Structure:',
-    '1. *Completed Today* — What got done (from Notion "Done" tasks)',
+    '1. *Completed Today* — What got done (from Notion "Done" tasks), project progress updates',
     '2. *Still Needs Your Reply* — Unreplied DMs and emails from today',
-    '3. *Open Items* — Unresolved blockers, in-progress tasks, anything people are still waiting on',
+    '3. *Open Items* — Overdue tasks, unresolved blockers, in-progress tasks, anything people are still waiting on',
     '4. *Tomorrow Preview* — Tomorrow\'s calendar + what\'s coming up',
     '5. *Wind Down* — Brief note on what can wait till tomorrow (or Monday if it\'s Friday)',
     '',
@@ -762,23 +791,26 @@ export async function generateWeeklyBriefing(): Promise<string> {
 
   // Gather data from all sources concurrently
   const [
-    calendar, tasks, emails, dms, unreadDms, channelMessages, meetings,
+    calendar, tasks, emails, dms, unreadDms, meetings,
+    projectProgress, overdueTasks,
   ] = await Promise.all([
     gatherCalendarEvents('week'),
     gatherNotionTasks(['To Do', 'In Progress', 'Blocked']),
     gatherImportantEmails(72),
     gatherSlackDMs(72),
     gatherUnreadDMs(),
-    gatherSlackChannelMessages(72),
     gatherRecentMeetings(3),
+    gatherProjectProgress(),
+    gatherOverdueTasks(),
   ]);
 
   if (calendar) dataSections.push(calendar);
+  if (overdueTasks) dataSections.push(overdueTasks);
   if (unreadDms) dataSections.push(unreadDms);
   if (dms) dataSections.push(dms);
   if (emails) dataSections.push(emails);
-  if (channelMessages) dataSections.push(channelMessages);
   if (tasks) dataSections.push(tasks);
+  if (projectProgress) dataSections.push(projectProgress);
   if (meetings) dataSections.push(meetings);
 
   const dataSummary = dataSections.length > 0
@@ -799,9 +831,10 @@ export async function generateWeeklyBriefing(): Promise<string> {
     '',
     'Structure:',
     '1. *This Week\'s Calendar* — Day-by-day overview of the week ahead, highlight key meetings and busy days',
-    '2. *Weekend Catch-up* — What happened over the weekend: DMs, emails, channel activity, meetings',
-    '3. *Week Priorities* — Open tasks organized by priority, flag anything with deadlines this week',
-    '4. *Decisions Needed* — Anything pending Daniel\'s input or approval',
+    '2. *Overdue & Stale* — Overdue tasks (with days overdue), stale projects with no updates in 5+ days',
+    '3. *Weekend Catch-up* — What happened over the weekend: DMs, emails, channel activity, meetings',
+    '4. *Week Priorities* — Open tasks organized by priority, project progress (X/Y done), flag deadlines this week',
+    '5. *Decisions Needed* — Anything pending Daniel\'s input or approval',
     '',
     'This is a strategic overview for the week — help Daniel plan and prioritize.',
     'Keep it scannable, use bullet points, bold key items.',
@@ -857,7 +890,7 @@ export function registerBriefingJobs(): void {
 
   registerJob(
     'morning-briefing',
-    '0 9 * * 1-5', // 9am weekdays
+    '0 9 * * 2-5', // 9am Tue–Fri (Mon has weekly briefing at 8am)
     'Europe/Berlin',
     async () => { await generateMorningBriefing(); },
   );

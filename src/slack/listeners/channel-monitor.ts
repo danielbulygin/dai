@@ -103,9 +103,27 @@ export function registerChannelMonitor(app: App): void {
 
     if (!text || !userId || !messageTs || !channel) return;
 
-    // Skip messages from the owner themselves — we only care about what
-    // others say that might affect or reference the owner
-    if (userId === env.SLACK_OWNER_USER_ID) return;
+    // Buffer Daniel's thread replies so the analyzer knows he already responded.
+    // Only thread replies (thread_ts differs from message_ts); skip top-level posts.
+    if (userId === env.SLACK_OWNER_USER_ID) {
+      if (threadTs && threadTs !== messageTs) {
+        try {
+          await bufferMessage({
+            channel_id: channel,
+            user_id: userId,
+            message_ts: messageTs,
+            thread_ts: threadTs,
+            text,
+            matched_keywords: '@owner-reply',
+            priority: 'low',
+          });
+          logger.debug({ channel, thread_ts: threadTs }, 'Channel monitor buffered owner thread reply');
+        } catch (err) {
+          logger.error({ err, channel, message_ts: messageTs }, 'Failed to buffer owner reply');
+        }
+      }
+      return;
+    }
 
     // Keyword pre-filter: only buffer relevant messages
     const matchedKeywords = extractMatchedKeywords(text, env.SLACK_OWNER_USER_ID);

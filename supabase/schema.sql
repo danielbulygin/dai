@@ -8,7 +8,7 @@ CREATE TABLE meetings (
   id TEXT PRIMARY KEY,                  -- Fireflies meeting ID
   title TEXT,
   date TIMESTAMPTZ,
-  duration REAL,                        -- seconds
+  duration REAL,                        -- minutes (from Fireflies API)
   organizer_email TEXT,
   speakers TEXT[],
   participant_emails TEXT[],
@@ -82,7 +82,7 @@ CREATE TABLE monitoring_insights (
 -- ==========================================================================
 CREATE TABLE briefings (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  type TEXT NOT NULL CHECK (type IN ('morning', 'eod', 'on_demand')),
+  type TEXT NOT NULL CHECK (type IN ('morning', 'eod', 'weekly', 'on_demand')),
   briefing_text TEXT NOT NULL,
   data_sources_used INTEGER NOT NULL DEFAULT 0,
   generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -146,7 +146,9 @@ BEGIN
     (m.fts_summary @@ q OR m.fts_transcript @@ q)
     AND (from_date IS NULL OR m.date >= from_date)
     AND (to_date IS NULL OR m.date <= to_date)
-    AND (speaker_filter IS NULL OR speaker_filter = ANY(m.speakers))
+    AND (speaker_filter IS NULL OR EXISTS (
+      SELECT 1 FROM unnest(m.speakers) AS s WHERE s ILIKE '%' || speaker_filter || '%'
+    ))
   ORDER BY rank DESC
   LIMIT result_limit;
 END;

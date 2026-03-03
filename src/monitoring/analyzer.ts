@@ -45,6 +45,22 @@ function groupByChannel(
   return groups;
 }
 
+function groupByThread(
+  messages: MonitoredMessage[],
+): Map<string | null, MonitoredMessage[]> {
+  const threads = new Map<string | null, MonitoredMessage[]>();
+  for (const msg of messages) {
+    const key = msg.thread_ts ?? null;
+    const existing = threads.get(key);
+    if (existing) {
+      existing.push(msg);
+    } else {
+      threads.set(key, [msg]);
+    }
+  }
+  return threads;
+}
+
 function buildAnalysisPrompt(
   grouped: Map<string, MonitoredMessage[]>,
 ): string {
@@ -60,16 +76,32 @@ function buildAnalysisPrompt(
     "Daniel's user ID for reference: " + env.SLACK_OWNER_USER_ID,
   );
   parts.push("");
+  parts.push(
+    "IMPORTANT: Messages tagged with `@owner-reply` are from Daniel himself — they indicate he has already responded in that thread. " +
+    "Do NOT list threads containing an @owner-reply as blockers or urgent. " +
+    "Only mention them under Notable if someone posted a follow-up question AFTER Daniel's reply.",
+  );
+  parts.push("");
   parts.push("Messages grouped by channel:");
   parts.push("");
 
   for (const [channel, messages] of grouped) {
     parts.push(`### #${channel}`);
-    for (const msg of messages) {
-      const user = msg.user_name ?? msg.user_id;
-      const keywords = msg.matched_keywords ? ` [keywords: ${msg.matched_keywords}]` : "";
-      const priority = msg.priority === "high" ? " [HIGH PRIORITY]" : "";
-      parts.push(`- ${user}: ${msg.text}${keywords}${priority}`);
+
+    // Sub-group by thread to make reply context visible
+    const threads = groupByThread(messages);
+    for (const [threadTs, threadMsgs] of threads) {
+      if (threadTs) {
+        const hasOwnerReply = threadMsgs.some((m) => m.matched_keywords?.includes("@owner-reply"));
+        parts.push(`  Thread (${hasOwnerReply ? "Daniel replied" : "no reply from Daniel"}):`);
+      }
+      for (const msg of threadMsgs) {
+        const user = msg.user_name ?? msg.user_id;
+        const keywords = msg.matched_keywords ? ` [keywords: ${msg.matched_keywords}]` : "";
+        const priority = msg.priority === "high" ? " [HIGH PRIORITY]" : "";
+        const indent = threadTs ? "    " : "";
+        parts.push(`${indent}- ${user}: ${msg.text}${keywords}${priority}`);
+      }
     }
     parts.push("");
   }
