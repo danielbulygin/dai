@@ -5,7 +5,7 @@ import {
   findSession,
   updateSession,
 } from '../memory/sessions.js';
-import { getQuickContext } from '../memory/search.js';
+import { getQuickContext, getClientQuickContext } from '../memory/search.js';
 import { addMessage, getMessages } from '../memory/messages.js';
 import { getToolsForProfile, executeTool } from './tool-registry.js';
 import type { ToolContext } from './tool-registry.js';
@@ -16,6 +16,8 @@ import { incrementApplied } from '../memory/learnings.js';
 import type { Session } from '../memory/sessions.js';
 import type { QuickContext } from '../memory/search.js';
 import type { ChatMessage } from '../memory/messages.js';
+import { buildClientOverlay } from '../client-agents/prompt-builder.js';
+import type { ToolProfile } from './profiles/index.js';
 
 let client: Anthropic | null = null;
 
@@ -26,6 +28,38 @@ function getClient(): Anthropic {
   return client;
 }
 
+// ---------------------------------------------------------------------------
+// Retry helpers for transient API errors (529 overloaded, 5xx, connection)
+// ---------------------------------------------------------------------------
+
+function isRetryableError(err: unknown): boolean {
+  if (err instanceof Anthropic.APIError) {
+    if (err.status === 529 || (err.status !== undefined && err.status >= 500)) return true;
+    // Streaming errors sometimes have undefined status — check the message body
+    if (err.status === undefined && /overloaded_error|529/.test(err.message)) return true;
+  }
+  if (err instanceof Anthropic.APIConnectionError) return true;
+  return false;
+}
+
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  label: string,
+  maxAttempts = 3,
+): Promise<T> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (!isRetryableError(err) || attempt === maxAttempts) throw err;
+      const delay = 2000 * Math.pow(2, attempt - 1); // 2s, 4s, 8s
+      logger.warn({ err, attempt, delay, label }, 'Retryable API error, backing off');
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  throw new Error('Unreachable');
+}
+
 export interface RunOptions {
   agentId: string;
   userMessage: string;
@@ -34,6 +68,10 @@ export interface RunOptions {
   threadTs?: string;
   sessionId?: string;
   onText?: (text: string) => void;
+  clientScope?: {
+    clientCode: string;
+    displayName: string;
+  };
 }
 
 export interface TokenUsage {
@@ -174,38 +212,40 @@ async function runSimple(
   messages: Anthropic.MessageParam[],
   onText?: (text: string) => void,
 ): Promise<{ responseText: string; usage: TokenUsage }> {
-  let responseText = '';
+  return withRetry(async () => {
+    let responseText = '';
 
-  const stream = apiClient.messages.stream({
-    model,
-    max_tokens: 4096,
-    system: [
-      {
-        type: 'text' as const,
-        text: systemPrompt,
-        cache_control: { type: 'ephemeral' as const },
+    const stream = apiClient.messages.stream({
+      model,
+      max_tokens: 4096,
+      system: [
+        {
+          type: 'text' as const,
+          text: systemPrompt,
+          cache_control: { type: 'ephemeral' as const },
+        },
+      ],
+      messages,
+    });
+
+    stream.on('text', (text) => {
+      responseText += text;
+      onText?.(text);
+    });
+
+    const finalMessage = await stream.finalMessage();
+    const cacheUsage = finalMessage.usage as unknown as Record<string, number>;
+
+    return {
+      responseText,
+      usage: {
+        input: finalMessage.usage.input_tokens,
+        output: finalMessage.usage.output_tokens,
+        cacheRead: cacheUsage.cache_read_input_tokens ?? 0,
+        cacheCreation: cacheUsage.cache_creation_input_tokens ?? 0,
       },
-    ],
-    messages,
-  });
-
-  stream.on('text', (text) => {
-    responseText += text;
-    onText?.(text);
-  });
-
-  const finalMessage = await stream.finalMessage();
-  const cacheUsage = finalMessage.usage as unknown as Record<string, number>;
-
-  return {
-    responseText,
-    usage: {
-      input: finalMessage.usage.input_tokens,
-      output: finalMessage.usage.output_tokens,
-      cacheRead: cacheUsage.cache_read_input_tokens ?? 0,
-      cacheCreation: cacheUsage.cache_creation_input_tokens ?? 0,
-    },
-  };
+    };
+  }, 'runSimple');
 }
 
 // ---------------------------------------------------------------------------
@@ -248,24 +288,30 @@ async function runWithTools(
   /** Threshold: intermediate turn text shorter than this is "reasoning" and gets skipped */
   const REASONING_THRESHOLD = 200;
 
+  /** Max chars for any single tool result (~20K tokens) */
+  const MAX_TOOL_RESULT_CHARS = 80_000;
+
   for (let turn = 0; turn < maxTurns; turn++) {
     let turnText = '';
 
-    const stream = apiClient.messages.stream({
-      model,
-      max_tokens: 4096,
-      system: cachedSystem,
-      messages,
-      tools: cachedTools,
-    });
+    const msg = await withRetry(async () => {
+      turnText = ''; // Reset on retry
+      const stream = apiClient.messages.stream({
+        model,
+        max_tokens: 4096,
+        system: cachedSystem,
+        messages,
+        tools: cachedTools,
+      });
 
-    // Stream text to Slack in real-time so the user sees progress immediately
-    stream.on('text', (text) => {
-      turnText += text;
-      onText?.(text);
-    });
+      // Stream text to Slack in real-time so the user sees progress immediately
+      stream.on('text', (text) => {
+        turnText += text;
+        onText?.(text);
+      });
 
-    const msg = await stream.finalMessage();
+      return stream.finalMessage();
+    }, `runWithTools turn ${turn + 1}`);
     totalInput += msg.usage.input_tokens;
     totalOutput += msg.usage.output_tokens;
     const cacheUsage = msg.usage as unknown as Record<string, number>;
@@ -303,11 +349,22 @@ async function runWithTools(
           'Executing tool call',
         );
 
-        const { result, isError } = await executeTool(
+        let { result, isError } = await executeTool(
           block.name,
           block.input as Record<string, unknown>,
           toolContext,
         );
+
+        // Truncate oversized tool results to prevent context blowup
+        if (!isError && result.length > MAX_TOOL_RESULT_CHARS) {
+          const originalLen = result.length;
+          result = result.slice(0, MAX_TOOL_RESULT_CHARS) +
+            `\n\n[TRUNCATED — result was ${originalLen.toLocaleString()} chars. Ask for a narrower query (fewer days, specific campaign, etc.)]`;
+          logger.warn(
+            { toolName: block.name, originalLen, truncatedTo: MAX_TOOL_RESULT_CHARS },
+            'Tool result truncated',
+          );
+        }
 
         // Check for multimodal screenshot content
         let content: string | Anthropic.ToolResultBlockParam['content'] = result;
@@ -374,29 +431,46 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
     threadTs,
     sessionId,
     onText,
+    clientScope,
   } = options;
 
-  const agent = getAgent(agentId) ?? getDefaultAgent();
+  // For client-scoped runs, always use Ada's definition
+  const agent = clientScope
+    ? getAgent('ada')!
+    : (getAgent(agentId) ?? getDefaultAgent());
   const agentLabel = agent.config.display_name;
 
+  // Effective agent ID for sessions/learnings/memory
+  const effectiveAgentId = clientScope
+    ? `ada_client_${clientScope.clientCode}`
+    : agent.config.id;
+
+  // Use client profile for client-scoped runs
+  const profile: ToolProfile = clientScope
+    ? 'client_media_buyer'
+    : agent.config.profile;
+
   logger.info(
-    { agentId: agent.config.id, channelId, threadTs, userId },
+    { agentId: effectiveAgentId, channelId, threadTs, userId, clientScope: !!clientScope },
     `Running agent ${agentLabel}`,
   );
 
   const session = await resolveSession(
-    agent.config.id,
+    effectiveAgentId,
     channelId,
     userId,
     threadTs,
     sessionId,
   );
 
-  const context = await getQuickContext(agent.config.id, userId);
+  // Two-tier learnings for client agents, standard for internal
+  const context = clientScope
+    ? await getClientQuickContext(effectiveAgentId, clientScope.clientCode, userId)
+    : await getQuickContext(agent.config.id, userId);
 
   // Jasmin: inject preference context and fetch more learnings
   const extras = agent.extras ? [...agent.extras] : [];
-  if (agent.config.id === 'jasmin') {
+  if (agent.config.id === 'jasmin' && !clientScope) {
     const prefContext = await buildJasminPreferenceContext();
     if (prefContext) {
       extras.push({ name: 'preferences', content: prefContext });
@@ -404,6 +478,14 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
     // Override topLearnings with 15 instead of default 5
     const { getTopLearnings } = await import('../memory/learnings.js');
     context.topLearnings = await getTopLearnings('jasmin', 15);
+  }
+
+  // Client agent overlay
+  if (clientScope) {
+    extras.push({
+      name: 'client-context',
+      content: buildClientOverlay(clientScope),
+    });
   }
 
   const systemPrompt = buildSystemPrompt(
@@ -432,14 +514,24 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
   // Append the new user message
   conversationMessages.push({ role: 'user', content: userMessage });
 
-  logger.debug(
-    { sessionId: session.id, historyLength: priorMessages.length },
-    'Loaded conversation history',
+  // Resolve tools for this agent's profile
+  const { definitions: toolDefs } = getToolsForProfile(profile);
+
+  // Estimate prompt size for debugging (chars ≈ tokens * 4)
+  const historyChars = priorMessages.reduce((s, m) => s + m.content.length, 0);
+  logger.info(
+    {
+      sessionId: session.id,
+      historyLength: priorMessages.length,
+      historyChars,
+      systemPromptChars: systemPrompt.length,
+      toolCount: toolDefs.length,
+      userMessageChars: userMessage.length,
+    },
+    'Prompt context loaded',
   );
 
   try {
-    // Resolve tools for this agent's profile
-    const { definitions: toolDefs } = getToolsForProfile(agent.config.profile);
 
     let result: { responseText: string; turns: number; usage: TokenUsage };
 
@@ -456,10 +548,13 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
     } else {
       // Tool-use agentic loop
       const toolContext: ToolContext = {
-        agentId: agent.config.id,
+        agentId: effectiveAgentId,
         channelId,
         userId,
         threadTs,
+        clientScope: clientScope
+          ? { clientCode: clientScope.clientCode }
+          : undefined,
       };
 
       result = await runWithTools(
@@ -487,13 +582,19 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
       total_turns: session.total_turns + result.turns,
     });
 
-    // Jasmin: generate real session summary + realtime learning (fire-and-forget)
-    if (agent.config.id === 'jasmin') {
+    // Session summary + realtime learning (fire-and-forget)
+    if (agent.config.id === 'jasmin' || clientScope) {
       generateSessionSummary(session.id).catch((err) =>
         logger.warn({ err }, 'Session summary generation failed'),
       );
+
+      const learnAgentId = clientScope
+        ? `ada_client_${clientScope.clientCode}`
+        : 'jasmin';
+      const learnClientCode = clientScope?.clientCode;
+
       import('../learning/realtime-learning.js').then(({ detectAndLearn }) =>
-        detectAndLearn(userMessage, result.responseText),
+        detectAndLearn(userMessage, result.responseText, learnAgentId, learnClientCode),
       ).catch((err) =>
         logger.warn({ err }, 'Realtime learning failed'),
       );
@@ -501,7 +602,7 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
 
     logger.info(
       {
-        agentId: agent.config.id,
+        agentId: effectiveAgentId,
         sessionId: session.id,
         responseLength: result.responseText.length,
         historyLength: priorMessages.length,
@@ -521,7 +622,7 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
     };
   } catch (err) {
     logger.error(
-      { err, agentId: agent.config.id, sessionId: session.id },
+      { err, agentId: effectiveAgentId, sessionId: session.id },
       `Agent ${agentLabel} run failed`,
     );
     throw err;

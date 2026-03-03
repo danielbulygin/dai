@@ -84,8 +84,10 @@ const MAX_CONFIDENCE = 0.95;
 async function extractAndSave(
   userMessage: string,
   assistantResponse: string,
+  agentId: string,
+  clientCode?: string,
 ): Promise<void> {
-  const log = logger.child({ module: "realtime-learning" });
+  const log = logger.child({ module: "realtime-learning", agentId });
 
   try {
     const response = await getClient().messages.create({
@@ -116,10 +118,10 @@ async function extractAndSave(
     for (const pref of preferences) {
       const category = `preference_${pref.category}`;
       const existing = await findDuplicateLearning(
-        "jasmin",
+        agentId,
         category,
         pref.content,
-        null,
+        clientCode ?? null,
       );
 
       if (existing) {
@@ -134,10 +136,11 @@ async function extractAndSave(
         );
       } else {
         await addLearning({
-          agent_id: "jasmin",
+          agent_id: agentId,
           category,
           content: pref.content,
           confidence: pref.confidence,
+          client_code: clientCode ?? null,
         });
         log.info(
           { category, content: pref.content },
@@ -157,7 +160,9 @@ async function extractAndSave(
 export async function detectAndLearn(
   userMessage: string,
   assistantResponse: string,
+  agentId = 'jasmin',
+  clientCode?: string,
 ): Promise<void> {
   if (!hasPreferenceSignal(userMessage)) return;
-  await extractAndSave(userMessage, assistantResponse);
+  await extractAndSave(userMessage, assistantResponse, agentId, clientCode);
 }

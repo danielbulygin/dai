@@ -12,7 +12,9 @@ import type { WebClient } from '@slack/web-api';
 import { env } from '../env.js';
 import { logger } from '../utils/logger.js';
 import { runAgent } from '../agents/runner.js';
+import type { RunOptions } from '../agents/runner.js';
 import { getAgent } from '../agents/registry.js';
+import { getClientAgentByChannel } from '../client-agents/config.js';
 import { agentQueue } from '../orchestrator/queue.js';
 import { createStreamResponder } from './stream-responder.js';
 import { registerReactionListener } from './listeners/reactions.js';
@@ -177,15 +179,31 @@ async function handleDedicatedBotMessage(opts: {
 }): Promise<void> {
   const { client, agentId, text, userId, channel, messageTs, threadTs, source } = opts;
 
+  // Check if this is a client-scoped channel (only for Ada bot)
+  let clientScope: RunOptions['clientScope'] | undefined;
+  if (agentId === 'ada') {
+    const clientConfig = await getClientAgentByChannel(channel);
+    if (clientConfig) {
+      clientScope = {
+        clientCode: clientConfig.clientCode,
+        displayName: clientConfig.displayName,
+      };
+    }
+  }
+
   const agent = getAgent(agentId);
   if (!agent) {
     logger.error({ agentId }, 'Dedicated bot agent not found in registry');
     return;
   }
 
+  const displayName = clientScope
+    ? `Ada (${clientScope.displayName})`
+    : agent.config.display_name;
+
   logger.info(
-    { channel, user: userId, agentId, source, text },
-    `${agent.config.display_name} ${source} received`,
+    { channel, user: userId, agentId, source, text, clientScope: clientScope?.clientCode },
+    `${displayName} ${source} received`,
   );
 
   const responder = createStreamResponder({
@@ -193,7 +211,7 @@ async function handleDedicatedBotMessage(opts: {
     channel,
     threadTs: threadTs ?? messageTs,
     userMessageTs: messageTs,
-    agentName: agent.config.display_name,
+    agentName: displayName,
   });
 
   try {
@@ -205,13 +223,14 @@ async function handleDedicatedBotMessage(opts: {
         channelId: channel,
         threadTs: threadTs ?? messageTs,
         onText: responder.onText,
+        clientScope,
       }),
     );
 
     await responder.finalize(result.response, result.usage);
     trackThread(agentId, threadTs ?? messageTs);
   } catch (err) {
-    logger.error({ err, channel, user: userId, agentId }, `${agent.config.display_name} ${source} agent run failed`);
+    logger.error({ err, channel, user: userId, agentId }, `${displayName} ${source} agent run failed`);
     await responder.onError(err);
   }
 }

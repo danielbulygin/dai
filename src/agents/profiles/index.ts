@@ -20,6 +20,16 @@ export const toolProfiles = {
     'correct_methodology', 'delete_methodology',
     'query_tasks', 'create_task', 'update_task', 'add_task_comment', 'search_notion',
   ],
+  client_media_buyer: [
+    'recall', 'remember', 'search_memories',
+    'get_client_targets', 'get_client_performance',
+    'get_campaign_summary', 'get_campaign_performance',
+    'get_adset_summary', 'get_adset_performance',
+    'get_ad_summary', 'get_ad_performance', 'get_breakdowns',
+    'get_creative_details', 'get_alerts', 'get_learnings',
+    'search_methodology_safe',
+    'reply_in_thread',
+  ],
 } as const;
 
 export type ToolProfile = keyof typeof toolProfiles;

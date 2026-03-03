@@ -1,6 +1,6 @@
 import { getDaiSupabase } from "../integrations/dai-supabase.js";
 import { getObservations } from "./observations.js";
-import { getTopLearnings } from "./learnings.js";
+import { getTopLearnings, getLearnings } from "./learnings.js";
 import { getSession } from "./sessions.js";
 import { getFeedbackForSession } from "./feedback.js";
 import type { Session } from "./sessions.js";
@@ -128,6 +128,68 @@ export async function recall(query: string, agentId?: string, clientCode?: strin
   results.sort((a, b) => b.rank - a.rank);
 
   return results;
+}
+
+/**
+ * Quick context for client-scoped agents (e.g. ada_client_ninepine).
+ *
+ * Two-tier learnings:
+ * 1. Client agent's own top learnings (ada_client_{code})
+ * 2. Ada's learnings for this client (agent_id='ada', client_code=clientCode)
+ * 3. Ada's global learnings (agent_id='ada', client_code IS NULL)
+ *
+ * Merged, deduped, top 15.
+ */
+export async function getClientQuickContext(
+  clientAgentId: string,
+  clientCode: string,
+  userId: string,
+): Promise<QuickContext> {
+  const supabase = getDaiSupabase();
+
+  // Last session summary for this client agent
+  const { data: lastSession } = await supabase
+    .from("sessions")
+    .select("summary")
+    .eq("agent_id", clientAgentId)
+    .not("summary", "is", null)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  // Tier 1: Client agent's own top learnings
+  const clientLearnings = await getTopLearnings(clientAgentId, 10);
+
+  // Tier 2: Ada's learnings for this specific client
+  const adaClientLearnings = await getLearnings('ada', undefined, 5, clientCode);
+
+  // Tier 3: Ada's global learnings (no client_code)
+  const adaGlobalLearnings = await getTopLearnings('ada', 10);
+  const adaGlobalFiltered = adaGlobalLearnings.filter((l) => !l.client_code);
+
+  // Merge and dedup by content (prefer higher score)
+  const seen = new Set<string>();
+  const merged: Learning[] = [];
+
+  for (const l of [...clientLearnings, ...adaClientLearnings, ...adaGlobalFiltered]) {
+    const key = l.content.toLowerCase().trim();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(l);
+  }
+
+  // Sort by score descending, take top 15
+  merged.sort((a, b) => {
+    const scoreA = a.confidence * (a.applied_count + 1);
+    const scoreB = b.confidence * (b.applied_count + 1);
+    return scoreB - scoreA;
+  });
+
+  return {
+    lastSessionSummary: (lastSession as { summary: string } | null)?.summary ?? null,
+    topLearnings: merged.slice(0, 15),
+    userLearnings: [],
+  };
 }
 
 /**

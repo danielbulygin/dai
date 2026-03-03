@@ -12,6 +12,7 @@ import * as clientConfigTools from './tools/client-config-tools.js';
 import * as methodologyTools from './tools/methodology-tools.js';
 import * as googleTools from './tools/google-tools.js';
 import * as browserTools from './tools/browser-tools.js';
+import * as methodologySanitizer from '../client-agents/methodology-sanitizer.js';
 import { logger } from '../utils/logger.js';
 
 // ---------------------------------------------------------------------------
@@ -23,6 +24,9 @@ export interface ToolContext {
   channelId: string;
   userId: string;
   threadTs?: string;
+  clientScope?: {
+    clientCode: string;
+  };
 }
 
 export interface RegisteredTool {
@@ -1421,6 +1425,49 @@ register({
   },
 });
 
+register({
+  definition: {
+    name: 'search_methodology_safe',
+    description:
+      'Search media buying methodology knowledge. Returns global best practices and account-specific insights. Results show title, type, category, and confidence — no raw evidence.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Free-text search query (e.g. "frequency fatigue", "hook rate creative")',
+        },
+        type: {
+          type: 'string',
+          enum: ['rule', 'insight', 'decision', 'creative_pattern', 'methodology'],
+          description: 'Filter by knowledge type',
+        },
+        category: {
+          type: 'string',
+          description: 'Filter by subcategory (e.g. "what_works", "quirk", "kill", "scale")',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum results (default 20)',
+        },
+      },
+    },
+  },
+  async execute(input, context) {
+    const clientCode = context.clientScope?.clientCode;
+    if (!clientCode) {
+      return JSON.stringify({ error: 'search_methodology_safe requires client scope' });
+    }
+    return await methodologySanitizer.searchMethodologySafe({
+      query: input.query as string | undefined,
+      type: input.type as string | undefined,
+      category: input.category as string | undefined,
+      limit: input.limit as number | undefined,
+      clientCode,
+    });
+  },
+});
+
 // ---------------------------------------------------------------------------
 // Knowledge correction tools (learnings + methodology_knowledge)
 // ---------------------------------------------------------------------------
@@ -2215,6 +2262,15 @@ export function getToolsForProfile(
 /**
  * Execute a tool by name.
  */
+// BMAD tools that accept clientCode — enforced when clientScope is set
+const SCOPED_BMAD_TOOLS = new Set([
+  'get_client_targets', 'get_client_performance',
+  'get_campaign_summary', 'get_campaign_performance',
+  'get_adset_summary', 'get_adset_performance',
+  'get_ad_summary', 'get_ad_performance', 'get_breakdowns',
+  'get_creative_details', 'get_alerts', 'get_learnings',
+]);
+
 export async function executeTool(
   name: string,
   input: Record<string, unknown>,
@@ -2224,6 +2280,21 @@ export async function executeTool(
   if (!tool) {
     logger.warn({ toolName: name }, 'Unknown tool requested');
     return { result: `Unknown tool: ${name}`, isError: true };
+  }
+
+  // Belt-and-suspenders: override clientCode for BMAD tools when client-scoped
+  if (context.clientScope && SCOPED_BMAD_TOOLS.has(name)) {
+    input.clientCode = context.clientScope.clientCode;
+  }
+
+  // Override memory tools agentId when client-scoped
+  if (context.clientScope) {
+    if (name === 'remember') {
+      input.client_code = context.clientScope.clientCode;
+    }
+    if (name === 'recall') {
+      input.client_code = context.clientScope.clientCode;
+    }
   }
 
   try {
