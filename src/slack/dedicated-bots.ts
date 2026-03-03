@@ -20,6 +20,7 @@ import { createStreamResponder } from './stream-responder.js';
 import { registerReactionListener } from './listeners/reactions.js';
 import { registerInsightActions } from './listeners/insight-actions.js';
 import { registerEmailActions } from './listeners/email-actions.js';
+import { registerTriageActions } from './listeners/triage-actions.js';
 import { slackApp } from './app.js';
 import { transcribeAudioFiles } from './voice.js';
 
@@ -41,7 +42,7 @@ function getDedicatedBotConfigs(): DedicatedBotConfig[] {
       agentId: 'jasmin',
       botToken: env.JASMIN_BOT_TOKEN,
       appToken: env.JASMIN_APP_TOKEN,
-      extraListeners: [registerEmailActions],
+      extraListeners: [registerEmailActions, registerTriageActions],
     },
     {
       agentId: 'ada',

@@ -580,6 +580,32 @@ async function gatherUnreadDMs(): Promise<string | null> {
   }
 }
 
+async function gatherTriageQueue(): Promise<string | null> {
+  try {
+    const { getUnresolvedItems } = await import('../triage/queue.js');
+    const items = await getUnresolvedItems();
+
+    if (items.length === 0) return null;
+
+    const parts: string[] = [`*Triage Queue* (${items.length} unresolved)`];
+
+    for (const item of items.slice(0, 15)) {
+      const emoji = item.source === 'email' ? ':email:' : ':speech_balloon:';
+      const status = item.status === 'snoozed' ? ' [snoozed]' : '';
+      parts.push(`- ${emoji} [${item.priority}] ${item.title}${status} — ${item.reason ?? ''}`);
+    }
+
+    if (items.length > 15) {
+      parts.push(`_(+ ${items.length - 15} more)_`);
+    }
+
+    return parts.join('\n');
+  } catch (err) {
+    logger.debug({ err }, 'Triage queue unavailable for briefing');
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Morning briefing
 // ---------------------------------------------------------------------------
@@ -593,7 +619,7 @@ export async function generateMorningBriefing(): Promise<string> {
   const [
     insights, tasks, meetings,
     calendar, emails, dms, unreadDms,
-    projectProgress, overdueTasks,
+    projectProgress, overdueTasks, triageQueue,
   ] = await Promise.all([
     gatherChannelInsights(),
     gatherNotionTasks(['In Progress', 'To Do'], 'Daniel'),
@@ -604,10 +630,12 @@ export async function generateMorningBriefing(): Promise<string> {
     gatherUnreadDMs(),
     gatherProjectProgress(),
     gatherOverdueTasks(),
+    gatherTriageQueue(),
   ]);
 
   if (calendar) dataSections.push(calendar);
   if (overdueTasks) dataSections.push(overdueTasks);
+  if (triageQueue) dataSections.push(triageQueue);
   if (unreadDms) dataSections.push(unreadDms);
   if (emails) dataSections.push(emails);
   if (dms) dataSections.push(dms);
