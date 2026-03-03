@@ -16,6 +16,7 @@
  *   pnpm extract:kousha -- --include-internal      # Also process internal Ninepine meetings
  *   pnpm extract:kousha -- --concurrency 3        # Parallel API calls (default 2)
  *   pnpm extract:kousha -- --limit 1              # Process at most N meetings
+ *   pnpm extract:kousha -- --load                 # Load deduped.json into methodology_knowledge
  */
 
 import Anthropic from "@anthropic-ai/sdk";
@@ -88,6 +89,7 @@ const dryRun = args.includes("--dry-run");
 const resume = args.includes("--resume");
 const synthesizeOnly = args.includes("--synthesize-only");
 const includeInternal = args.includes("--include-internal");
+const loadFlag = args.includes("--load");
 
 function getArgValue(flag: string, fallback: number): number {
   const idx = args.indexOf(flag);
@@ -233,46 +235,43 @@ interface Progress {
 // Phase 1: Fetch & Classify
 // ---------------------------------------------------------------------------
 
-async function fetchKoushaMeetings(): Promise<MeetingRow[]> {
-  // Fetch all meetings organized by Daniel that have Kousha as a speaker
-  const { data, error } = await supabase
-    .from("meetings")
-    .select(
-      "id, title, date, duration, speakers, organizer_email, short_summary, full_transcript",
-    )
-    .eq("organizer_email", DANIEL_ORGANIZER_EMAIL)
-    .order("date", { ascending: true });
+async function fetchAllMeetings(): Promise<MeetingRow[]> {
+  // Supabase returns max 1000 rows by default — paginate to get all
+  const all: MeetingRow[] = [];
+  const pageSize = 1000;
+  let from = 0;
 
-  if (error) {
-    console.error("Failed to fetch meetings:", error.message);
-    process.exit(1);
+  while (true) {
+    const { data, error } = await supabase
+      .from("meetings")
+      .select(
+        "id, title, date, duration, speakers, organizer_email, short_summary, full_transcript",
+      )
+      .order("date", { ascending: true })
+      .range(from, from + pageSize - 1);
+
+    if (error) {
+      console.error("Failed to fetch meetings:", error.message);
+      process.exit(1);
+    }
+
+    if (!data || data.length === 0) break;
+    all.push(...(data as MeetingRow[]));
+    if (data.length < pageSize) break;
+    from += pageSize;
   }
 
-  // Filter to meetings where Kousha is a speaker
-  const koushaMeetings = (data ?? []).filter((m: MeetingRow) =>
-    m.speakers?.some((s) => /kousha/i.test(s)),
-  );
+  return all;
+}
 
-  return koushaMeetings;
+async function fetchKoushaMeetings(): Promise<MeetingRow[]> {
+  const all = await fetchAllMeetings();
+  return all.filter((m) => m.speakers?.some((s) => /kousha/i.test(s)));
 }
 
 async function fetchInternalNinepineMeetings(): Promise<MeetingRow[]> {
-  // Internal Ninepine meetings (Daniel's team discussing Ninepine, Kousha not present)
-  const { data, error } = await supabase
-    .from("meetings")
-    .select(
-      "id, title, date, duration, speakers, organizer_email, short_summary, full_transcript",
-    )
-    .eq("organizer_email", DANIEL_ORGANIZER_EMAIL)
-    .order("date", { ascending: true });
-
-  if (error) {
-    console.error("Failed to fetch internal meetings:", error.message);
-    process.exit(1);
-  }
-
-  // Filter: title mentions Ninepine, but Kousha is NOT a speaker
-  return (data ?? []).filter((m: MeetingRow) => {
+  const all = await fetchAllMeetings();
+  return all.filter((m) => {
     const hasNinepineTitle = /ninepine/i.test(m.title ?? "");
     const hasKousha = m.speakers?.some((s) => /kousha/i.test(s));
     return hasNinepineTitle && !hasKousha;
@@ -860,6 +859,202 @@ function estimateCost(meetings: ClassifiedMeeting[]): {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 5: Load to Supabase (--load)
+// ---------------------------------------------------------------------------
+
+interface MethodologyRow {
+  type: string;
+  title: string;
+  body: Record<string, unknown>;
+  account_code: string | null;
+  category: string | null;
+  confidence: string | null;
+  source_meeting: string;
+  source_date: string;
+  extraction_run: string;
+}
+
+function mapDedupedToRows(data: DedupedData, run: string): MethodologyRow[] {
+  const rows: MethodologyRow[] = [];
+
+  for (const item of data.evaluation_criteria) {
+    rows.push({
+      type: "insight",
+      title: item.criterion,
+      body: { details: item.details },
+      account_code: "ninepine",
+      category: "evaluation",
+      confidence: "high",
+      source_meeting: item.source_meeting,
+      source_date: item.source_date,
+      extraction_run: run,
+    });
+  }
+
+  for (const item of data.brand_philosophy) {
+    rows.push({
+      type: "insight",
+      title: item.principle,
+      body: { details: item.details },
+      account_code: "ninepine",
+      category: "brand",
+      confidence: "high",
+      source_meeting: item.source_meeting,
+      source_date: item.source_date,
+      extraction_run: run,
+    });
+  }
+
+  for (const item of data.business_context) {
+    rows.push({
+      type: "insight",
+      title: item.fact,
+      body: { details: item.details },
+      account_code: "ninepine",
+      category: "business_context",
+      confidence: "high",
+      source_meeting: item.source_meeting,
+      source_date: item.source_date,
+      extraction_run: run,
+    });
+  }
+
+  for (const item of data.growth_strategy) {
+    rows.push({
+      type: "insight",
+      title: item.strategy,
+      body: { details: item.details },
+      account_code: "ninepine",
+      category: "growth_strategy",
+      confidence: "high",
+      source_meeting: item.source_meeting,
+      source_date: item.source_date,
+      extraction_run: run,
+    });
+  }
+
+  for (const item of data.agency_expectations) {
+    rows.push({
+      type: "insight",
+      title: item.expectation,
+      body: { details: item.details },
+      account_code: "ninepine",
+      category: "agency_expectations",
+      confidence: "high",
+      source_meeting: item.source_meeting,
+      source_date: item.source_date,
+      extraction_run: run,
+    });
+  }
+
+  for (const item of data.creative_preferences) {
+    rows.push({
+      type: "creative_pattern",
+      title: item.preference,
+      body: { details: item.details },
+      account_code: "ninepine",
+      category: null,
+      confidence: "high",
+      source_meeting: item.source_meeting,
+      source_date: item.source_date,
+      extraction_run: run,
+    });
+  }
+
+  for (const item of data.decision_examples) {
+    rows.push({
+      type: "decision",
+      title: item.decision,
+      body: { reasoning: item.reasoning, outcome: item.outcome },
+      account_code: "ninepine",
+      category: null,
+      confidence: null,
+      source_meeting: item.source_meeting,
+      source_date: item.source_date,
+      extraction_run: run,
+    });
+  }
+
+  for (const item of data.direct_quotes) {
+    rows.push({
+      type: "insight",
+      title: item.quote,
+      body: { topic: item.topic, context: item.context },
+      account_code: "ninepine",
+      category: "direct_quote",
+      confidence: null,
+      source_meeting: item.source_meeting,
+      source_date: item.source_date,
+      extraction_run: run,
+    });
+  }
+
+  return rows;
+}
+
+async function loadToSupabase(): Promise<void> {
+  console.log("=== Loading Kousha methodology to Supabase ===\n");
+
+  if (!existsSync(DEDUPED_FILE)) {
+    console.error(`No deduped.json found at ${DEDUPED_FILE}. Run extraction first.`);
+    process.exit(1);
+  }
+
+  const data = JSON.parse(readFileSync(DEDUPED_FILE, "utf-8")) as DedupedData;
+  const today = new Date().toISOString().slice(0, 10);
+  const extractionRun = `kousha-${today}`;
+
+  const rows = mapDedupedToRows(data, extractionRun);
+  console.log(`Mapped ${rows.length} rows from deduped.json (extraction_run: ${extractionRun})`);
+
+  // Delete only kousha-* extraction_run rows (preserve existing 114+ rows from phase3)
+  console.log("Clearing previous kousha-* rows...");
+  const { error: deleteError } = await supabase
+    .from("methodology_knowledge")
+    .delete()
+    .like("extraction_run", "kousha-%");
+
+  if (deleteError) {
+    console.error(`Failed to delete existing kousha rows: ${deleteError.message}`);
+    process.exit(1);
+  }
+  console.log("Cleared.");
+
+  // Batch insert in chunks of 100
+  console.log("Inserting rows...");
+  const BATCH_SIZE = 100;
+  let inserted = 0;
+
+  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+    const batch = rows.slice(i, i + BATCH_SIZE);
+    const { error: insertError } = await supabase
+      .from("methodology_knowledge")
+      .insert(batch);
+
+    if (insertError) {
+      console.error(`Batch insert failed at offset ${i}: ${insertError.message}`);
+      process.exit(1);
+    }
+    inserted += batch.length;
+    process.stdout.write(`  Inserted ${inserted}/${rows.length}\r`);
+  }
+  console.log(`\nInserted ${inserted}/${rows.length} rows into methodology_knowledge.`);
+
+  // Print category breakdown
+  const byType = new Map<string, number>();
+  for (const r of rows) {
+    const key = r.category ? `${r.type}/${r.category}` : r.type;
+    byType.set(key, (byType.get(key) ?? 0) + 1);
+  }
+  console.log("\nBreakdown:");
+  for (const [key, count] of [...byType.entries()].sort()) {
+    console.log(`  ${key}: ${count}`);
+  }
+
+  console.log("\n=== Done! ===");
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -868,6 +1063,12 @@ async function main(): Promise<void> {
 
   // Ensure output directories
   mkdirSync(RAW_DIR, { recursive: true });
+
+  // Handle --load
+  if (loadFlag) {
+    await loadToSupabase();
+    return;
+  }
 
   // Handle --synthesize-only
   if (synthesizeOnly) {

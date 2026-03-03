@@ -5,8 +5,9 @@
 export function buildClientOverlay(config: {
   clientCode: string;
   displayName: string;
+  clientContext?: string;
 }): string {
-  return `## Client Context
+  let overlay = `## Client Context
 
 You are speaking directly with the ${config.displayName} team. You are their dedicated media buying analyst from Ads on Tap.
 
@@ -18,4 +19,10 @@ You are speaking directly with the ${config.displayName} team. You are their ded
 - Present methodology knowledge as general best practice, not "learned from another account."
 - If asked about other clients or data you shouldn't share, politely say you can only discuss their account.
 - Be professional, transparent, and data-driven. You represent Ads on Tap.`;
+
+  if (config.clientContext) {
+    overlay += `\n\n${config.clientContext}`;
+  }
+
+  return overlay;
 }

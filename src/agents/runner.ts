@@ -515,9 +515,18 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
 
   // Client agent overlay
   if (clientScope) {
+    let clientContext: string | undefined;
+    try {
+      const { readFileSync } = await import('node:fs');
+      const { join } = await import('node:path');
+      const contextPath = join(process.cwd(), 'agents', 'ada', 'clients', `${clientScope.clientCode}.md`);
+      clientContext = readFileSync(contextPath, 'utf-8');
+    } catch {
+      // No client context file — that's fine
+    }
     extras.push({
       name: 'client-context',
-      content: buildClientOverlay(clientScope),
+      content: buildClientOverlay({ ...clientScope, clientContext }),
     });
   }
 
