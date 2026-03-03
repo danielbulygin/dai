@@ -20,6 +20,34 @@ function getKanbanDbId(): string {
 }
 
 // ---------------------------------------------------------------------------
+// Data source ID resolution
+// ---------------------------------------------------------------------------
+// Notion SDK v5.9.0 (API 2025-09-03) moved properties and query from
+// `databases` to `dataSources`. The database ID and data source ID are
+// different — we must resolve the data source ID from the database first.
+
+let cachedDataSourceId: string | null = null;
+
+async function getDataSourceId(): Promise<string> {
+  if (cachedDataSourceId) return cachedDataSourceId;
+
+  const dbId = getKanbanDbId();
+  const notion = getNotion();
+  const db = await notion.databases.retrieve({ database_id: dbId });
+
+  const dataSources = 'data_sources' in db ? (db as { data_sources: Array<{ id: string }> }).data_sources : [];
+  if (dataSources.length === 0) {
+    throw new Error(
+      `Database ${dbId} has no data sources. Ensure the Notion integration has access to this database.`,
+    );
+  }
+
+  cachedDataSourceId = dataSources[0].id;
+  logger.info({ databaseId: dbId, dataSourceId: cachedDataSourceId }, 'Resolved Notion data source ID');
+  return cachedDataSourceId;
+}
+
+// ---------------------------------------------------------------------------
 // Schema auto-discovery & provisioning
 // ---------------------------------------------------------------------------
 
@@ -102,7 +130,7 @@ let schemaMap: Record<string, string> | null = null;
 let titlePropName: string | null = null;
 
 /**
- * Fetch the database schema, build a map from logical names to actual property names,
+ * Fetch the data source schema, build a map from logical names to actual property names,
  * and auto-create any missing properties.
  */
 async function ensureSchema(): Promise<{ titleProp: string; propMap: Record<string, string> }> {
@@ -110,16 +138,17 @@ async function ensureSchema(): Promise<{ titleProp: string; propMap: Record<stri
     return { titleProp: titlePropName, propMap: schemaMap };
   }
 
-  const dbId = getKanbanDbId();
+  const dsId = await getDataSourceId();
   const notion = getNotion();
 
-  const db = await notion.databases.retrieve({ database_id: dbId });
-  const existingProps = 'properties' in db ? db.properties : {};
+  // Use dataSources.retrieve — this is where properties live in SDK v5.9.0
+  const ds = await notion.dataSources.retrieve({ data_source_id: dsId });
+  const existingProps = 'properties' in ds ? (ds as { properties: Record<string, { type: string }> }).properties : {};
 
   // Find the title property (whatever it's called)
   let foundTitle = 'Name';
   for (const [name, prop] of Object.entries(existingProps)) {
-    if ((prop as { type: string }).type === 'title') {
+    if (prop.type === 'title') {
       foundTitle = name;
       break;
     }
@@ -128,7 +157,7 @@ async function ensureSchema(): Promise<{ titleProp: string; propMap: Record<stri
   // Build map of existing properties by type
   const existingByName = new Map<string, string>();
   for (const [name, prop] of Object.entries(existingProps)) {
-    existingByName.set(name, (prop as { type: string }).type);
+    existingByName.set(name, prop.type);
   }
 
   // Check each required property and create if missing
@@ -155,24 +184,23 @@ async function ensureSchema(): Promise<{ titleProp: string; propMap: Record<stri
     map['Sub-items'] = 'Sub-items';
   }
 
-  // Create missing properties in one API call
+  // Create missing properties via dataSources.update
   if (Object.keys(propsToCreate).length > 0) {
     logger.info(
       { properties: Object.keys(propsToCreate) },
-      'Auto-creating missing Notion database properties',
+      'Auto-creating missing Notion data source properties',
     );
     try {
-      await notion.databases.update({
-        database_id: dbId,
-        properties: propsToCreate as Parameters<typeof notion.databases.update>[0]['properties'],
+      await notion.dataSources.update({
+        data_source_id: dsId,
+        properties: propsToCreate as Parameters<typeof notion.dataSources.update>[0]['properties'],
       });
 
       // Re-fetch schema after creation to confirm properties exist
-      const dbAfter = await notion.databases.retrieve({ database_id: dbId });
-      const propsAfter = 'properties' in dbAfter ? dbAfter.properties : {};
+      const dsAfter = await notion.dataSources.retrieve({ data_source_id: dsId });
+      const propsAfter = 'properties' in dsAfter ? (dsAfter as { properties: Record<string, { type: string }> }).properties : {};
       for (const [name, prop] of Object.entries(propsAfter)) {
-        const propType = (prop as { type: string }).type;
-        if (propType !== 'title') {
+        if (prop.type !== 'title') {
           map[name] = name;
         }
       }
@@ -181,16 +209,15 @@ async function ensureSchema(): Promise<{ titleProp: string; propMap: Record<stri
       // Return partial map for this call but don't cache — next call will retry
       return { titleProp: foundTitle, propMap: map };
     }
-  } else {
-    // All required properties exist — map was already populated above
   }
 
   // Create "Parent" relation property if missing (must be separate API call)
   if (!hasParent) {
+    const dbId = getKanbanDbId();
     logger.info('Auto-creating Parent relation property');
     try {
-      await notion.databases.update({
-        database_id: dbId,
+      await notion.dataSources.update({
+        data_source_id: dsId,
         properties: {
           Parent: {
             relation: {
@@ -199,7 +226,7 @@ async function ensureSchema(): Promise<{ titleProp: string; propMap: Record<stri
               dual_property: { synced_property_name: 'Sub-items' },
             },
           },
-        } as Parameters<typeof notion.databases.update>[0]['properties'],
+        } as Parameters<typeof notion.dataSources.update>[0]['properties'],
       });
       map['Parent'] = 'Parent';
       map['Sub-items'] = 'Sub-items';
@@ -227,6 +254,7 @@ async function ensureSchema(): Promise<{ titleProp: string; propMap: Record<stri
 export function resetSchemaCache(): void {
   schemaMap = null;
   titlePropName = null;
+  cachedDataSourceId = null;
 }
 
 // ---------------------------------------------------------------------------
@@ -322,7 +350,7 @@ export async function queryTasks(params: {
 }): Promise<string> {
   try {
     const limit = params.limit ?? 20;
-    const dbId = getKanbanDbId();
+    const dsId = await getDataSourceId();
     const notion = getNotion();
     const { titleProp } = await ensureSchema();
 
@@ -357,7 +385,7 @@ export async function queryTasks(params: {
     }
 
     const response = await notion.dataSources.query({
-      data_source_id: dbId,
+      data_source_id: dsId,
       page_size: limit,
       ...(filter ? { filter } : {}),
     });
@@ -387,7 +415,7 @@ export async function createTask(params: {
   parentId?: string;
 }): Promise<string> {
   try {
-    const dbId = getKanbanDbId();
+    const dsId = await getDataSourceId();
     const notion = getNotion();
     const { titleProp, propMap } = await ensureSchema();
 
@@ -462,7 +490,7 @@ export async function createTask(params: {
     }
 
     const response = await notion.pages.create({
-      parent: { database_id: dbId },
+      parent: { data_source_id: dsId },
       properties: properties as Parameters<typeof notion.pages.create>[0]['properties'],
       ...(children.length > 0 ? { children } : {}),
     });
@@ -568,7 +596,7 @@ export async function getProjectSummary(projectPageId: string): Promise<{
   overdueCount: number;
   nextDueDate: string | null;
 }> {
-  const dbId = getKanbanDbId();
+  const dsId = await getDataSourceId();
   const notion = getNotion();
   const { titleProp } = await ensureSchema();
 
@@ -578,7 +606,7 @@ export async function getProjectSummary(projectPageId: string): Promise<{
 
   // Fetch sub-items
   const response = await notion.dataSources.query({
-    data_source_id: dbId,
+    data_source_id: dsId,
     page_size: 100,
     filter: { property: 'Parent', relation: { contains: projectPageId } },
   });
@@ -621,7 +649,7 @@ export async function getOverdueTasks(assignee?: string): Promise<Array<{
   type: string;
   url: string;
 }>> {
-  const dbId = getKanbanDbId();
+  const dsId = await getDataSourceId();
   const notion = getNotion();
   const { titleProp } = await ensureSchema();
 
@@ -637,7 +665,7 @@ export async function getOverdueTasks(assignee?: string): Promise<Array<{
   }
 
   const response = await notion.dataSources.query({
-    data_source_id: dbId,
+    data_source_id: dsId,
     page_size: 50,
     filter: { and: filters },
   });
