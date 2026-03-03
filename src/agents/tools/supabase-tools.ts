@@ -83,7 +83,8 @@ export async function getClientPerformance(params: {
       )
       .eq("client_id", client.id)
       .gte("date", since)
-      .order("date", { ascending: false });
+      .order("date", { ascending: false })
+      .limit(90);
 
     if (error) {
       logger.error({ error }, "Failed to get client performance");
@@ -120,12 +121,14 @@ export async function getAlerts(params: {
     let query = supabase
       .from("alerts")
       .select(
-        "id, client_code, title, type, severity, metric, expected_value, actual_value, investigation_results, root_cause, recommended_actions, created_at",
+        "id, client_id, title, alert_type, severity, metric, expected_value, actual_value, investigation_results, root_cause, recommended_actions, created_at",
       )
       .gte("created_at", since);
 
     if (params.clientCode) {
-      query = query.eq("client_code", params.clientCode);
+      const resolved = await resolveClientId(params.clientCode);
+      if ("error" in resolved) return JSON.stringify(resolved);
+      query = query.eq("client_id", resolved.id);
     }
     if (params.severity) {
       query = query.eq("severity", params.severity);
@@ -133,7 +136,7 @@ export async function getAlerts(params: {
 
     const { data, error } = await query.order("created_at", {
       ascending: false,
-    });
+    }).limit(50);
 
     if (error) {
       logger.error({ error }, "Failed to get alerts");
@@ -166,11 +169,13 @@ export async function getLearnings(params: {
     let query = supabase
       .from("learnings")
       .select(
-        "id, client_code, title, content, category, subcategory, confidence, evidence_type, created_at",
+        "id, client_id, title, insight, category, subcategory, confidence, evidence_type, created_at",
       );
 
     if (params.clientCode) {
-      query = query.eq("client_code", params.clientCode);
+      const resolved = await resolveClientId(params.clientCode);
+      if ("error" in resolved) return JSON.stringify(resolved);
+      query = query.eq("client_id", resolved.id);
     }
     if (params.category) {
       query = query.eq("category", params.category);
@@ -228,7 +233,8 @@ export async function getCampaignPerformance(params: {
       )
       .eq("client_id", client.id)
       .gte("date", since)
-      .order("date", { ascending: false });
+      .order("date", { ascending: false })
+      .limit(500);
 
     if (error) {
       logger.error({ error }, "Failed to get campaign performance");
@@ -328,6 +334,121 @@ export async function getConcepts(params: {
 }
 
 // ---------------------------------------------------------------------------
+// Summary tools (server-side aggregation — 1 row per entity)
+// ---------------------------------------------------------------------------
+
+export async function getCampaignSummary(params: {
+  clientCode: string;
+  days?: number;
+}): Promise<string> {
+  try {
+    const days = params.days ?? 30;
+
+    logger.debug(
+      { clientCode: params.clientCode, days },
+      "Querying campaign summary (RPC)",
+    );
+    const supabase = getSupabase();
+
+    const { data, error } = await supabase.rpc("get_campaign_summary", {
+      p_client_code: params.clientCode,
+      p_days: days,
+    });
+
+    if (error) {
+      logger.error({ error }, "Failed to get campaign summary");
+      return JSON.stringify({ error: error.message });
+    }
+
+    logger.debug(
+      { clientCode: params.clientCode, rows: data?.length },
+      "Got campaign summary",
+    );
+    return JSON.stringify(data);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ error: msg }, "getCampaignSummary failed");
+    return JSON.stringify({ error: msg });
+  }
+}
+
+export async function getAdsetSummary(params: {
+  clientCode: string;
+  campaignId?: string;
+  days?: number;
+}): Promise<string> {
+  try {
+    const days = params.days ?? 30;
+
+    logger.debug(
+      { clientCode: params.clientCode, campaignId: params.campaignId, days },
+      "Querying adset summary (RPC)",
+    );
+    const supabase = getSupabase();
+
+    const { data, error } = await supabase.rpc("get_adset_summary", {
+      p_client_code: params.clientCode,
+      p_campaign_id: params.campaignId ?? null,
+      p_days: days,
+    });
+
+    if (error) {
+      logger.error({ error }, "Failed to get adset summary");
+      return JSON.stringify({ error: error.message });
+    }
+
+    logger.debug(
+      { clientCode: params.clientCode, rows: data?.length },
+      "Got adset summary",
+    );
+    return JSON.stringify(data);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ error: msg }, "getAdsetSummary failed");
+    return JSON.stringify({ error: msg });
+  }
+}
+
+export async function getAdSummary(params: {
+  clientCode: string;
+  campaignId?: string;
+  adsetId?: string;
+  days?: number;
+}): Promise<string> {
+  try {
+    const days = params.days ?? 30;
+
+    logger.debug(
+      { clientCode: params.clientCode, campaignId: params.campaignId, adsetId: params.adsetId, days },
+      "Querying ad summary (RPC)",
+    );
+    const supabase = getSupabase();
+
+    const { data, error } = await supabase.rpc("get_ad_summary", {
+      p_client_code: params.clientCode,
+      p_campaign_id: params.campaignId ?? null,
+      p_adset_id: params.adsetId ?? null,
+      p_days: days,
+    });
+
+    if (error) {
+      logger.error({ error }, "Failed to get ad summary");
+      return JSON.stringify({ error: error.message });
+    }
+
+    logger.debug(
+      { clientCode: params.clientCode, rows: data?.length },
+      "Got ad summary",
+    );
+    return JSON.stringify(data);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ error: msg }, "getAdSummary failed");
+    return JSON.stringify({ error: msg });
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Phase 1B: New granular tools
 // ---------------------------------------------------------------------------
 
@@ -361,7 +482,7 @@ export async function getAdsetPerformance(params: {
       query = query.eq("campaign_id", params.campaignId);
     }
 
-    const { data, error } = await query.order("date", { ascending: false });
+    const { data, error } = await query.order("date", { ascending: false }).limit(300);
 
     if (error) {
       logger.error({ error }, "Failed to get adset performance");
@@ -414,7 +535,7 @@ export async function getAdPerformance(params: {
       query = query.eq("adset_id", params.adsetId);
     }
 
-    const { data, error } = await query.order("date", { ascending: false });
+    const { data, error } = await query.order("date", { ascending: false }).limit(300);
 
     if (error) {
       logger.error({ error }, "Failed to get ad performance");
@@ -469,7 +590,7 @@ export async function getBreakdowns(params: {
       query = query.eq("entity_type", entityType);
     }
 
-    const { data, error } = await query.order("date", { ascending: false });
+    const { data, error } = await query.order("date", { ascending: false }).limit(300);
 
     if (error) {
       logger.error({ error }, "Failed to get breakdowns");
@@ -512,7 +633,8 @@ export async function getAccountChanges(params: {
       )
       .eq("client_id", resolved.id)
       .gte("event_time", since)
-      .order("event_time", { ascending: false });
+      .order("event_time", { ascending: false })
+      .limit(200);
 
     if (error) {
       logger.error({ error }, "Failed to get account changes");
@@ -566,7 +688,7 @@ export async function getCreativeDetails(params: {
 
     const { data, error } = await query.order("last_active_at", {
       ascending: false,
-    });
+    }).limit(50);
 
     if (error) {
       logger.error({ error }, "Failed to get creative details");

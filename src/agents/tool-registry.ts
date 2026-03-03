@@ -780,6 +780,109 @@ register({
 });
 
 // ---------------------------------------------------------------------------
+// Summary tools (server-side aggregation — 1 row per entity)
+// ---------------------------------------------------------------------------
+
+register({
+  definition: {
+    name: 'get_campaign_summary',
+    description:
+      'Get aggregated campaign-level summary (one row per campaign). Use FIRST to see all campaigns at a glance — includes totals, computed rates, and last-3-day recency metrics. For daily trends of a specific campaign, use get_campaign_performance after.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        clientCode: {
+          type: 'string',
+          description: 'Client code (e.g. "NP", "PL", "JVA")',
+        },
+        days: {
+          type: 'number',
+          description: 'Number of days to aggregate (default 30)',
+        },
+      },
+      required: ['clientCode'],
+    },
+  },
+  async execute(input) {
+    return await supabaseTools.getCampaignSummary({
+      clientCode: input.clientCode as string,
+      days: input.days as number | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'get_adset_summary',
+    description:
+      'Get aggregated ad set summary (one row per ad set). Pass campaignId to focus on a specific campaign\'s ad sets. For daily trends, use get_adset_performance with campaignId filter after.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        clientCode: {
+          type: 'string',
+          description: 'Client code (e.g. "NP", "PL", "JVA")',
+        },
+        campaignId: {
+          type: 'string',
+          description: 'Optional campaign ID to filter ad sets',
+        },
+        days: {
+          type: 'number',
+          description: 'Number of days to aggregate (default 30)',
+        },
+      },
+      required: ['clientCode'],
+    },
+  },
+  async execute(input) {
+    return await supabaseTools.getAdsetSummary({
+      clientCode: input.clientCode as string,
+      campaignId: input.campaignId as string | undefined,
+      days: input.days as number | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'get_ad_summary',
+    description:
+      'Get aggregated ad-level summary with creative metrics — hook rate, hold rate, conversion rate (impression-weighted). Always pass campaignId or adsetId to avoid huge result sets. For daily trends, use get_ad_performance with filters after.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        clientCode: {
+          type: 'string',
+          description: 'Client code (e.g. "NP", "PL", "JVA")',
+        },
+        campaignId: {
+          type: 'string',
+          description: 'Campaign ID to filter ads (required unless adsetId provided)',
+        },
+        adsetId: {
+          type: 'string',
+          description: 'Ad set ID to filter ads (required unless campaignId provided)',
+        },
+        days: {
+          type: 'number',
+          description: 'Number of days to aggregate (default 30)',
+        },
+      },
+      required: ['clientCode'],
+    },
+  },
+  async execute(input) {
+    return await supabaseTools.getAdSummary({
+      clientCode: input.clientCode as string,
+      campaignId: input.campaignId as string | undefined,
+      adsetId: input.adsetId as string | undefined,
+      days: input.days as number | undefined,
+    });
+  },
+});
+
+// ---------------------------------------------------------------------------
 // Client config tools (BMAD YAML files)
 // ---------------------------------------------------------------------------
 
@@ -944,21 +1047,29 @@ register({
   definition: {
     name: 'query_tasks',
     description:
-      'Query tasks from the Notion kanban board. Filter by status, assignee, and/or priority.',
+      'Query tasks from the Notion kanban board. Filter by status, assignee, priority, type, or parent project.',
     input_schema: {
       type: 'object' as const,
       properties: {
         status: {
           type: 'string',
-          description: 'Filter by task status: Backlog, To Do, In Progress, Review, Done',
+          description: 'Filter by task status: To Do, In Progress, Blocked, Done',
         },
         assignee: {
           type: 'string',
-          description: 'Filter by assignee name (e.g. Daniel, Jasmin, Otto, Franzi, Mikel)',
+          description: 'Filter by assignee name (e.g. Daniel, Jasmin, Ada, Otto, Coda, Rex, Sage)',
         },
         priority: {
           type: 'string',
-          description: 'Filter by priority: Critical, High, Medium, Low',
+          description: 'Filter by priority: Urgent, High, Medium, Low',
+        },
+        type: {
+          type: 'string',
+          description: 'Filter by type: Task, Project',
+        },
+        parentId: {
+          type: 'string',
+          description: 'Filter tasks by parent project page ID',
         },
         limit: {
           type: 'number',
@@ -972,6 +1083,8 @@ register({
       status: input.status as string | undefined,
       assignee: input.assignee as string | undefined,
       priority: input.priority as string | undefined,
+      type: input.type as string | undefined,
+      parentId: input.parentId as string | undefined,
       limit: input.limit as number | undefined,
     });
   },
@@ -980,19 +1093,19 @@ register({
 register({
   definition: {
     name: 'create_task',
-    description: 'Create a new task on the Notion kanban board.',
+    description: 'Create a new task or project on the Notion kanban board. Always populate all fields.',
     input_schema: {
       type: 'object' as const,
       properties: {
         title: { type: 'string', description: 'The task title' },
         status: {
           type: 'string',
-          description: 'Task status (default: To Do)',
+          description: 'Task status: To Do, In Progress, Blocked, Done (default: To Do)',
         },
-        assignee: { type: 'string', description: 'Who to assign the task to' },
+        assignee: { type: 'string', description: 'Who to assign to (e.g. Daniel, Jasmin, Ada, Otto, Coda, Rex, Sage)' },
         priority: {
           type: 'string',
-          description: 'Task priority: Critical, High, Medium, Low (default: Medium)',
+          description: 'Task priority: Urgent, High, Medium, Low (default: Medium)',
         },
         dueDate: {
           type: 'string',
@@ -1005,7 +1118,15 @@ register({
         labels: {
           type: 'array',
           items: { type: 'string' },
-          description: 'Labels: Bug, Feature, Research, Creative, Admin, Personal',
+          description: 'Labels: personal, work, dai, bmad, agency, follow-up, waiting',
+        },
+        type: {
+          type: 'string',
+          description: 'Item type: Task (default) or Project',
+        },
+        parentId: {
+          type: 'string',
+          description: 'Parent project page ID (links task to a project)',
         },
       },
       required: ['title'],
@@ -1020,6 +1141,8 @@ register({
       dueDate: input.dueDate as string | undefined,
       description: input.description as string | undefined,
       labels: input.labels as string[] | undefined,
+      type: input.type as string | undefined,
+      parentId: input.parentId as string | undefined,
     });
   },
 });
@@ -1027,20 +1150,22 @@ register({
 register({
   definition: {
     name: 'update_task',
-    description: 'Update an existing task on the Notion kanban board.',
+    description: 'Update an existing task or project on the Notion kanban board.',
     input_schema: {
       type: 'object' as const,
       properties: {
         pageId: { type: 'string', description: 'The Notion page ID of the task to update' },
-        status: { type: 'string', description: 'New status' },
-        assignee: { type: 'string', description: 'New assignee' },
-        priority: { type: 'string', description: 'New priority' },
+        status: { type: 'string', description: 'New status: To Do, In Progress, Blocked, Done' },
+        assignee: { type: 'string', description: 'New assignee (e.g. Daniel, Jasmin, Ada, Otto, Coda, Rex, Sage)' },
+        priority: { type: 'string', description: 'New priority: Urgent, High, Medium, Low' },
         dueDate: { type: 'string', description: 'New due date (ISO format)' },
         labels: {
           type: 'array',
           items: { type: 'string' },
-          description: 'New labels (replaces existing)',
+          description: 'New labels: personal, work, dai, bmad, agency, follow-up, waiting',
         },
+        type: { type: 'string', description: 'Item type: Task or Project' },
+        parentId: { type: 'string', description: 'Parent project page ID' },
       },
       required: ['pageId'],
     },
@@ -1053,6 +1178,8 @@ register({
       priority: input.priority as string | undefined,
       dueDate: input.dueDate as string | undefined,
       labels: input.labels as string[] | undefined,
+      type: input.type as string | undefined,
+      parentId: input.parentId as string | undefined,
     });
   },
 });
@@ -1547,6 +1674,80 @@ register({
       description: input.description as string | undefined,
       location: input.location as string | undefined,
       attendees: input.attendees as string[] | undefined,
+      account: input.account as string | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'update_event',
+    description:
+      'Update an existing calendar event. Only the fields you provide will be changed — omitted fields stay as they are. Use list_events or search_events first to get the event ID.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        eventId: { type: 'string', description: 'The event ID to update (from list_events or search_events)' },
+        summary: { type: 'string', description: 'New event title' },
+        startTime: {
+          type: 'string',
+          description: 'New start time (ISO 8601, e.g. "2026-03-11T11:30:00")',
+        },
+        endTime: {
+          type: 'string',
+          description: 'New end time (ISO 8601, e.g. "2026-03-11T15:00:00")',
+        },
+        description: { type: 'string', description: 'New event description' },
+        location: { type: 'string', description: 'New event location' },
+        attendees: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'New list of attendee emails (replaces existing attendees)',
+        },
+        account: {
+          type: 'string',
+          enum: ['work', 'personal'],
+          description: 'Google account (default: work)',
+        },
+      },
+      required: ['eventId'],
+    },
+  },
+  async execute(input) {
+    return await googleTools.updateEvent({
+      eventId: input.eventId as string,
+      summary: input.summary as string | undefined,
+      startTime: input.startTime as string | undefined,
+      endTime: input.endTime as string | undefined,
+      description: input.description as string | undefined,
+      location: input.location as string | undefined,
+      attendees: input.attendees as string[] | undefined,
+      account: input.account as string | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'delete_event',
+    description:
+      'Delete a calendar event. Always confirm with Daniel before deleting. Use list_events or search_events first to get the event ID.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        eventId: { type: 'string', description: 'The event ID to delete (from list_events or search_events)' },
+        account: {
+          type: 'string',
+          enum: ['work', 'personal'],
+          description: 'Google account (default: work)',
+        },
+      },
+      required: ['eventId'],
+    },
+  },
+  async execute(input) {
+    return await googleTools.deleteEvent({
+      eventId: input.eventId as string,
       account: input.account as string | undefined,
     });
   },
