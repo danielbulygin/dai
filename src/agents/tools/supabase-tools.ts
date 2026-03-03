@@ -234,7 +234,7 @@ export async function getCampaignPerformance(params: {
       .eq("client_id", client.id)
       .gte("date", since)
       .order("date", { ascending: false })
-      .limit(500);
+      .limit(200);
 
     if (error) {
       logger.error({ error }, "Failed to get campaign performance");
@@ -418,6 +418,13 @@ export async function getAdSummary(params: {
   try {
     const days = params.days ?? 30;
 
+    // Guard: require campaignId or adsetId to prevent full-account queries blowing up context
+    if (!params.campaignId && !params.adsetId) {
+      return JSON.stringify({
+        error: "get_ad_summary requires campaignId or adsetId to avoid huge result sets. Use get_campaign_summary first to identify campaigns, then call get_ad_summary with a specific campaignId.",
+      });
+    }
+
     logger.debug(
       { clientCode: params.clientCode, campaignId: params.campaignId, adsetId: params.adsetId, days },
       "Querying ad summary (RPC)",
@@ -482,7 +489,7 @@ export async function getAdsetPerformance(params: {
       query = query.eq("campaign_id", params.campaignId);
     }
 
-    const { data, error } = await query.order("date", { ascending: false }).limit(300);
+    const { data, error } = await query.order("date", { ascending: false }).limit(150);
 
     if (error) {
       logger.error({ error }, "Failed to get adset performance");
@@ -535,7 +542,14 @@ export async function getAdPerformance(params: {
       query = query.eq("adset_id", params.adsetId);
     }
 
-    const { data, error } = await query.order("date", { ascending: false }).limit(300);
+    // Require at least one filter to prevent full-account queries
+    if (!params.campaignId && !params.adsetId) {
+      query = query.limit(50);
+    } else {
+      query = query.limit(150);
+    }
+
+    const { data, error } = await query.order("date", { ascending: false });
 
     if (error) {
       logger.error({ error }, "Failed to get ad performance");

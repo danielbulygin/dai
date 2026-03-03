@@ -288,8 +288,32 @@ async function runWithTools(
   /** Threshold: intermediate turn text shorter than this is "reasoning" and gets skipped */
   const REASONING_THRESHOLD = 200;
 
-  /** Max chars for any single tool result (~20K tokens) */
-  const MAX_TOOL_RESULT_CHARS = 80_000;
+  // ---------------------------------------------------------------------------
+  // Context budget — prevent exceeding Claude's 200K token window
+  // Reserve tokens for: system prompt, tool defs, output, overhead
+  // ---------------------------------------------------------------------------
+  const MAX_CONTEXT_TOKENS = 190_000; // leave 10K headroom below 200K limit
+  const CHARS_PER_TOKEN = 4; // conservative estimate
+  const MAX_CONTEXT_CHARS = MAX_CONTEXT_TOKENS * CHARS_PER_TOKEN; // ~760K chars
+
+  // Estimate static context size (system prompt + tool defs + initial messages)
+  const staticChars = systemPrompt.length
+    + JSON.stringify(tools).length
+    + initialMessages.reduce((s, m) => s + (typeof m.content === 'string' ? m.content.length : JSON.stringify(m.content).length), 0);
+
+  // Track accumulated tool result chars across all turns
+  let accumulatedToolChars = 0;
+
+  /** Dynamic per-tool limit based on remaining budget */
+  function getToolResultLimit(): number {
+    const usedChars = staticChars + accumulatedToolChars;
+    const remaining = MAX_CONTEXT_CHARS - usedChars;
+    // Per-tool limit: at most 60K, and scale down as context fills
+    return Math.max(10_000, Math.min(60_000, Math.floor(remaining * 0.4)));
+  }
+
+  /** Max total tool result chars per single turn (prevents parallel tool call blowup) */
+  const MAX_TURN_TOOL_CHARS = 120_000;
 
   for (let turn = 0; turn < maxTurns; turn++) {
     let turnText = '';
@@ -341,6 +365,7 @@ async function runWithTools(
 
     // Execute each tool call
     const toolResults: Anthropic.ToolResultBlockParam[] = [];
+    let turnToolChars = 0;
 
     for (const block of msg.content) {
       if (block.type === 'tool_use') {
@@ -355,16 +380,22 @@ async function runWithTools(
           toolContext,
         );
 
-        // Truncate oversized tool results to prevent context blowup
-        if (!isError && result.length > MAX_TOOL_RESULT_CHARS) {
+        // Dynamic truncation: per-tool limit shrinks as context fills
+        const perToolLimit = getToolResultLimit();
+        const turnBudgetLeft = MAX_TURN_TOOL_CHARS - turnToolChars;
+        const effectiveLimit = Math.max(5_000, Math.min(perToolLimit, turnBudgetLeft));
+
+        if (!isError && result.length > effectiveLimit) {
           const originalLen = result.length;
-          result = result.slice(0, MAX_TOOL_RESULT_CHARS) +
-            `\n\n[TRUNCATED — result was ${originalLen.toLocaleString()} chars. Ask for a narrower query (fewer days, specific campaign, etc.)]`;
+          result = result.slice(0, effectiveLimit) +
+            `\n\n[TRUNCATED — result was ${originalLen.toLocaleString()} chars, limited to ${effectiveLimit.toLocaleString()}. Use narrower filters (campaignId, adsetId, fewer days) for complete data.]`;
           logger.warn(
-            { toolName: block.name, originalLen, truncatedTo: MAX_TOOL_RESULT_CHARS },
+            { toolName: block.name, originalLen, truncatedTo: effectiveLimit, perToolLimit, turnBudgetLeft },
             'Tool result truncated',
           );
         }
+
+        turnToolChars += result.length;
 
         // Check for multimodal screenshot content
         let content: string | Anthropic.ToolResultBlockParam['content'] = result;
@@ -400,6 +431,8 @@ async function runWithTools(
         });
       }
     }
+
+    accumulatedToolChars += turnToolChars;
 
     // Send tool results back as a user message
     messages.push({ role: 'user', content: toolResults });

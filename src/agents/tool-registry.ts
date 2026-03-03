@@ -456,7 +456,7 @@ register({
   definition: {
     name: 'get_campaign_performance',
     description:
-      'Get campaign-level daily ad performance for a client. Includes status, objective, spend, impressions, reach, frequency, clicks, link_clicks, funnel stages (content_views, add_to_carts, checkouts_initiated), purchases, purchase_value, ROAS, CPA, CPM, CTR, and raw actions JSONB.',
+      'Get campaign-level DAILY performance (one row per campaign per day). Large result set — prefer get_campaign_summary first for an overview, then use this for daily trends of specific campaigns. Limit days to 3-7 for broad queries.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -638,7 +638,7 @@ register({
   definition: {
     name: 'get_ad_performance',
     description:
-      'Get ad-level daily performance with creative metrics (hook rate, hold rate, video completion). Use for creative analysis and identifying winning/losing ads.',
+      'Get ad-level DAILY performance with creative metrics (hook rate, hold rate, video completion). ALWAYS pass campaignId or adsetId — full account queries are very large. Prefer get_ad_summary first for a compact overview.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -852,7 +852,7 @@ register({
   definition: {
     name: 'get_ad_summary',
     description:
-      'Get aggregated ad-level summary with creative metrics — hook rate, hold rate, conversion rate (impression-weighted). Always pass campaignId or adsetId to avoid huge result sets. For daily trends, use get_ad_performance with filters after.',
+      'Get aggregated ad-level summary with creative metrics (one row per ad). REQUIRES campaignId or adsetId — will error without one. Use get_campaign_summary first to identify campaigns, then drill down here.',
     input_schema: {
       type: 'object' as const,
       properties: {
