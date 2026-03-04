@@ -39,6 +39,5 @@ agents:
     path: maya
     display_name: Maya
     icon: ":art:"
-    description: "Creative strategist - ad creative briefs, concept development, creative QA (backlog)"
+    description: "Creative strategist - ad creative briefs, concept development, creative QA, format × angle framework"
     tags: [creative, advertising, briefs, strategy]
-    status: backlog

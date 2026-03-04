@@ -20,6 +20,14 @@ export const toolProfiles = {
     'correct_methodology', 'delete_methodology',
     'query_tasks', 'create_task', 'update_task', 'add_task_comment', 'search_notion',
   ],
+  creative_strategist: [
+    'recall', 'remember', 'search_memories',
+    'ask_ada',
+    'search_methodology',
+    'post_message', 'reply_in_thread',
+    'search_meetings', 'get_meeting_summary', 'get_meeting_transcript', 'list_recent_meetings',
+    'query_tasks', 'create_task', 'update_task', 'add_task_comment', 'search_notion',
+  ],
   client_media_buyer: [
     'recall', 'remember', 'search_memories',
     'get_client_targets', 'get_client_performance',

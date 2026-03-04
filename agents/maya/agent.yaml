@@ -2,8 +2,12 @@ id: maya
 display_name: Maya
 model: claude-opus-4-6
 icon: ":art:"
-profile: standard
-max_turns: 20
-status: backlog
+profile: creative_strategist
+max_turns: 25
 channels: []
 sub_agents: []
+skills:
+  - ad-creative-brief
+  - creative-qa
+  - meta-ads-strategy
+  - meta-ads-compliance

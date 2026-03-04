@@ -15,7 +15,8 @@
     "backfill:fireflies": "tsx --env-file=.env scripts/backfill-fireflies.ts",
     "extract:methodology": "tsx --env-file=.env scripts/extract-methodology.ts",
     "extract:kousha": "tsx --env-file=.env scripts/extract-kousha-methodology.ts",
-    "google:setup": "tsx --env-file=.env scripts/google-oauth-setup.ts"
+    "google:setup": "tsx --env-file=.env scripts/google-oauth-setup.ts",
+    "creative-audit": "tsx --env-file=.env scripts/creative-audit.ts"
   },
   "keywords": [
     "slack",

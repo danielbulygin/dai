@@ -159,14 +159,14 @@ register({
   definition: {
     name: 'ask_agent',
     description:
-      'Ask another AI agent a question and get their response. Use this to delegate tasks to specialists: otto (orchestrator), coda (developer), rex (researcher), sage (reviewer), ada (advertising).',
+      'Ask another AI agent a question and get their response. Use this to delegate tasks to specialists: otto (orchestrator), coda (developer), rex (researcher), sage (reviewer), ada (advertising), maya (creative strategy).',
     input_schema: {
       type: 'object' as const,
       properties: {
         agent_id: {
           type: 'string',
           description:
-            'ID of the agent to ask (otto, coda, rex, sage, ada)',
+            'ID of the agent to ask (otto, coda, rex, sage, ada, maya)',
         },
         question: {
           type: 'string',
@@ -185,6 +185,40 @@ register({
       agent_id: input.agent_id as string,
       question: input.question as string,
       context: input.context as string | undefined,
+    });
+    return JSON.stringify(result);
+  },
+});
+
+register({
+  definition: {
+    name: 'ask_ada',
+    description:
+      'Ask Ada (media buyer agent) for account performance data, winning patterns, fatigue signals, audience insights, or any advertising analysis. Always call this before generating creative concepts. Maya\'s primary data source.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        question: {
+          type: 'string',
+          description:
+            'The question for Ada. Be specific: include client name, metric, time period. E.g. "Current performance snapshot for Ninepine, including top performers and fatigue signals"',
+        },
+        client_code: {
+          type: 'string',
+          description: 'Client code for context (e.g. "ninepine", "press_london")',
+        },
+      },
+      required: ['question'],
+    },
+  },
+  async execute(input) {
+    const question = input.question as string;
+    const clientCode = input.client_code as string | undefined;
+    const context = clientCode ? `Client: ${clientCode}` : undefined;
+    const result = await agentTools.askAgent({
+      agent_id: 'ada',
+      question,
+      context,
     });
     return JSON.stringify(result);
   },

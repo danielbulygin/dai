@@ -50,6 +50,11 @@ function getDedicatedBotConfigs(): DedicatedBotConfig[] {
       appToken: env.ADA_APP_TOKEN,
       extraListeners: [registerReactionListener, registerInsightActions],
     },
+    {
+      agentId: 'maya',
+      botToken: env.MAYA_BOT_TOKEN,
+      appToken: env.MAYA_APP_TOKEN,
+    },
   ];
 }
 

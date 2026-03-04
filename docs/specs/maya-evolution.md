@@ -125,10 +125,17 @@ Maya lives in Slack. Entry points:
 
 ## Current State (as of March 2026)
 
-**What exists:**
-- `agents/maya/agent.yaml` — backlog status, `standard` profile, no channels
-- `agents/maya/PERSONA.md` — good persona draft, references Ada collaboration
-- `agents/maya/INSTRUCTIONS.md` — target behavior defined, not yet wired
+**Phase 0 + 1 COMPLETE (2026-03-04):**
+- `agents/maya/agent.yaml` — active, `creative_strategist` profile, 25 max turns
+- `agents/maya/PERSONA.md` — merged Pixel + Maya vision, format × angle expert
+- `agents/maya/INSTRUCTIONS.md` — full tool reference, workflows, constraints
+- `agents/maya/CREATIVE-METHODOLOGY.md` — how Maya thinks about creative strategy
+- `agents/maya/FORMAT-REGISTRY.md` — F01-F17 formats, A01-A15 angles, styles, notation, proven combos
+- `agents/maya/clients/{NP,LA,PL,MEOW}.md` — starter client context files
+- `creative_strategist` profile in `src/agents/profiles/index.ts`
+- `ask_ada` tool registered in `src/agents/tool-registry.ts`
+- Maya routed via `src/orchestrator/router.ts`
+- `creative_audits` Supabase migration + `scripts/creative-audit.ts` script
 - `agents/_skills/ad-creative-brief.skill.md` — comprehensive brief writing skill (239 lines)
 - `agents/_skills/creative-qa.skill.md` — comprehensive QC methodology (216 lines)
 - `agents/_skills/meta-ads-strategy.skill.md` — hook frameworks, dials, testing methodology
@@ -136,19 +143,14 @@ Maya lives in Slack. Entry points:
 - Ada's 6,469-row methodology knowledge base in Supabase
 - BMAD creative infrastructure: scoring, grading, fatigue detection, concepts/briefs tables, inspiration library, creative API endpoints, format detection fields
 
-**What Maya CANNOT do yet:**
-- Not activated (backlog status)
-- No `creative_strategist` profile
-- No tools registered
-- No format registry
-- No client creative context files
-- No visual analysis capability
-- No research tools (TikTok, competitors, reviews)
-- No learning-from-feedback system
-- No creative audit / diversity scoring
-- No brief → performance tracking
-- No client feedback monitoring
-- No proactive alerts
+**What Maya CANNOT do yet (future phases):**
+- No visual analysis capability (Phase 4)
+- No research tools — TikTok, competitors, reviews (Phase 3)
+- No learning-from-feedback system (Phase 6)
+- No creative audit runs yet — script exists but needs first run (Phase 0D workshop)
+- No brief → performance tracking (Phase 5)
+- No client feedback monitoring (Phase 2.5)
+- No proactive alerts (Phase 7)
 
 ---
 
@@ -228,18 +230,20 @@ Not all combinations are equally effective. Performance data determines which co
 
 ---
 
-## Phase 0: Format × Angle Registry + Creative Audit
+## Phase 0: Format × Angle Registry + Creative Audit ✅
 
 **Goal:** Build the format registry data file and run a one-off creative audit of all active accounts to establish the current baseline.
 
 **Prerequisites:** None — start here.
 
-**Deliverables:**
-1. `agents/maya/FORMAT-REGISTRY.md` — the creative coordinate system (formats, angles, styles, notation)
-2. One-off creative audit script that maps current ad accounts
-3. Creative audit snapshots stored in Supabase
+**Status: COMPLETE** (2026-03-04)
 
-### 0A. Create FORMAT-REGISTRY.md
+**Deliverables:**
+1. ✅ `agents/maya/FORMAT-REGISTRY.md` — the creative coordinate system (formats, angles, styles, notation)
+2. ✅ One-off creative audit script that maps current ad accounts
+3. ✅ Creative audit snapshots stored in Supabase
+
+### 0A. Create FORMAT-REGISTRY.md ✅
 
 Write `agents/maya/FORMAT-REGISTRY.md` containing:
 - The format table (F01-F17) with descriptions, production needs, typical durations
@@ -250,7 +254,7 @@ Write `agents/maya/FORMAT-REGISTRY.md` containing:
 - Compatibility notes (which format × angle combos are proven, which are untested)
 - This file is loaded into Maya's system prompt — keep it compact (~3K tokens max)
 
-### 0B. Creative Audit Script
+### 0B. Creative Audit Script ✅
 
 Create `scripts/creative-audit.ts` that:
 1. Queries BMAD Supabase for all active ads across all clients (last 30 days with spend > 0)
@@ -264,7 +268,7 @@ Create `scripts/creative-audit.ts` that:
    - Top performers per coordinate
 5. Saves audit to Supabase `creative_audits` table
 
-### 0C. Supabase: `creative_audits` table
+### 0C. Supabase: `creative_audits` table ✅
 
 ```sql
 CREATE TABLE creative_audits (
@@ -292,17 +296,19 @@ Before building: schedule a workshop with Franzi to:
 - Tag 20-30 existing ads together to calibrate the classification
 - Identify any formats/angles unique to specific clients
 
-**Run command:** `pnpm run creative-audit` (add to package.json scripts)
+**Run command:** `pnpm creative-audit` (added to package.json scripts) ✅
 
 ---
 
-## Phase 1: Activate Maya Agent
+## Phase 1: Activate Maya Agent ✅
 
 **Goal:** Maya comes online as an active agent in Slack. Can generate concepts and write briefs using the format registry, client context, and existing skills.
 
 **Prerequisites:** Phase 0 (format registry exists).
 
-### 1A. Agent Config
+**Status: COMPLETE** (2026-03-04)
+
+### 1A. Agent Config ✅
 
 Update `agents/maya/agent.yaml`:
 ```yaml
@@ -322,7 +328,7 @@ skills:
   - meta-ads-compliance
 ```
 
-### 1B. New Profile
+### 1B. New Profile ✅
 
 Add `creative_strategist` profile to `src/agents/profiles/index.ts`:
 ```typescript
@@ -338,7 +344,7 @@ creative_strategist: [
 
 Start minimal. More tools added in later phases.
 
-### 1C. Rewrite PERSONA.md
+### 1C. Rewrite PERSONA.md ✅
 
 Rewrite `agents/maya/PERSONA.md` to reflect the merged Pixel + Maya vision:
 - Creative strategist AND visual analyst
@@ -347,7 +353,7 @@ Rewrite `agents/maya/PERSONA.md` to reflect the merged Pixel + Maya vision:
 - Collaborative with Franzi (approvals), Ada (data), production team (feasibility)
 - Proactive about diversity, gaps, and learning
 
-### 1D. Write CREATIVE-METHODOLOGY.md
+### 1D. Write CREATIVE-METHODOLOGY.md ✅
 
 New file `agents/maya/CREATIVE-METHODOLOGY.md` — how Maya thinks about creative strategy:
 - The creative coordinate system (reference FORMAT-REGISTRY.md)
@@ -358,7 +364,7 @@ New file `agents/maya/CREATIVE-METHODOLOGY.md` — how Maya thinks about creativ
 - Brief quality principles (production feasibility, speakability, dial alignment)
 - Learning philosophy (every brief is a test, every test is a learning)
 
-### 1E. Write INSTRUCTIONS.md
+### 1E. Write INSTRUCTIONS.md ✅
 
 Rewrite `agents/maya/INSTRUCTIONS.md` with:
 - Tool reference (all available tools with usage guidance)
@@ -369,7 +375,7 @@ Rewrite `agents/maya/INSTRUCTIONS.md` with:
 - Constraints (always ground in data, always "Why It Works", 3+ hook variants, production feasibility)
 - Format diversity rule: "When generating 5+ concepts, ensure at least 3 different formats"
 
-### 1F. Client Context Files
+### 1F. Client Context Files ✅
 
 Create `agents/maya/clients/` directory. For each active client, create a `{code}.md` file containing:
 - Brand overview (what the company does, products, target audience)
@@ -383,21 +389,21 @@ Start with 3-4 key clients (Ninepine, Press London, Laori, T-Saft) and expand.
 
 Source data: existing BMAD client files (`/Users/danielbulygin/dev/bmad/pma/clients/`), Fireflies transcripts, Ada's methodology knowledge.
 
-### 1G. Register `ask_ada` Tool
+### 1G. Register `ask_ada` Tool ✅
 
-Create `ask_ada` tool in `src/agents/tools/creative-tools.ts` that:
+Created `ask_ada` tool in `src/agents/tool-registry.ts` (wraps `ask_agent` with `agent_id='ada'`). Scoped convenience tool for Maya.
 - Takes a natural language question about account performance
 - Internally invokes Ada agent (via `ask_agent` pattern)
 - Returns Ada's analysis
 - Scoped: Maya always passes the client code
 
-### 1H. Extras Loader
+### 1H. Extras Loader ✅
 
-Ensure `agents/maya/` directory is picked up by the extras loader in `src/agents/tool-registry.ts` (already loads additional `.md` files from agent dirs into system prompt). Verify FORMAT-REGISTRY.md and CREATIVE-METHODOLOGY.md are auto-loaded.
+Verified: `loadExtras()` in `src/agents/registry.ts` automatically loads all `.md` files except PERSONA.md, INSTRUCTIONS.md, and `.skill.md`. FORMAT-REGISTRY.md and CREATIVE-METHODOLOGY.md are auto-loaded into Maya's system prompt.
 
-### 1I. Router
+### 1I. Router ✅
 
-Update `src/slack/router.ts` to route @Maya mentions and relevant keywords to Maya agent.
+Update `src/orchestrator/router.ts` to route @Maya mentions and relevant keywords to Maya agent. Added `["maya", "maya"]` to `AGENT_KEYWORDS`.
 
 **Verification:** DM Maya in Slack → ask for 5 concepts for a client → verify she uses format × angle framework, asks Ada for data, produces structured concepts with "Why It Works."
 
