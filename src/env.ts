@@ -34,6 +34,7 @@ const envSchema = z.object({
   MAYA_APP_TOKEN: z.string().optional(),
   CHROMIUM_PATH: z.string().optional(),
   ASSEMBLYAI_API_KEY: z.string().optional(),
+  ADA_DM_ALLOWED_USERS: z.string().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;

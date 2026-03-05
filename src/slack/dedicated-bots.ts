@@ -80,6 +80,13 @@ function stripMention(text: string, botUserId: string): string {
   return text.replace(new RegExp(`<@${botUserId}>`, 'g'), '').trim();
 }
 
+/** Parse comma-separated user IDs from ADA_DM_ALLOWED_USERS env var */
+function getAdaDmAllowedUsers(): Set<string> | null {
+  const raw = env.ADA_DM_ALLOWED_USERS;
+  if (!raw) return null; // not configured = no restriction
+  return new Set(raw.split(',').map((s) => s.trim()).filter(Boolean));
+}
+
 function registerDedicatedBotListeners(app: App, agentId: string): void {
   // DMs — all messages route to the agent
   app.message(async ({ message, client }) => {
@@ -98,6 +105,19 @@ function registerDedicatedBotListeners(app: App, agentId: string): void {
     const files = msg.files as Array<Record<string, unknown>> | undefined;
 
     if (!userId || !messageTs) return;
+
+    // Ada DM access control — only allowed users can DM Ada directly
+    if (agentId === 'ada') {
+      const allowed = getAdaDmAllowedUsers();
+      if (allowed && !allowed.has(userId)) {
+        logger.warn({ userId, agentId }, 'Unauthorized Ada DM attempt — blocked');
+        await client.chat.postMessage({
+          channel: msg.channel as string,
+          text: 'Sorry, I can only chat in our shared channel. Please reach out to me there!',
+        });
+        return;
+      }
+    }
 
     // Transcribe voice notes if present
     const transcript = await transcribeAudioFiles(files, client);
