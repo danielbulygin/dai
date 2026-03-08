@@ -574,13 +574,16 @@ export async function getBreakdowns(params: {
   entityType?: string;
   entityId?: string;
   days?: number;
+  aggregate?: boolean;
 }): Promise<string> {
   try {
     const days = params.days ?? 7;
     const since = daysAgoISO(days);
+    // Auto-aggregate when looking at >14 days to avoid massive result sets
+    const shouldAggregate = params.aggregate ?? days > 14;
 
     logger.debug(
-      { clientCode: params.clientCode, breakdownType: params.breakdownType, entityType: params.entityType, days },
+      { clientCode: params.clientCode, breakdownType: params.breakdownType, entityType: params.entityType, days, aggregate: shouldAggregate },
       "Querying breakdowns",
     );
 
@@ -598,13 +601,14 @@ export async function getBreakdowns(params: {
       .gte("date", since);
 
     const entityType = params.entityType ?? "account";
+    query = query.eq("entity_type", entityType);
     if (entityType !== "account" && params.entityId) {
-      query = query.eq("entity_type", entityType).eq("entity_id", params.entityId);
-    } else if (entityType !== "account") {
-      query = query.eq("entity_type", entityType);
+      query = query.eq("entity_id", params.entityId);
     }
 
-    const { data, error } = await query.order("date", { ascending: false }).limit(300);
+    // Scale limit with date range to avoid truncation on YTD queries
+    const rowLimit = Math.min(5000, Math.max(300, days * 50));
+    const { data, error } = await query.order("date", { ascending: false }).limit(rowLimit);
 
     if (error) {
       logger.error({ error }, "Failed to get breakdowns");
@@ -612,10 +616,63 @@ export async function getBreakdowns(params: {
     }
 
     logger.debug(
-      { clientCode: params.clientCode, rows: data?.length },
+      { clientCode: params.clientCode, rows: data?.length, aggregate: shouldAggregate },
       "Got breakdown data",
     );
-    return JSON.stringify(data);
+
+    if (!shouldAggregate || !data?.length) {
+      return JSON.stringify(data);
+    }
+
+    // Aggregate by breakdown_value to produce compact totals
+    const agg = new Map<string, {
+      breakdown_value: string;
+      spend: number; impressions: number; clicks: number; link_clicks: number;
+      results: number; purchases: number; purchase_value: number; days_with_data: number;
+    }>();
+    for (const row of data) {
+      const key = row.breakdown_value as string;
+      const existing = agg.get(key);
+      if (!existing) {
+        agg.set(key, {
+          breakdown_value: key,
+          spend: Number(row.spend) || 0,
+          impressions: Number(row.impressions) || 0,
+          clicks: Number(row.clicks) || 0,
+          link_clicks: Number(row.link_clicks) || 0,
+          results: Number(row.results) || 0,
+          purchases: Number(row.purchases) || 0,
+          purchase_value: Number(row.purchase_value) || 0,
+          days_with_data: 1,
+        });
+      } else {
+        existing.spend += Number(row.spend) || 0;
+        existing.impressions += Number(row.impressions) || 0;
+        existing.clicks += Number(row.clicks) || 0;
+        existing.link_clicks += Number(row.link_clicks) || 0;
+        existing.results += Number(row.results) || 0;
+        existing.purchases += Number(row.purchases) || 0;
+        existing.purchase_value += Number(row.purchase_value) || 0;
+        existing.days_with_data += 1;
+      }
+    }
+
+    // Add computed metrics and sort by spend descending
+    const aggregated = [...agg.values()]
+      .map((r) => ({
+        ...r,
+        roas: r.spend > 0 ? Math.round((r.purchase_value / r.spend) * 100) / 100 : 0,
+        cpa: r.purchases > 0 ? Math.round(r.spend / r.purchases) : 0,
+        ctr: r.impressions > 0 ? Math.round((r.clicks / r.impressions) * 10000) / 100 : 0,
+      }))
+      .sort((a, b) => b.spend - a.spend);
+
+    return JSON.stringify({
+      period: `${days} days (${since} to today)`,
+      total_rows_fetched: data.length,
+      aggregated_by: params.breakdownType,
+      data: aggregated,
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.error({ error: msg }, "getBreakdowns failed");

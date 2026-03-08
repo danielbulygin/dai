@@ -12,6 +12,7 @@ import * as clientConfigTools from './tools/client-config-tools.js';
 import * as methodologyTools from './tools/methodology-tools.js';
 import * as googleTools from './tools/google-tools.js';
 import * as browserTools from './tools/browser-tools.js';
+import * as creativeTools from './tools/creative-tools.js';
 import * as methodologySanitizer from '../client-agents/methodology-sanitizer.js';
 import { logger } from '../utils/logger.js';
 
@@ -221,6 +222,61 @@ register({
       context,
     });
     return JSON.stringify(result);
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Creative tools (Maya)
+// ---------------------------------------------------------------------------
+
+register({
+  definition: {
+    name: 'get_creative_audit',
+    description:
+      'Get the latest creative audit for a client. Returns format distribution (spend %), angle distribution, gap matrix (untested/underweight combos), and top performers per coordinate. Use this to ground concept proposals in data: "Your account is 70% Talking Head — here are gaps worth testing."',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        client_code: {
+          type: 'string',
+          description: 'Client code (e.g. "ninepine", "press_london", "laori")',
+        },
+      },
+      required: ['client_code'],
+    },
+  },
+  async execute(input) {
+    return creativeTools.getCreativeAudit({
+      clientCode: input.client_code as string,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'get_creative_diversity_score',
+    description:
+      'Calculate creative diversity score (0-100) for a client. Returns Shannon entropy for format/angle distribution, concentration risk warnings (any format/angle >60% of spend), gap analysis (untested combos), and recommended gaps to test next. Use after get_creative_audit for actionable diversity insights.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        client_code: {
+          type: 'string',
+          description: 'Client code (e.g. "ninepine", "press_london", "laori")',
+        },
+        days: {
+          type: 'number',
+          description: 'Lookback window in days (default 7)',
+        },
+      },
+      required: ['client_code'],
+    },
+  },
+  async execute(input) {
+    return creativeTools.getCreativeDiversityScore({
+      clientCode: input.client_code as string,
+      days: input.days as number | undefined,
+    });
   },
 });
 
@@ -710,7 +766,7 @@ register({
   definition: {
     name: 'get_breakdowns',
     description:
-      'Get performance breakdowns by age, gender, country, placement, device, or platform. Use for device-level analysis (iOS vs Android), placement optimization, and audience insights.',
+      'Get performance breakdowns by age, gender, country, placement, device, or platform. Use for device-level analysis (iOS vs Android), placement optimization, and audience insights. Supports long date ranges (YTD) — set days explicitly.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -734,7 +790,11 @@ register({
         },
         days: {
           type: 'number',
-          description: 'Number of days (default 7)',
+          description: 'Number of days to look back. Default 7. For YTD queries, calculate days from Jan 1 to today. ALWAYS set explicitly.',
+        },
+        aggregate: {
+          type: 'boolean',
+          description: 'Aggregate totals by breakdown value (e.g. totals per country). Auto-enabled for >14 days. Set true for YTD/long-range queries.',
         },
       },
       required: ['clientCode', 'breakdownType'],
@@ -746,6 +806,7 @@ register({
       breakdownType: input.breakdownType as string,
       entityType: input.entityType as string | undefined,
       entityId: input.entityId as string | undefined,
+      aggregate: input.aggregate as boolean | undefined,
       days: input.days as number | undefined,
     });
   },

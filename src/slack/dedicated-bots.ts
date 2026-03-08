@@ -15,6 +15,7 @@ import { runAgent } from '../agents/runner.js';
 import type { RunOptions } from '../agents/runner.js';
 import { getAgent } from '../agents/registry.js';
 import { getClientAgentByChannel } from '../client-agents/config.js';
+import { findThreadOwner } from '../memory/sessions.js';
 import { agentQueue } from '../orchestrator/queue.js';
 import { createStreamResponder } from './stream-responder.js';
 import { registerReactionListener } from './listeners/reactions.js';
@@ -172,7 +173,13 @@ function registerDedicatedBotListeners(app: App, agentId: string): void {
 
     const threadTs = msg.thread_ts as string;
     const threads = activeThreads.get(agentId);
-    if (!threads?.has(threadTs)) return;
+    if (!threads?.has(threadTs)) {
+      // Fallback: check Supabase sessions (survives restarts)
+      const owner = await findThreadOwner(msg.channel as string, threadTs);
+      if (!owner || !owner.startsWith(agentId)) return;
+      // Re-track the thread so future replies skip the DB lookup
+      trackThread(agentId, threadTs);
+    }
 
     const text = msg.text as string | undefined;
     const userId = msg.user as string | undefined;
