@@ -23,6 +23,7 @@ export const toolProfiles = {
   creative_strategist: [
     'recall', 'remember', 'search_memories',
     'ask_ada',
+    'get_creative_audit', 'get_creative_diversity_score',
     'search_methodology',
     'post_message', 'reply_in_thread',
     'search_meetings', 'get_meeting_summary', 'get_meeting_transcript', 'list_recent_meetings',
