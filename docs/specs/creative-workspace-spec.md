@@ -1,14 +1,14 @@
-# Creative Workspace — Master Specification
+# Creative Studio — Master Specification
 
-> This document is the single source of truth for the Creative Workspace. Each phase is self-contained — a fresh Claude session can read this spec and execute any phase independently.
+> This document is the single source of truth for the Creative Studio. Each phase is self-contained — a fresh Claude session can read this spec and execute any phase independently.
 
 ## Vision
 
-A collaborative platform where creative strategists and AI agents work together on briefs, from ideation to production handoff. One place to organize, generate, edit, review, and track ad briefs — with Maya as an always-available creative partner.
+A collaborative brief editing environment embedded in the BMAD dashboard at `/studio`. Creative strategists and AI agents work together on briefs — from ideation to production handoff. Maya is an always-available creative partner, not a separate Slack channel.
 
 ### Problem
 
-- **Brief Studio** (BMAD) generates briefs in a 6-step wizard, but it's a one-shot tool — no persistent workspace, no collaboration, no iteration after export
+- **Brief Studio** (BMAD `/briefs/studio`) generates briefs in a 6-step wizard, but it's a one-shot tool — no persistent workspace, no collaboration, no iteration after export
 - **Maya** (DAI) has deep creative intelligence (format x angle framework, diversity scoring, methodology knowledge) but is only accessible via Slack
 - **Notion** is the document layer, but has no AI integration and no structured creative workflow
 - **QC is ad hoc** — Zyra reviews in Notion/Slack with no structured approval pipeline
@@ -17,16 +17,16 @@ A collaborative platform where creative strategists and AI agents work together 
 
 ### What Makes This Different From Brief Studio
 
-Brief Studio is a **generation wizard** — you go through 6 steps, export, done. The Creative Workspace is a **persistent environment** — briefs live here, get iterated on, go through QC, get assigned to creators, and track all the way to live ads. Maya is embedded in the editor, not just the generation step.
+Brief Studio is a **generation wizard** — you go through 6 steps, export, done. The Creative Studio is a **persistent environment** — briefs live here, get iterated on, go through QC, get assigned to creators, and track all the way to live ads. Maya is embedded in the editor, not just the generation step.
 
 ---
 
 ## Architecture Decisions (Resolved)
 
-1. **Separate Next.js app** — lives in BMAD repo at `pma/workspace/`, shares BMAD Supabase. Different UX needs than the analytics dashboard. Deployed to Vercel independently.
+1. **Route inside BMAD dashboard** — lives at `pma/dashboard/src/app/studio/`, not a separate app. Shares auth, layout, design system, Supabase client, and deployment. Accessible at `/studio` in the existing dashboard.
 2. **Hocuspocus self-hosted on DO** — runs alongside DAI on the existing droplet. Small team (~10 users), no need for managed service.
-3. **Brief Studio coexists** — keep it as a quick-generation shortcut, gradually deprecated as workspace matures.
-4. **Notion export retained** — primary handoff mechanism initially, production tracking shifts to workspace over time.
+3. **Brief Studio coexists** — existing `/briefs/studio` wizard stays as a quick-generation shortcut, gradually deprecated as Studio matures.
+4. **Notion export retained** — primary handoff mechanism initially, production tracking shifts to Studio over time.
 5. **Client access: approved briefs only** — read-only with commenting. Invite via shareable link with Supabase Auth.
 6. **Offline support deferred** — Yjs supports it, but not worth the complexity for a team that's always online.
 
@@ -49,7 +49,7 @@ Brief Studio is a **generation wizard** — you go through 6 steps, export, done
 | Auth | Supabase Auth (magic link + Google) | via @supabase/ssr |
 | Storage | Supabase Storage | for images/assets |
 | Charts | Recharts | match BMAD |
-| Deploy | Vercel (frontend) + DO (API + Hocuspocus) | existing infra |
+| Deploy | Vercel (dashboard, single deploy) + DO (API + Hocuspocus) | existing infra |
 
 ---
 
@@ -183,78 +183,54 @@ CREATE POLICY "Users see briefs for their clients" ON briefs FOR SELECT USING (
 
 ---
 
-## Phase 1: Workspace Shell + Brief Editor
+## Phase 1: Studio Shell + Brief Editor
 
-**Goal:** A working brief editor with client navigation, templates, and persistence. No AI, no collaboration — just a solid document editing experience.
+**Goal:** A working brief editor with client navigation, templates, and persistence. No AI, no collaboration — just a solid document editing experience. Lives at `/studio` inside the existing BMAD dashboard.
 
-**Prerequisites:** BMAD Supabase access, Vercel account.
+**Prerequisites:** BMAD dashboard running, BMAD Supabase access.
 
-### 1A. Project Scaffold
+### 1A. Route & File Structure
 
-Create the Next.js app at `pma/workspace/`:
+Add to the **existing** BMAD dashboard app (`pma/dashboard/`). No separate scaffold needed — auth, Supabase client, design system, middleware all already work.
 
+**New files to create:**
 ```
-pma/workspace/
-├── package.json
-├── next.config.ts
-├── tsconfig.json
-├── tailwind.config.ts
-├── postcss.config.js
-├── .env.local.example
-├── src/
-│   ├── app/
-│   │   ├── layout.tsx              -- Root layout (sidebar + main)
-│   │   ├── page.tsx                -- Dashboard / home (redirect to first client)
-│   │   ├── login/
-│   │   │   └── page.tsx            -- Magic link login
-│   │   ├── [clientCode]/
-│   │   │   ├── layout.tsx          -- Client workspace layout
-│   │   │   ├── page.tsx            -- Brief list for this client
-│   │   │   └── [briefId]/
-│   │   │       └── page.tsx        -- Brief editor page
-│   │   └── api/
-│   │       └── auth/
-│   │           └── callback/
-│   │               └── route.ts    -- Supabase auth callback
-│   ├── components/
-│   │   ├── layout/
-│   │   │   ├── Sidebar.tsx         -- Client list sidebar
-│   │   │   ├── Header.tsx          -- Top bar (user, search, new brief)
-│   │   │   └── ClientNav.tsx       -- Client workspace nav
-│   │   ├── briefs/
-│   │   │   ├── BriefList.tsx       -- Grid/list of briefs
-│   │   │   ├── BriefCard.tsx       -- Brief card component
-│   │   │   ├── NewBriefDialog.tsx  -- Create brief modal (template picker)
-│   │   │   └── StatusBadge.tsx     -- Status pill component
-│   │   └── editor/
-│   │       ├── BriefEditor.tsx     -- Main editor wrapper
-│   │       ├── EditorToolbar.tsx   -- Formatting toolbar
-│   │       ├── SectionBlock.tsx    -- Collapsible brief section
-│   │       └── extensions/
-│   │           ├── brief-section.ts   -- Custom Tiptap node for sections
-│   │           ├── dial-block.ts      -- Custom node for dial sliders
-│   │           └── hook-block.ts      -- Custom node for hook options
-│   ├── lib/
-│   │   ├── supabase/
-│   │   │   ├── client.ts           -- Browser client (singleton)
-│   │   │   ├── server.ts           -- Server client (for RSC/API routes)
-│   │   │   └── middleware.ts        -- Auth middleware
-│   │   ├── types.ts                -- TypeScript interfaces
-│   │   ├── templates/
-│   │   │   ├── index.ts            -- Template registry
-│   │   │   ├── ugc-video.ts        -- UGC video brief template (Tiptap JSON)
-│   │   │   ├── static.ts           -- Static image brief template
-│   │   │   ├── motion.ts           -- Motion graphics template
-│   │   │   └── carousel.ts         -- Carousel template
-│   │   └── constants.ts            -- Format codes, angle codes, status list
-│   ├── middleware.ts                -- Next.js middleware (auth guard)
-│   └── styles/
-│       └── globals.css             -- CSS variables (match BMAD theme)
-└── public/
-    └── ...
+pma/dashboard/src/
+├── app/studio/
+│   ├── layout.tsx                     -- Studio layout (client sidebar + main area)
+│   ├── page.tsx                       -- Studio home (all briefs or redirect to first client)
+│   ├── [clientCode]/
+│   │   ├── page.tsx                   -- Brief list for this client
+│   │   └── [briefId]/
+│   │       └── page.tsx               -- Brief editor page
+├── components/studio/
+│   ├── StudioSidebar.tsx              -- Client list sidebar for studio
+│   ├── StudioHeader.tsx               -- Studio-specific header (brief title, save indicator)
+│   ├── BriefList.tsx                  -- Grid/list of briefs with filters
+│   ├── BriefCard.tsx                  -- Brief card (title, format, angle, status, date)
+│   ├── NewBriefDialog.tsx             -- Create brief modal (template picker)
+│   ├── StatusBadge.tsx                -- Status pill component
+│   ├── MetadataSidebar.tsx            -- Right panel: format, angle, dials, status, assignee
+│   ├── editor/
+│   │   ├── BriefEditor.tsx            -- Main Tiptap editor wrapper
+│   │   ├── EditorToolbar.tsx          -- Formatting toolbar
+│   │   ├── SectionBlock.tsx           -- Collapsible brief section renderer
+│   │   └── extensions/
+│   │       ├── brief-section.ts       -- Custom Tiptap node for collapsible sections
+│   │       ├── dial-block.ts          -- Custom node for 5 dial sliders
+│   │       └── hook-block.ts          -- Custom node for hook A/B/C options
+├── lib/studio/
+│   ├── types.ts                       -- Studio-specific TypeScript interfaces
+│   ├── constants.ts                   -- Format codes (F01-F17), angle codes (A01-A15), statuses
+│   └── templates/
+│       ├── index.ts                   -- Template registry
+│       ├── ugc-video.ts               -- UGC video brief template (Tiptap JSON)
+│       ├── static.ts                  -- Static image brief template
+│       ├── motion.ts                  -- Motion graphics template
+│       └── carousel.ts               -- Carousel template
 ```
 
-**Key dependencies:**
+**New dependencies to add to dashboard's package.json:**
 ```json
 {
   "@tiptap/react": "^2.x",
@@ -263,18 +239,20 @@ pma/workspace/
   "@tiptap/extension-image": "^2.x",
   "@tiptap/extension-task-list": "^2.x",
   "@tiptap/extension-task-item": "^2.x",
-  "@supabase/ssr": "^0.8.0",
-  "@supabase/supabase-js": "^2.39.0",
-  "next": "^16.1.1",
-  "react": "^18",
-  "tailwindcss": "^3.3.0",
-  "lucide-react": "latest",
-  "framer-motion": "latest",
+  "@tiptap/extension-highlight": "^2.x",
   "zustand": "latest"
 }
 ```
 
+**Existing infrastructure reused (no need to rebuild):**
+- Auth: `src/middleware.ts` already handles login redirect
+- Supabase client: `src/lib/supabase.ts` (browser + server)
+- CSS variables: `src/styles/globals.css` (--text, --accent, --card-bg, etc.)
+- Navigation: add "Studio" link to existing dashboard navbar/sidebar
+
 ### 1B. Supabase Migration
+
+Migration file: `pma/dashboard/supabase/migrations/20260310_studio_tables.sql`
 
 Run on BMAD Supabase:
 - Add new columns to `briefs` table (editor_content, format_code, angle_code, style_tags, funnel_stage, created_by_user, updated_by_user, updated_at)
@@ -282,23 +260,23 @@ Run on BMAD Supabase:
 - Set up RLS policies
 - Seed initial workspace_users (Daniel as admin, Franzi as lead)
 
-### 1C. Auth Flow
+### 1C. Dashboard Navigation
 
-- Supabase Auth with magic link (email) — same setup as BMAD dashboard
-- Middleware redirects unauthenticated users to `/login`
-- After login, look up `workspace_users` by `auth_id` to get role and client_scope
-- If no workspace_user record exists, show "Access denied — contact admin" page
+- Add "Studio" to the dashboard's existing navbar (alongside Briefs, Analytics, Formats, etc.)
+- `/studio` route uses its own layout with a client sidebar — distinct from the analytics dashboard layout
+- Users navigate: Dashboard navbar > Studio > client sidebar > briefs > editor
 
-### 1D. Client Sidebar
+### 1D. Studio Sidebar
 
 - Server component: fetch all clients from BMAD `clients` table (code, name, brand_emoji)
-- Sidebar shows client list with emoji + name
+- Left sidebar within the studio layout (not the dashboard's main sidebar)
+- Client list with emoji + name
 - Active client highlighted
 - Brief count badge per client
 - "All Briefs" option at top
 - Collapsible on mobile
 
-### 1E. Brief List Page (`/[clientCode]`)
+### 1E. Brief List Page (`/studio/[clientCode]`)
 
 - Server component: fetch briefs for this client, ordered by updated_at desc
 - Filters: status (draft, in_review, approved, in_production, completed), search (title)
@@ -386,7 +364,8 @@ The core of Phase 1. A Tiptap editor with custom nodes for brief structure.
 
 ### 1H. Acceptance Criteria
 
-- [ ] Can log in with magic link, see client sidebar
+- [ ] Studio link appears in dashboard navbar
+- [ ] /studio page shows client sidebar and brief overview
 - [ ] Can navigate between clients, see their briefs
 - [ ] Can create a new brief from template
 - [ ] Can edit brief in Tiptap editor with all standard formatting
@@ -396,7 +375,7 @@ The core of Phase 1. A Tiptap editor with custom nodes for brief structure.
 - [ ] Auto-saves to Supabase within 2s of changes
 - [ ] Can set metadata (format code, angle code, status, etc.)
 - [ ] Brief list shows status badges, format/angle pills
-- [ ] Auth works: unauthenticated users redirected, role-based access enforced
+- [ ] Existing dashboard auth applies (no separate login needed)
 - [ ] Mobile responsive (sidebar collapses, editor adapts)
 
 ---
@@ -441,8 +420,8 @@ src/
 ### 2B. Chat Sidebar Component
 
 ```
-src/components/
-├── ai/
+src/components/studio/ai/
+# Files:
 │   ├── ChatSidebar.tsx         -- Collapsible right panel
 │   ├── ChatMessage.tsx         -- Single message (user or Maya)
 │   ├── ChatInput.tsx           -- Input with send button
@@ -469,8 +448,8 @@ src/components/
 Integrated into the workspace as a modal/drawer:
 
 ```
-src/components/
-├── concepts/
+src/components/studio/concepts/
+# Files:
 │   ├── ConceptGenerationFlow.tsx  -- Multi-step modal
 │   ├── DialConfigurator.tsx       -- 5 dial sliders (reuse from Brief Studio)
 │   ├── ConceptCard.tsx            -- Single concept with select/skip
@@ -573,8 +552,8 @@ Add to the editor:
 ### 3C. Comments System
 
 ```
-src/components/
-├── comments/
+src/components/studio/comments/
+# Files:
 │   ├── CommentsSidebar.tsx       -- Right panel (toggles with chat)
 │   ├── CommentThread.tsx         -- Single comment + replies
 │   ├── InlineCommentMark.tsx     -- Tiptap mark for highlighted text
@@ -595,8 +574,8 @@ src/components/
 ### 3D. Version History
 
 ```
-src/components/
-├── versions/
+src/components/studio/versions/
+# Files:
 │   ├── VersionHistory.tsx    -- List of versions with timestamps
 │   ├── VersionDiff.tsx       -- Side-by-side or inline diff view
 │   └── RestoreButton.tsx     -- Restore to previous version
@@ -665,8 +644,8 @@ draft → ready_for_review → in_qc → changes_requested → approved → in_p
 ### 4B. QC Checklist
 
 ```
-src/components/
-├── qc/
+src/components/studio/qc/
+# Files:
 │   ├── QCPanel.tsx           -- QC review panel (replaces metadata sidebar when in_qc)
 │   ├── ChecklistItem.tsx     -- Single check item (pass/warn/fail toggle)
 │   ├── AIPreCheck.tsx        -- "Run AI Check" button + results
@@ -732,13 +711,13 @@ Add to DAI (not workspace frontend):
 ### 5A. Diversity Dashboard
 
 ```
-src/app/[clientCode]/diversity/
+src/app/studio/[clientCode]/diversity/
 ├── page.tsx                    -- Diversity dashboard page
 ```
 
 ```
-src/components/
-├── intelligence/
+src/components/studio/intelligence/
+# Files:
 │   ├── DiversityDashboard.tsx      -- Main dashboard
 │   ├── FormatAngleHeatMap.tsx      -- 17x15 grid with color intensity
 │   ├── DistributionChart.tsx       -- Bar chart (format or angle)
@@ -767,8 +746,8 @@ src/components/
 ### 5B. Performance Feedback Loop
 
 ```
-src/components/
-├── intelligence/
+src/components/studio/intelligence/
+# Files:
 │   ├── BriefPerformancePanel.tsx    -- Shows on brief editor when linked to ad
 │   ├── LinkAdDialog.tsx             -- Search and link Meta ad ID
 │   └── PerformanceBadge.tsx         -- A-F grade badge on brief cards
@@ -790,8 +769,8 @@ src/components/
 ### 5C. Client Context Panel
 
 ```
-src/components/
-├── intelligence/
+src/components/studio/intelligence/
+# Files:
 │   ├── ClientContextPanel.tsx   -- Drawer/panel accessible from any brief
 │   ├── BrandGuidelines.tsx      -- Rendered markdown from client docs
 │   ├── RecentLearnings.tsx      -- Latest learnings for this client
@@ -813,8 +792,8 @@ src/components/
 Tiptap extension for suggestion marks:
 
 ```
-src/components/editor/extensions/
-├── suggestion-mark.ts      -- Custom mark: green highlight (add) / red strikethrough (delete)
+src/components/studio/editor/extensions/
+# File: suggestion-mark.ts      -- Custom mark: green highlight (add) / red strikethrough (delete)
 ```
 
 - Maya can return suggestions in structured format: `[{type: 'replace', from, to, newText, reason}]`
@@ -844,7 +823,7 @@ src/components/editor/extensions/
 ### 6A. Export
 
 ```
-src/app/api/export/
+src/app/api/studio/export/
 ├── notion/route.ts       -- Create/update Notion page from brief
 ├── pdf/route.ts          -- Generate PDF from brief content
 └── markdown/route.ts     -- Export as markdown
@@ -878,13 +857,13 @@ src/app/api/export/
 ### 6B. Assignment & Tracking
 
 ```
-src/app/[clientCode]/production/
+src/app/studio/[clientCode]/production/
 ├── page.tsx              -- Kanban production view
 ```
 
 ```
-src/components/
-├── production/
+src/components/studio/production/
+# Files:
 │   ├── KanbanBoard.tsx       -- Drag-and-drop columns
 │   ├── KanbanCard.tsx        -- Brief card in kanban
 │   ├── AssignmentDialog.tsx  -- Assign creator/editor
@@ -906,7 +885,7 @@ src/components/
 ### 6C. Client-Facing View
 
 ```
-src/app/share/[token]/
+src/app/studio/share/[token]/
 ├── page.tsx              -- Public/semi-public brief view
 ```
 
@@ -943,7 +922,7 @@ src/app/share/[token]/
 ## Phase Dependencies
 
 ```
-Phase 1 (Workspace Shell + Editor) ──────┬──> Phase 2 (Maya Integration)
+Phase 1 (Studio Shell + Editor) ──────┬──> Phase 2 (Maya Integration)
                                          ├──> Phase 3 (Collaboration)
                                          └──> Phase 4 (QC Workflow) ──> needs Phase 2 for AI pre-check
                                                                      └──> Phase 6 (Production)
