@@ -13,6 +13,7 @@ import * as methodologyTools from './tools/methodology-tools.js';
 import * as googleTools from './tools/google-tools.js';
 import * as browserTools from './tools/browser-tools.js';
 import * as creativeTools from './tools/creative-tools.js';
+import * as reportTools from '../reports/index.js';
 import * as methodologySanitizer from '../client-agents/methodology-sanitizer.js';
 import { logger } from '../utils/logger.js';
 
@@ -2325,6 +2326,45 @@ register({
       channelId: context.channelId,
       threadTs: context.threadTs,
     });
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Report tools
+// ---------------------------------------------------------------------------
+
+register({
+  definition: {
+    name: 'generate_weekly_report',
+    description:
+      'Generate an in-depth weekly performance report for a client. Runs a multi-stage pipeline: data gathering from BMAD, math-only condensation, then Opus narrative generation. Returns the formatted report text ready for review.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        client_code: {
+          type: 'string',
+          description: 'BMAD client code (e.g., NP, LA, JVA)',
+        },
+        days: {
+          type: 'number',
+          description: 'Number of days to cover (default: 7)',
+        },
+      },
+      required: ['client_code'],
+    },
+  },
+  async execute(input) {
+    try {
+      const result = await reportTools.generateReport(
+        input.client_code as string,
+        input.days as number | undefined,
+      );
+      return result.reportText;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error({ error: msg, clientCode: input.client_code }, 'generate_weekly_report failed');
+      return JSON.stringify({ error: msg });
+    }
   },
 });
 

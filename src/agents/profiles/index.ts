@@ -19,6 +19,7 @@ export const toolProfiles = {
     'correct_learning', 'delete_learning',
     'correct_methodology', 'delete_methodology',
     'query_tasks', 'create_task', 'update_task', 'add_task_comment', 'search_notion',
+    'generate_weekly_report',
   ],
   creative_strategist: [
     'recall', 'remember', 'search_memories',
