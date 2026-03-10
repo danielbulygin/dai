@@ -35,6 +35,8 @@ const envSchema = z.object({
   CHROMIUM_PATH: z.string().optional(),
   ASSEMBLYAI_API_KEY: z.string().optional(),
   ADA_DM_ALLOWED_USERS: z.string().optional(),
+  STUDIO_API_KEY: z.string().optional(),
+  API_PORT: z.coerce.number().default(3001),
 });
 
 export type Env = z.infer<typeof envSchema>;

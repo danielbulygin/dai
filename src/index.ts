@@ -9,6 +9,7 @@ import { startMonitoringLoop, stopMonitoringLoop } from './monitoring/analyzer.j
 import { setupScheduledJobs } from './scheduler/setup.js';
 import { startScheduler, stopScheduler } from './scheduler/index.js';
 import { shutdownBrowser } from './integrations/browser.js';
+import { startApiServer } from './api/server.js';
 
 async function start(): Promise<void> {
   // Verify Supabase connectivity
@@ -38,6 +39,11 @@ async function start(): Promise<void> {
   // Set up and start scheduled jobs (briefings, etc.)
   setupScheduledJobs();
   startScheduler();
+
+  // Start the HTTP API server (for Studio / web integrations)
+  if (env.STUDIO_API_KEY) {
+    startApiServer();
+  }
 
   logger.info(
     { env: env.NODE_ENV, logLevel: env.LOG_LEVEL },

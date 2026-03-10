@@ -68,6 +68,10 @@ export interface RunOptions {
   threadTs?: string;
   sessionId?: string;
   onText?: (text: string) => void;
+  /** Called between tool-use turns to reset streamed text and prevent repetition. */
+  onTurnReset?: () => void;
+  /** Called when a tool starts executing, for progress indicators. */
+  onToolUse?: (toolName: string) => void;
   clientScope?: {
     clientCode: string;
     displayName: string;
@@ -97,7 +101,7 @@ function buildSystemPrompt(
   const parts: string[] = [];
 
   // Current date/time so the agent always knows "now"
-  const now = new Date().toLocaleString('en-GB', {
+  const berlinNow = new Date().toLocaleString('en-GB', {
     timeZone: 'Europe/Berlin',
     weekday: 'long',
     year: 'numeric',
@@ -106,7 +110,8 @@ function buildSystemPrompt(
     hour: '2-digit',
     minute: '2-digit',
   });
-  parts.push(`## Current Date & Time\n${now} (Europe/Berlin)`);
+  const isoDate = new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/Berlin' }); // YYYY-MM-DD
+  parts.push(`## Current Date & Time\nRight now it is: ${berlinNow} (Europe/Berlin)\nISO date: ${isoDate}\nIMPORTANT: The current year is ${new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/Berlin' }).slice(0, 4)}. Always use this date as your reference when answering questions about days of the week, time periods, or relative dates like "yesterday", "last week", etc.`);
 
   parts.push(persona);
   parts.push(instructions);
@@ -261,9 +266,10 @@ async function runWithTools(
   toolContext: ToolContext,
   maxTurns: number,
   onText?: (text: string) => void,
+  onTurnReset?: () => void,
+  onToolUse?: (toolName: string) => void,
 ): Promise<{ responseText: string; turns: number; usage: TokenUsage }> {
   const messages: Anthropic.MessageParam[] = [...initialMessages];
-  let responseText = '';
   let totalInput = 0;
   let totalOutput = 0;
   let totalCacheRead = 0;
@@ -284,9 +290,6 @@ async function runWithTools(
       ? { ...tool, cache_control: { type: 'ephemeral' as const } }
       : tool,
   );
-
-  /** Threshold: intermediate turn text shorter than this is "reasoning" and gets skipped */
-  const REASONING_THRESHOLD = 200;
 
   // ---------------------------------------------------------------------------
   // Context budget — prevent exceeding Claude's 200K token window
@@ -315,7 +318,16 @@ async function runWithTools(
   /** Max total tool result chars per single turn (prevents parallel tool call blowup) */
   const MAX_TURN_TOOL_CHARS = 120_000;
 
+  // Track the last turn's text for fallback when max turns are hit
+  let lastTurnText = '';
+
   for (let turn = 0; turn < maxTurns; turn++) {
+    // Reset streamed text between tool-use turns so the user only sees
+    // the latest turn's output, preventing duplicate/overlapping analyses.
+    if (turn > 0) {
+      onTurnReset?.();
+    }
+
     let turnText = '';
 
     const msg = await withRetry(async () => {
@@ -342,23 +354,22 @@ async function runWithTools(
     totalCacheRead += cacheUsage.cache_read_input_tokens ?? 0;
     totalCacheCreation += cacheUsage.cache_creation_input_tokens ?? 0;
 
+    lastTurnText = turnText;
+
     if (msg.stop_reason !== 'tool_use') {
-      // Final turn — text already streamed via onText
-      if (turnText.trim()) {
-        responseText += (responseText ? '\n\n' : '') + turnText;
-      }
+      // Final turn — only this turn's text becomes the response.
+      // Previous turns' text was shown during streaming but is not stored,
+      // preventing repetitive content in the final message and conversation history.
       return {
-        responseText,
+        responseText: turnText.trim() ? turnText : lastTurnText,
         turns: turn + 1,
         usage: { input: totalInput, output: totalOutput, cacheRead: totalCacheRead, cacheCreation: totalCacheCreation },
       };
     }
 
-    // Intermediate tool-use turn — accumulate substantial text for final response
-    // (text was already streamed to Slack progressively)
-    if (turnText.trim().length >= REASONING_THRESHOLD) {
-      responseText += (responseText ? '\n\n' : '') + turnText;
-    }
+    // Intermediate tool-use turn — text was streamed to Slack for live feedback
+    // but will be reset at the start of the next turn. Not accumulated into
+    // responseText to avoid repetition.
 
     // Append the full assistant message (text + tool_use blocks)
     messages.push({ role: 'assistant', content: msg.content });
@@ -373,6 +384,7 @@ async function runWithTools(
           { toolName: block.name, toolId: block.id },
           'Executing tool call',
         );
+        onToolUse?.(block.name);
 
         let { result, isError } = await executeTool(
           block.name,
@@ -438,14 +450,14 @@ async function runWithTools(
     messages.push({ role: 'user', content: toolResults });
   }
 
-  // Max turns reached
+  // Max turns reached — use the last turn's text as the response
   logger.warn(
     { maxTurns, agentId: toolContext.agentId },
     'Tool-use loop hit max turns',
   );
 
   return {
-    responseText,
+    responseText: lastTurnText || 'I ran out of processing turns. Please try a more specific question.',
     turns: maxTurns,
     usage: { input: totalInput, output: totalOutput, cacheRead: totalCacheRead, cacheCreation: totalCacheCreation },
   };
@@ -464,6 +476,7 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
     threadTs,
     sessionId,
     onText,
+    onTurnReset,
     clientScope,
   } = options;
 
@@ -608,6 +621,8 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
         toolContext,
         agent.config.max_turns,
         onText,
+        onTurnReset,
+        options.onToolUse,
       );
     }
 

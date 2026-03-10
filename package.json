@@ -30,6 +30,7 @@
   "dependencies": {
     "@anthropic-ai/claude-code": "^2.1.50",
     "@anthropic-ai/sdk": "^0.78.0",
+    "@hono/node-server": "^1.19.11",
     "@notionhq/client": "^5.9.0",
     "@slack/bolt": "^4.6.0",
     "@slack/web-api": "^7.14.1",
@@ -37,6 +38,7 @@
     "assemblyai": "^4.23.1",
     "googleapis": "^171.4.0",
     "gray-matter": "^4.0.3",
+    "hono": "^4.12.5",
     "js-yaml": "^4.1.1",
     "nanoid": "^5.1.6",
     "node-cron": "^4.2.1",
