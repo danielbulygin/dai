@@ -7,6 +7,7 @@ import { apiKeyAuth } from './auth.js';
 import { healthRouter } from './routes/health.js';
 import { chatRouter } from './routes/chat.js';
 import { conceptsRouter } from './routes/concepts.js';
+import { notionWebhookRouter } from '../webhooks/notion.js';
 
 export function startApiServer(): void {
   const port = env.API_PORT;
@@ -28,6 +29,9 @@ export function startApiServer(): void {
 
   // Health check (no auth)
   app.route('/', healthRouter);
+
+  // Notion webhook (no API key — verified via HMAC signature)
+  app.route('/', notionWebhookRouter);
 
   // Authenticated routes
   app.use('/*', apiKeyAuth);

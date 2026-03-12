@@ -36,6 +36,8 @@ const envSchema = z.object({
   ASSEMBLYAI_API_KEY: z.string().optional(),
   ADA_DM_ALLOWED_USERS: z.string().optional(),
   STUDIO_API_KEY: z.string().optional(),
+  META_ACCESS_TOKEN: z.string().optional(),
+  NOTION_WEBHOOK_SECRET: z.string().optional(),
   API_PORT: z.coerce.number().default(3001),
 });
 
