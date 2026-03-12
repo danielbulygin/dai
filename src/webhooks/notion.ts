@@ -81,25 +81,28 @@ async function processCommentCreated(event: NotionWebhookEvent): Promise<void> {
   const authorId = event.authors?.[0]?.id;
   const pageId = event.data.page_id;
 
-  // Fetch comment text, author info, and page title concurrently
+  // Fetch comment text, author info, and page title concurrently (all gracefully fallible)
   const [commentsResponse, authorData, pageData] = await Promise.all([
-    notion.comments.list({ block_id: pageId }),
-    authorId ? notion.users.retrieve({ user_id: authorId }).catch(() => null) : null,
-    notion.pages.retrieve({ page_id: pageId }),
+    notion.comments.list({ block_id: pageId }).catch((err) => {
+      logger.warn({ err: err.message, pageId }, 'Failed to fetch comments');
+      return null;
+    }),
+    authorId
+      ? notion.users.retrieve({ user_id: authorId }).catch(() => null)
+      : null,
+    notion.pages.retrieve({ page_id: pageId }).catch(() => null),
   ]);
 
-  // Find the specific comment
-  const comment = commentsResponse.results.find((c) => c.id === commentId);
-  if (!comment) {
-    logger.warn({ commentId, pageId }, 'Comment not found in page comments');
-    return;
-  }
-
   // Extract comment text
-  const commentText =
-    'rich_text' in comment
-      ? (comment.rich_text as Array<{ plain_text: string }>).map((t) => t.plain_text).join('')
-      : '(no text)';
+  let commentText = '(could not fetch comment text)';
+  if (commentsResponse) {
+    const comment = commentsResponse.results.find((c) => c.id === commentId);
+    if (comment && 'rich_text' in comment) {
+      commentText = (comment.rich_text as Array<{ plain_text: string }>)
+        .map((t) => t.plain_text)
+        .join('');
+    }
+  }
 
   // Extract author name
   let authorName = 'Unknown';
@@ -109,7 +112,7 @@ async function processCommentCreated(event: NotionWebhookEvent): Promise<void> {
 
   // Extract page title
   let pageTitle = 'Untitled';
-  if ('properties' in pageData) {
+  if (pageData && 'properties' in pageData) {
     const titleProp = Object.values(pageData.properties).find(
       (p: unknown) => (p as { type: string }).type === 'title',
     ) as { title: Array<{ plain_text: string }> } | undefined;
@@ -121,7 +124,7 @@ async function processCommentCreated(event: NotionWebhookEvent): Promise<void> {
   // Build Notion URL
   const notionUrl = `https://www.notion.so/${pageId.replace(/-/g, '')}`;
 
-  // Post to Slack
+  // Post to Slack — always send, even with partial data
   const slack = getDedicatedBotClient('otto');
   await slack.chat.postMessage({
     channel: COMMENT_CHANNEL,
