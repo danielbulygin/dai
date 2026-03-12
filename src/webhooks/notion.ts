@@ -128,13 +128,14 @@ async function processCommentCreated(event: NotionWebhookEvent): Promise<void> {
   const slack = getDedicatedBotClient('otto');
   await slack.chat.postMessage({
     channel: COMMENT_CHANNEL,
+    unfurl_links: false,
     text: `New comment on "${pageTitle}" by ${authorName}: ${commentText}`,
     blocks: [
       {
         type: 'section',
         text: {
           type: 'mrkdwn',
-          text: `*New comment on <${notionUrl}|${escapeSlackMrkdwn(pageTitle)}>*`,
+          text: `> ${escapeSlackMrkdwn(commentText)}`,
         },
       },
       {
@@ -142,16 +143,20 @@ async function processCommentCreated(event: NotionWebhookEvent): Promise<void> {
         elements: [
           {
             type: 'mrkdwn',
-            text: `*${escapeSlackMrkdwn(authorName)}* · ${formatTimestamp(event.timestamp)}`,
+            text: `*${escapeSlackMrkdwn(authorName)}* commented on *${escapeSlackMrkdwn(pageTitle)}* · ${formatTimestamp(event.timestamp)}`,
           },
         ],
       },
       {
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: `> ${escapeSlackMrkdwn(commentText)}`,
-        },
+        type: 'actions',
+        elements: [
+          {
+            type: 'button',
+            text: { type: 'plain_text', text: 'Open in Notion' },
+            url: notionUrl,
+            action_id: 'notion_comment_open',
+          },
+        ],
       },
     ],
   });
