@@ -80,29 +80,39 @@ async function processCommentCreated(event: NotionWebhookEvent): Promise<void> {
   const commentId = event.entity.id;
   const authorId = event.authors?.[0]?.id;
   const pageId = event.data.page_id;
+  const parentId = event.data.parent?.id;
+  const parentType = event.data.parent?.type;
+
+  logger.info({ commentId, authorId, pageId, parentId, parentType }, 'Processing comment.created');
+
+  // Try fetching comments from the parent block first (where the comment is anchored),
+  // fall back to page-level comments
+  async function fetchCommentText(): Promise<string> {
+    const idsToTry = parentId && parentId !== pageId ? [parentId, pageId] : [pageId];
+    for (const blockId of idsToTry) {
+      try {
+        const response = await notion.comments.list({ block_id: blockId });
+        const comment = response.results.find((c) => c.id === commentId);
+        if (comment && 'rich_text' in comment) {
+          return (comment.rich_text as Array<{ plain_text: string }>)
+            .map((t) => t.plain_text)
+            .join('');
+        }
+      } catch (err) {
+        logger.warn({ err: (err as Error).message, blockId }, 'Failed to fetch comments from block');
+      }
+    }
+    return '(could not fetch comment text)';
+  }
 
   // Fetch comment text, author info, and page title concurrently (all gracefully fallible)
-  const [commentsResponse, authorData, pageData] = await Promise.all([
-    notion.comments.list({ block_id: pageId }).catch((err) => {
-      logger.warn({ err: err.message, pageId }, 'Failed to fetch comments');
-      return null;
-    }),
+  const [commentText, authorData, pageData] = await Promise.all([
+    fetchCommentText(),
     authorId
       ? notion.users.retrieve({ user_id: authorId }).catch(() => null)
       : null,
     notion.pages.retrieve({ page_id: pageId }).catch(() => null),
   ]);
-
-  // Extract comment text
-  let commentText = '(could not fetch comment text)';
-  if (commentsResponse) {
-    const comment = commentsResponse.results.find((c) => c.id === commentId);
-    if (comment && 'rich_text' in comment) {
-      commentText = (comment.rich_text as Array<{ plain_text: string }>)
-        .map((t) => t.plain_text)
-        .join('');
-    }
-  }
 
   // Extract author name
   let authorName = 'Unknown';
