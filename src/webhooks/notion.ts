@@ -7,6 +7,9 @@ import { logger } from '../utils/logger.js';
 
 const COMMENT_CHANNEL = 'C0AK6DQ1KST'; // #temp-notion-comments
 
+// Only forward comments from these email domains (empty = forward all)
+const ALLOWED_DOMAINS = ['teethlovers.de', 'audibene.de'];
+
 export const notionWebhookRouter = new Hono();
 
 // ── Signature verification ──────────────────────────────────────────────────
@@ -114,10 +117,23 @@ async function processCommentCreated(event: NotionWebhookEvent): Promise<void> {
     notion.pages.retrieve({ page_id: pageId }).catch(() => null),
   ]);
 
-  // Extract author name
+  // Extract author info
   let authorName = 'Unknown';
+  let authorEmail = '';
   if (authorData && 'name' in authorData) {
     authorName = (authorData.name as string) || 'Unknown';
+  }
+  if (authorData && 'person' in authorData) {
+    authorEmail = ((authorData as { person: { email?: string } }).person?.email) || '';
+  }
+
+  // Filter: only forward comments from allowed domains
+  if (ALLOWED_DOMAINS.length > 0) {
+    const domain = authorEmail.split('@')[1]?.toLowerCase();
+    if (!domain || !ALLOWED_DOMAINS.includes(domain)) {
+      logger.info({ authorName, authorEmail, commentId }, 'Skipping comment — author not in allowed domains');
+      return;
+    }
   }
 
   // Extract page title
