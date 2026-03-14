@@ -7,8 +7,11 @@ import { logger } from '../utils/logger.js';
 
 const COMMENT_CHANNEL = 'C0AK6DQ1KST'; // #temp-notion-comments
 
-// Only forward comments from these email domains (empty = forward all)
-const ALLOWED_DOMAINS = ['teethlovers.de', 'audibene.de'];
+// Domain → client Slack channel routing (also doubles as the allow-list)
+const DOMAIN_ROUTING: Record<string, string> = {
+  'teethlovers.de': 'C09LUB9CZC2', // #internal-teethlovers
+  'audibene.de': 'C0A5GPDKXEK',    // #internal-audibene
+};
 
 export const notionWebhookRouter = new Hono();
 
@@ -128,13 +131,13 @@ async function processCommentCreated(event: NotionWebhookEvent): Promise<void> {
   }
 
   // Filter: only forward comments from allowed domains
-  if (ALLOWED_DOMAINS.length > 0) {
-    const domain = authorEmail.split('@')[1]?.toLowerCase();
-    if (!domain || !ALLOWED_DOMAINS.includes(domain)) {
-      logger.info({ authorName, authorEmail, commentId }, 'Skipping comment — author not in allowed domains');
-      return;
-    }
+  const domain = authorEmail.split('@')[1]?.toLowerCase();
+  if (!domain || !DOMAIN_ROUTING[domain]) {
+    logger.info({ authorName, authorEmail, commentId }, 'Skipping comment — author not in allowed domains');
+    return;
   }
+
+  const clientChannel = DOMAIN_ROUTING[domain];
 
   // Extract page title
   let pageTitle = 'Untitled';
@@ -150,10 +153,9 @@ async function processCommentCreated(event: NotionWebhookEvent): Promise<void> {
   // Build Notion URL
   const notionUrl = `https://www.notion.so/${pageId.replace(/-/g, '')}`;
 
-  // Post to Slack — always send, even with partial data
+  // Build Slack message payload
   const slack = getDedicatedBotClient('otto');
-  await slack.chat.postMessage({
-    channel: COMMENT_CHANNEL,
+  const messagePayload = {
     unfurl_links: false,
     text: `New comment on "${pageTitle}" by ${authorName}: ${commentText}`,
     blocks: [
@@ -185,9 +187,15 @@ async function processCommentCreated(event: NotionWebhookEvent): Promise<void> {
         ],
       },
     ],
-  });
+  };
 
-  logger.info({ commentId, authorName, pageTitle }, 'Notion comment forwarded to Slack');
+  // Post to both the catch-all channel and the client-specific channel
+  await Promise.all([
+    slack.chat.postMessage({ channel: COMMENT_CHANNEL, ...messagePayload }),
+    slack.chat.postMessage({ channel: clientChannel, ...messagePayload }),
+  ]);
+
+  logger.info({ commentId, authorName, pageTitle, clientChannel }, 'Notion comment forwarded to Slack');
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
