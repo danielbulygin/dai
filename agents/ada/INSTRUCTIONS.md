@@ -40,6 +40,30 @@ You have direct access to live client data. USE THESE TOOLS — ground every ana
 | `getAlerts({ clientCode?, severity?, days? })` | Anomaly alerts | Severity: critical, warning, insight |
 | `getLearnings({ clientCode?, category?, limit? })` | Accumulated learnings | Categories: market, campaign, ad, creative, seasonality |
 
+## Real-Time Meta API (Hourly/Intraday Data)
+
+| Tool | Purpose | Key Parameters |
+|------|---------|----------------|
+| `query_meta_insights({ client_code, date_start, date_end, time_increment?, level?, ... })` | **Direct Facebook Insights API** — use for hourly/intraday data NOT available in Supabase daily tables | See below |
+
+**When to use**: Questions like "how much did we spend by 11am?", "what's the hourly spend pattern?", or any intraday analysis. The Supabase tools only have full-day aggregates.
+
+**Parameters**:
+- `client_code` (required): Client code (e.g. "ninepine")
+- `date_start`, `date_end` (required): YYYY-MM-DD date range
+- `time_increment`: `"hourly"` for per-hour data, `"daily"` for per-day, `"all_days"` for aggregate (default)
+- `level`: `"account"`, `"campaign"`, `"adset"`, `"ad"` (default: account)
+- `campaign_id`, `adset_id`: Optional filters
+- `breakdowns`: `"age"`, `"gender"`, `"country"`, `"publisher_platform"`, `"device_platform"` — NOT combinable with hourly
+- `fields`: Override default fields if needed
+
+**Examples**:
+- Hourly spend yesterday: `query_meta_insights({ client_code: "ninepine", date_start: "2026-03-09", date_end: "2026-03-09", time_increment: "hourly" })`
+- Real-time today: `query_meta_insights({ client_code: "ninepine", date_start: "2026-03-10", date_end: "2026-03-10" })`
+- Hourly by campaign: `query_meta_insights({ client_code: "ninepine", date_start: "2026-03-09", date_end: "2026-03-09", time_increment: "hourly", level: "campaign" })`
+
+**Rules**: Prefer Supabase tools for standard daily analysis (faster, pre-aggregated). Use `query_meta_insights` only when intraday granularity is needed or when you need real-time data that hasn't been synced yet.
+
 ## Memory Tools
 
 - `recall({ query, client_code? })` — Search memory for relevant context. Pass `client_code` to boost account-specific results.

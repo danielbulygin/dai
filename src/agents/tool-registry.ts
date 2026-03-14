@@ -13,6 +13,7 @@ import * as methodologyTools from './tools/methodology-tools.js';
 import * as googleTools from './tools/google-tools.js';
 import * as browserTools from './tools/browser-tools.js';
 import * as creativeTools from './tools/creative-tools.js';
+import * as metaApiTools from './tools/meta-api-tools.js';
 import * as reportTools from '../reports/index.js';
 import * as methodologySanitizer from '../client-agents/methodology-sanitizer.js';
 import { logger } from '../utils/logger.js';
@@ -277,6 +278,80 @@ register({
     return creativeTools.getCreativeDiversityScore({
       clientCode: input.client_code as string,
       days: input.days as number | undefined,
+    });
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Meta API tools (direct Facebook Insights API — hourly/intraday data)
+// ---------------------------------------------------------------------------
+
+register({
+  definition: {
+    name: 'query_meta_insights',
+    description:
+      'Query the Facebook Marketing API directly for real-time insights. Use this for HOURLY/INTRADAY data that is NOT available in the Supabase daily tables. Supports hourly breakdowns (e.g. "how much was spent by 11am yesterday?"), real-time spend checks, and dimensional breakdowns at any time granularity. For standard daily analysis, prefer the Supabase tools (get_client_performance, get_campaign_summary, etc.) which are faster and pre-aggregated.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        client_code: {
+          type: 'string',
+          description: 'Client code (e.g. "ninepine", "press_london", "laori")',
+        },
+        date_start: {
+          type: 'string',
+          description: 'Start date YYYY-MM-DD (inclusive)',
+        },
+        date_end: {
+          type: 'string',
+          description: 'End date YYYY-MM-DD (inclusive)',
+        },
+        level: {
+          type: 'string',
+          enum: ['account', 'campaign', 'adset', 'ad'],
+          description: 'Aggregation level (default: account)',
+        },
+        time_increment: {
+          type: 'string',
+          enum: ['hourly', 'daily', 'all_days'],
+          description: 'Time granularity. Use "hourly" for intraday data — returns spend per hour in the advertiser timezone. Use "daily" for day-by-day. Use "all_days" (default) for aggregate over the date range.',
+        },
+        campaign_id: {
+          type: 'string',
+          description: 'Optional: filter to a specific campaign ID',
+        },
+        adset_id: {
+          type: 'string',
+          description: 'Optional: filter to a specific adset ID',
+        },
+        breakdowns: {
+          type: 'string',
+          description: 'Optional comma-separated breakdowns: age, gender, country, publisher_platform, platform_position, device_platform, impression_device. Do NOT combine with hourly time_increment (hourly already uses a breakdown).',
+        },
+        fields: {
+          type: 'string',
+          description: 'Optional comma-separated fields override. Default: spend,impressions,reach,frequency,clicks,cpc,cpm,ctr,actions,action_values,cost_per_action_type',
+        },
+        limit: {
+          type: 'number',
+          description: 'Max rows per page (default: API default ~25)',
+        },
+      },
+      required: ['client_code', 'date_start', 'date_end'],
+    },
+  },
+  async execute(input, context) {
+    return metaApiTools.queryMetaInsights({
+      clientCode: (context.clientScope?.clientCode ?? input.client_code) as string,
+      dateStart: input.date_start as string,
+      dateEnd: input.date_end as string,
+      level: input.level as 'account' | 'campaign' | 'adset' | 'ad' | undefined,
+      timeIncrement: input.time_increment as 'hourly' | 'daily' | 'all_days' | undefined,
+      campaignId: input.campaign_id as string | undefined,
+      adsetId: input.adset_id as string | undefined,
+      breakdowns: input.breakdowns as string | undefined,
+      fields: input.fields as string | undefined,
+      limit: input.limit as number | undefined,
     });
   },
 });
@@ -2404,6 +2479,7 @@ const SCOPED_BMAD_TOOLS = new Set([
   'get_adset_summary', 'get_adset_performance',
   'get_ad_summary', 'get_ad_performance', 'get_breakdowns',
   'get_creative_details', 'get_alerts', 'get_learnings',
+  'query_meta_insights',
 ]);
 
 export async function executeTool(
