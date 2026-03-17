@@ -98,17 +98,23 @@ export async function processMeeting(meetingId: string): Promise<void> {
 
 /**
  * Process all unprocessed meetings (pipeline_status IS NULL).
+ * Only looks back 7 days to avoid blasting through the entire backlog.
  * Returns the number of meetings processed.
  */
 export async function processNewMeetings(): Promise<number> {
   const supabase = getDaiSupabase();
 
+  // Only process recent meetings (7-day window) to avoid burning through
+  // the entire 2000+ meeting backlog on first deploy
+  const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+
   const { data: meetings, error } = await supabase
     .from('meetings')
     .select('id, title')
     .is('pipeline_status', null)
+    .gt('date', since)
     .order('date', { ascending: true })
-    .limit(20); // Process up to 20 per batch to avoid timeouts
+    .limit(10); // Process up to 10 per batch to avoid timeouts
 
   if (error) {
     logger.error({ error }, 'Failed to fetch unprocessed meetings');
