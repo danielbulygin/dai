@@ -299,12 +299,13 @@ export async function monitorNinaDanielCalls(): Promise<number> {
   // Look back 48h to catch stragglers (meetings that get transcribed late)
   const since = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
 
-  // 1. Fetch recent meetings from Daniel's recordings
+  // 1. Fetch recent meetings from Daniel's recordings (skip pipeline-processed ones)
   const { data: meetings, error } = await supabase
     .from('meetings')
     .select('id, title, date, speakers, short_summary')
     .eq('organizer_email', DANIEL_ORGANIZER_EMAIL)
     .gt('date', since)
+    .is('pipeline_status', null)
     .order('date', { ascending: true });
 
   if (error) {

@@ -7,6 +7,7 @@ import { apiKeyAuth } from './auth.js';
 import { healthRouter } from './routes/health.js';
 import { chatRouter } from './routes/chat.js';
 import { conceptsRouter } from './routes/concepts.js';
+import { pipelineRouter } from './routes/pipeline.js';
 import { notionWebhookRouter } from '../webhooks/notion.js';
 
 export function startApiServer(): void {
@@ -37,6 +38,7 @@ export function startApiServer(): void {
   app.use('/*', apiKeyAuth);
   app.route('/', chatRouter);
   app.route('/', conceptsRouter);
+  app.route('/', pipelineRouter);
 
   try {
     serve({ fetch: app.fetch, port }, () => {

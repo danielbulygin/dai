@@ -4,14 +4,9 @@ import { env } from '../env.js';
 import { getNotion } from '../integrations/notion.js';
 import { getDedicatedBotClient } from '../slack/dedicated-bots.js';
 import { logger } from '../utils/logger.js';
+import { getSlackChannelForDomain } from '../config/client-domains.js';
 
 const COMMENT_CHANNEL = 'C0AK6DQ1KST'; // #temp-notion-comments
-
-// Domain → client Slack channel routing (also doubles as the allow-list)
-const DOMAIN_ROUTING: Record<string, string> = {
-  'teethlovers.de': 'C09LUB9CZC2', // #internal-teethlovers
-  'audibene.de': 'C0A5GPDKXEK',    // #internal-audibene
-};
 
 export const notionWebhookRouter = new Hono();
 
@@ -130,14 +125,13 @@ async function processCommentCreated(event: NotionWebhookEvent): Promise<void> {
     authorEmail = ((authorData as { person: { email?: string } }).person?.email) || '';
   }
 
-  // Filter: only forward comments from allowed domains
+  // Filter: only forward comments from allowed domains (those with a Slack channel mapping)
   const domain = authorEmail.split('@')[1]?.toLowerCase();
-  if (!domain || !DOMAIN_ROUTING[domain]) {
+  const clientChannel = domain ? getSlackChannelForDomain(domain) : undefined;
+  if (!clientChannel) {
     logger.info({ authorName, authorEmail, commentId }, 'Skipping comment — author not in allowed domains');
     return;
   }
-
-  const clientChannel = DOMAIN_ROUTING[domain];
 
   // Extract page title
   let pageTitle = 'Untitled';

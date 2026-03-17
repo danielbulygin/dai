@@ -211,6 +211,22 @@ Deno.serve(async (req) => {
       `Synced meeting "${meeting.title}" (${meeting.organizer_email}), deduped: ${deduped}`,
     );
 
+    // Fire-and-forget: notify DAI API to trigger pipeline processing
+    const daiApiUrl = Deno.env.get("DAI_API_URL");
+    const daiApiKey = Deno.env.get("DAI_API_KEY");
+    if (daiApiUrl && daiApiKey) {
+      fetch(`${daiApiUrl}/api/process-meeting`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-API-Key": daiApiKey,
+        },
+        body: JSON.stringify({ meetingId: meeting.id }),
+      }).catch((err) =>
+        console.error("Failed to notify DAI pipeline:", err),
+      );
+    }
+
     return new Response(
       JSON.stringify({
         synced: 1,
