@@ -12,6 +12,7 @@ export const toolProfiles = {
     'get_ad_summary', 'get_ad_performance', 'get_breakdowns',
     'get_account_changes', 'get_creative_details',
     'get_alerts', 'get_learnings', 'get_briefs', 'get_concepts',
+    'get_domo_funnel',
     'query_meta_insights',
     'search_meetings', 'get_meeting_summary', 'get_meeting_transcript', 'list_recent_meetings',
     'post_message', 'reply_in_thread',

@@ -955,6 +955,59 @@ register({
 });
 
 // ---------------------------------------------------------------------------
+// Domo / Salesforce funnel data (downstream metrics Meta doesn't have)
+// ---------------------------------------------------------------------------
+
+register({
+  definition: {
+    name: 'get_domo_funnel',
+    description:
+      'Get Salesforce funnel data from Domo — downstream metrics that Meta/Google don\'t have: appointments (opportunities_sf), CPA from Salesforce, CR2 (lead-to-appointment rate), lead quality (first care share, degree of suffering, prescription share), autoclose rate. Data is from Domo CSV exports uploaded manually. Use groupBy to control aggregation: "date" for daily trends, "ad" for per-ad, "campaign" for per-campaign, "adset" for per-adset, "account" for single total. Returns computed metrics: cpa_sf, cr2, autoclose_rate, first_care_share, severe_suffering_share, rx_share, data_completeness.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        clientCode: {
+          type: 'string',
+          description: 'Client code (e.g. "AB" for Audibene)',
+        },
+        days: {
+          type: 'number',
+          description: 'Number of days to look back (default 7)',
+        },
+        campaignId: {
+          type: 'string',
+          description: 'Optional campaign ID filter',
+        },
+        adsetId: {
+          type: 'string',
+          description: 'Optional ad set ID filter',
+        },
+        adId: {
+          type: 'string',
+          description: 'Optional ad ID filter',
+        },
+        groupBy: {
+          type: 'string',
+          enum: ['date', 'ad', 'campaign', 'adset', 'account'],
+          description: 'How to aggregate: "date" (daily trend), "ad" (per-ad totals), "campaign", "adset", "account" (single total). Default: "date".',
+        },
+      },
+      required: ['clientCode'],
+    },
+  },
+  async execute(input) {
+    return await supabaseTools.getDomoFunnel({
+      clientCode: input.clientCode as string,
+      days: input.days as number | undefined,
+      campaignId: input.campaignId as string | undefined,
+      adsetId: input.adsetId as string | undefined,
+      adId: input.adId as string | undefined,
+      groupBy: input.groupBy as string | undefined,
+    });
+  },
+});
+
+// ---------------------------------------------------------------------------
 // Summary tools (server-side aggregation — 1 row per entity)
 // ---------------------------------------------------------------------------
 
@@ -2479,6 +2532,7 @@ const SCOPED_BMAD_TOOLS = new Set([
   'get_adset_summary', 'get_adset_performance',
   'get_ad_summary', 'get_ad_performance', 'get_breakdowns',
   'get_creative_details', 'get_alerts', 'get_learnings',
+  'get_domo_funnel',
   'query_meta_insights',
 ]);
 

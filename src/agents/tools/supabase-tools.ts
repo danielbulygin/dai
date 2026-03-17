@@ -777,3 +777,289 @@ export async function getCreativeDetails(params: {
     return JSON.stringify({ error: msg });
   }
 }
+
+// ---------------------------------------------------------------------------
+// Domo (Salesforce funnel data) — downstream metrics Meta doesn't have
+// ---------------------------------------------------------------------------
+
+interface DomoRow {
+  ad_id: string;
+  ad_name: string | null;
+  campaign_id: string | null;
+  adset_id: string | null;
+  date: string;
+  costs: number | null;
+  clicks: number | null;
+  impressions: number | null;
+  leads_sf: number | null;
+  open_leads_sf: number | null;
+  autoclosed_sf: number | null;
+  opportunities_sf: number | null;
+  first_care_leads: number | null;
+  severely_suffering_leads: number | null;
+  not_at_all_suffering_leads: number | null;
+  barely_suffering_leads: number | null;
+  rx_share: number | null;
+}
+
+interface DomoAgg {
+  key: string;
+  costs: number;
+  clicks: number;
+  impressions: number;
+  leads_sf: number;
+  open_leads_sf: number;
+  autoclosed_sf: number;
+  opportunities_sf: number;
+  first_care_leads: number;
+  severely_suffering_leads: number;
+  not_at_all_suffering_leads: number;
+  barely_suffering_leads: number;
+  rx_share_weighted_sum: number;
+  rx_share_weight: number;
+  ad_names?: string[];
+  days: number;
+}
+
+function aggregateDomoRows(
+  rows: DomoRow[],
+  groupBy: string,
+): Record<string, unknown>[] {
+  const buckets = new Map<string, DomoAgg>();
+
+  for (const r of rows) {
+    let key: string;
+    switch (groupBy) {
+      case "date":
+        key = r.date;
+        break;
+      case "ad":
+        key = r.ad_id;
+        break;
+      case "campaign":
+        key = r.campaign_id ?? "unknown";
+        break;
+      case "adset":
+        key = r.adset_id ?? "unknown";
+        break;
+      default:
+        key = "total";
+    }
+
+    let b = buckets.get(key);
+    if (!b) {
+      b = {
+        key,
+        costs: 0,
+        clicks: 0,
+        impressions: 0,
+        leads_sf: 0,
+        open_leads_sf: 0,
+        autoclosed_sf: 0,
+        opportunities_sf: 0,
+        first_care_leads: 0,
+        severely_suffering_leads: 0,
+        not_at_all_suffering_leads: 0,
+        barely_suffering_leads: 0,
+        rx_share_weighted_sum: 0,
+        rx_share_weight: 0,
+        ad_names: groupBy === "ad" ? [] : undefined,
+        days: 0,
+      };
+      buckets.set(key, b);
+    }
+
+    b.costs += r.costs ?? 0;
+    b.clicks += r.clicks ?? 0;
+    b.impressions += r.impressions ?? 0;
+    b.leads_sf += r.leads_sf ?? 0;
+    b.open_leads_sf += r.open_leads_sf ?? 0;
+    b.autoclosed_sf += r.autoclosed_sf ?? 0;
+    b.opportunities_sf += r.opportunities_sf ?? 0;
+    b.first_care_leads += r.first_care_leads ?? 0;
+    b.severely_suffering_leads += r.severely_suffering_leads ?? 0;
+    b.not_at_all_suffering_leads += r.not_at_all_suffering_leads ?? 0;
+    b.barely_suffering_leads += r.barely_suffering_leads ?? 0;
+    if (r.rx_share != null && r.leads_sf) {
+      b.rx_share_weighted_sum += r.rx_share * r.leads_sf;
+      b.rx_share_weight += r.leads_sf;
+    }
+    if (groupBy === "ad" && r.ad_name && !b.ad_names!.includes(r.ad_name)) {
+      b.ad_names!.push(r.ad_name);
+    }
+    b.days += 1;
+  }
+
+  const results: Record<string, unknown>[] = [];
+  for (const b of buckets.values()) {
+    const netLeads = b.leads_sf - b.autoclosed_sf;
+    const totalSuffering =
+      b.severely_suffering_leads +
+      b.not_at_all_suffering_leads +
+      b.barely_suffering_leads;
+
+    const rec: Record<string, unknown> = {
+      [groupBy === "date"
+        ? "date"
+        : groupBy === "ad"
+          ? "ad_id"
+          : groupBy === "campaign"
+            ? "campaign_id"
+            : groupBy === "adset"
+              ? "adset_id"
+              : "group"]: b.key,
+      costs: round2(b.costs),
+      impressions: b.impressions,
+      clicks: b.clicks,
+      leads_sf: b.leads_sf,
+      autoclosed_sf: b.autoclosed_sf,
+      net_leads: netLeads,
+      open_leads_sf: b.open_leads_sf,
+      opportunities_sf: b.opportunities_sf,
+      first_care_leads: b.first_care_leads,
+      severely_suffering_leads: b.severely_suffering_leads,
+      barely_suffering_leads: b.barely_suffering_leads,
+      not_at_all_suffering_leads: b.not_at_all_suffering_leads,
+      // Computed rates
+      cpl_sf: b.leads_sf > 0 ? round2(b.costs / b.leads_sf) : null,
+      cpa_sf: b.opportunities_sf > 0 ? round2(b.costs / b.opportunities_sf) : null,
+      cr2: b.leads_sf > 0 ? round4(b.opportunities_sf / b.leads_sf) : null,
+      autoclose_rate: b.leads_sf > 0 ? round4(b.autoclosed_sf / b.leads_sf) : null,
+      first_care_share:
+        b.leads_sf > 0 ? round4(b.first_care_leads / b.leads_sf) : null,
+      severe_suffering_share:
+        totalSuffering > 0
+          ? round4(b.severely_suffering_leads / totalSuffering)
+          : null,
+      not_at_all_share:
+        totalSuffering > 0
+          ? round4(b.not_at_all_suffering_leads / totalSuffering)
+          : null,
+      rx_share:
+        b.rx_share_weight > 0
+          ? round4(b.rx_share_weighted_sum / b.rx_share_weight)
+          : null,
+      data_completeness:
+        b.leads_sf > 0
+          ? b.open_leads_sf === 0
+            ? "complete"
+            : "partial"
+          : "no_data",
+    };
+
+    if (groupBy === "ad" && b.ad_names?.length) {
+      rec.ad_name = b.ad_names[0];
+    }
+
+    results.push(rec);
+  }
+
+  // Sort: by date ascending for date grouping, by spend descending otherwise
+  if (groupBy === "date") {
+    results.sort((a, b) =>
+      String(a.date ?? "").localeCompare(String(b.date ?? "")),
+    );
+  } else {
+    results.sort(
+      (a, b) => ((b.costs as number) ?? 0) - ((a.costs as number) ?? 0),
+    );
+  }
+
+  return results;
+}
+
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
+function round4(n: number): number {
+  return Math.round(n * 10000) / 10000;
+}
+
+export async function getDomoFunnel(params: {
+  clientCode: string;
+  days?: number;
+  campaignId?: string;
+  adsetId?: string;
+  adId?: string;
+  groupBy?: string;
+}): Promise<string> {
+  try {
+    const days = params.days ?? 7;
+    const since = daysAgoISO(days);
+    const groupBy = params.groupBy ?? "date";
+
+    logger.debug(
+      {
+        clientCode: params.clientCode,
+        days,
+        groupBy,
+        campaignId: params.campaignId,
+      },
+      "Querying Domo funnel data",
+    );
+
+    const resolved = await resolveClientId(params.clientCode);
+    if ("error" in resolved) return JSON.stringify(resolved);
+
+    const supabase = getSupabase();
+    let query = supabase
+      .from("domo_ad_daily")
+      .select(
+        "ad_id, ad_name, campaign_id, adset_id, date, costs, clicks, impressions, leads_sf, open_leads_sf, autoclosed_sf, opportunities_sf, first_care_leads, severely_suffering_leads, not_at_all_suffering_leads, barely_suffering_leads, rx_share",
+      )
+      .eq("client_id", resolved.id)
+      .gte("date", since);
+
+    if (params.campaignId) {
+      query = query.eq("campaign_id", params.campaignId);
+    }
+    if (params.adsetId) {
+      query = query.eq("adset_id", params.adsetId);
+    }
+    if (params.adId) {
+      query = query.eq("ad_id", params.adId);
+    }
+
+    const { data, error } = await query
+      .order("date", { ascending: false })
+      .limit(2000);
+
+    if (error) {
+      logger.error({ error }, "Failed to get Domo funnel data");
+      return JSON.stringify({ error: error.message });
+    }
+
+    if (!data || data.length === 0) {
+      return JSON.stringify({
+        message: "No Domo data found for this client/period. Domo CSV exports may not have been uploaded yet.",
+        hint: "Domo data is uploaded manually — check if recent CSVs have been imported.",
+      });
+    }
+
+    const aggregated = aggregateDomoRows(data as DomoRow[], groupBy);
+
+    logger.debug(
+      {
+        clientCode: params.clientCode,
+        rawRows: data.length,
+        aggregatedRows: aggregated.length,
+        groupBy,
+      },
+      "Got Domo funnel data",
+    );
+
+    return JSON.stringify({
+      period: { from: since, days, groupBy },
+      rows: aggregated,
+      _meta: {
+        raw_row_count: data.length,
+        note: "cr2 = opportunities_sf / leads_sf. cpa_sf = costs / opportunities_sf. data_completeness: 'complete' when open_leads_sf = 0 (all leads processed by sales).",
+      },
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ error: msg }, "getDomoFunnel failed");
+    return JSON.stringify({ error: msg });
+  }
+}
