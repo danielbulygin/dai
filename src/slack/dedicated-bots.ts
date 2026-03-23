@@ -171,6 +171,19 @@ function registerDedicatedBotListeners(app: App, agentId: string): void {
     if ('bot_id' in message) return;
     if ('subtype' in message) return;
 
+    const text = msg.text as string | undefined;
+    if (!text) return;
+
+    // Skip messages that @mention other users but not this bot.
+    // e.g. "@Daniel what is happening" in a thread shouldn't trigger Ada.
+    const mentionedUsers = text.match(/<@([A-Z0-9]+)>/g) ?? [];
+    if (mentionedUsers.length > 0) {
+      const authResult = await client.auth.test();
+      const botUserId = authResult.user_id as string;
+      const mentionsBot = mentionedUsers.some((m) => m.includes(botUserId));
+      if (!mentionsBot) return;
+    }
+
     const threadTs = msg.thread_ts as string;
     const threads = activeThreads.get(agentId);
     if (!threads?.has(threadTs)) {
@@ -181,11 +194,10 @@ function registerDedicatedBotListeners(app: App, agentId: string): void {
       trackThread(agentId, threadTs);
     }
 
-    const text = msg.text as string | undefined;
     const userId = msg.user as string | undefined;
     const messageTs = msg.ts as string | undefined;
 
-    if (!text || !userId || !messageTs) return;
+    if (!userId || !messageTs) return;
 
     await handleDedicatedBotMessage({
       client,
@@ -256,6 +268,7 @@ async function handleDedicatedBotMessage(opts: {
         channelId: channel,
         threadTs: threadTs ?? messageTs,
         onText: responder.onText,
+        onTurnReset: responder.resetAccumulated,
         clientScope,
       }),
     );

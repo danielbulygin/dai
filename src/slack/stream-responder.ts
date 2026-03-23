@@ -18,6 +18,8 @@ export interface StreamResponderOptions {
 export interface StreamResponderHandle {
   /** Feed text chunks from the agent stream. */
   onText: (text: string) => void;
+  /** Reset accumulated text between tool-use turns to prevent repetition. */
+  resetAccumulated: () => void;
   /** Called once the agent finishes successfully. Posts the final response. */
   finalize: (
     fullText: string,
@@ -115,6 +117,7 @@ export function createStreamResponder(
   let lastUpdateTime = 0;
   let updateInFlight = false;
   let firstUpdateDone = false;
+  let lastUpdatePromise: Promise<void> = Promise.resolve();
 
   // ------ helpers ----------------------------------------------------------
 
@@ -185,7 +188,7 @@ export function createStreamResponder(
       preview = `${mrkdwn}${suffix}`;
     }
 
-    updateMessage(preview)
+    lastUpdatePromise = updateMessage(preview)
       .catch((err: unknown) => {
         logger.warn({ err }, 'Failed to push progressive update');
       })
@@ -211,11 +214,26 @@ export function createStreamResponder(
     pushProgressiveUpdate();
   };
 
+  const resetAccumulated = (): void => {
+    accumulated = '';
+    lastUpdateLen = 0;
+    firstUpdateDone = false;
+    // Show a brief "still working" indicator until the next turn starts streaming
+    if (thinkingTs) {
+      lastUpdatePromise = updateMessage(`:hourglass_flowing_sand: *${agentName}* is pulling more data...`)
+        .catch((err: unknown) => logger.warn({ err }, 'Failed to reset stream message'));
+    }
+  };
+
   const finalize = async (
     fullText: string,
     tokenInfo?: { input: number; output: number; cacheRead?: number; cacheCreation?: number },
   ): Promise<void> => {
     await setupPromise;
+    // Wait for any in-flight progressive/reset update to complete before
+    // sending the final message — prevents a stale update from arriving at
+    // Slack after the finalize update and overwriting it.
+    await lastUpdatePromise;
 
     const mrkdwn = markdownToMrkdwn(fullText);
     const totalTokens = tokenInfo ? tokenInfo.input + tokenInfo.output : undefined;
@@ -258,5 +276,5 @@ export function createStreamResponder(
     await removeReaction('hourglass_flowing_sand', userMessageTs);
   };
 
-  return { onText, finalize, onError };
+  return { onText, resetAccumulated, finalize, onError };
 }

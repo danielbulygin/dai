@@ -320,6 +320,9 @@ async function runWithTools(
 
   // Track the last turn's text for fallback when max turns are hit
   let lastTurnText = '';
+  // Track the last turn that produced substantial text — prevents empty
+  // responseText when the final turn is just a tool acknowledgment
+  let lastSubstantialText = '';
 
   for (let turn = 0; turn < maxTurns; turn++) {
     // Reset streamed text between tool-use turns so the user only sees
@@ -355,13 +358,17 @@ async function runWithTools(
     totalCacheCreation += cacheUsage.cache_creation_input_tokens ?? 0;
 
     lastTurnText = turnText;
+    if (turnText.trim()) {
+      lastSubstantialText = turnText;
+    }
 
     if (msg.stop_reason !== 'tool_use') {
-      // Final turn — only this turn's text becomes the response.
-      // Previous turns' text was shown during streaming but is not stored,
-      // preventing repetitive content in the final message and conversation history.
+      // Final turn — prefer this turn's text for the response.
+      // Fall back to the last turn that had substantial content (e.g., when
+      // the model wrote analysis + called a tool, then the final turn only
+      // acknowledged the tool result with empty/trivial text).
       return {
-        responseText: turnText.trim() ? turnText : lastTurnText,
+        responseText: turnText.trim() ? turnText : lastSubstantialText,
         turns: turn + 1,
         usage: { input: totalInput, output: totalOutput, cacheRead: totalCacheRead, cacheCreation: totalCacheCreation },
       };
@@ -457,7 +464,7 @@ async function runWithTools(
   );
 
   return {
-    responseText: lastTurnText || 'I ran out of processing turns. Please try a more specific question.',
+    responseText: lastSubstantialText || lastTurnText || 'I ran out of processing turns. Please try a more specific question.',
     turns: maxTurns,
     usage: { input: totalInput, output: totalOutput, cacheRead: totalCacheRead, cacheCreation: totalCacheCreation },
   };
