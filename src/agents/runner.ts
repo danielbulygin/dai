@@ -318,11 +318,10 @@ async function runWithTools(
   /** Max total tool result chars per single turn (prevents parallel tool call blowup) */
   const MAX_TURN_TOOL_CHARS = 120_000;
 
-  // Track the last turn's text for fallback when max turns are hit
+  // Accumulate text from ALL turns so the final message contains the full
+  // analysis, not just the last turn's concluding remark.
+  let fullResponseText = '';
   let lastTurnText = '';
-  // Track the last turn that produced substantial text — prevents empty
-  // responseText when the final turn is just a tool acknowledgment
-  let lastSubstantialText = '';
 
   for (let turn = 0; turn < maxTurns; turn++) {
     // Reset streamed text between tool-use turns so the user only sees
@@ -359,24 +358,22 @@ async function runWithTools(
 
     lastTurnText = turnText;
     if (turnText.trim()) {
-      lastSubstantialText = turnText;
+      fullResponseText += (fullResponseText ? '\n\n' : '') + turnText;
     }
 
     if (msg.stop_reason !== 'tool_use') {
-      // Final turn — prefer this turn's text for the response.
-      // Fall back to the last turn that had substantial content (e.g., when
-      // the model wrote analysis + called a tool, then the final turn only
-      // acknowledged the tool result with empty/trivial text).
+      // Final turn — return accumulated text from ALL turns so the full
+      // analysis is preserved, not just the last turn's concluding remark.
       return {
-        responseText: turnText.trim() ? turnText : lastSubstantialText,
+        responseText: fullResponseText.trim() || turnText,
         turns: turn + 1,
         usage: { input: totalInput, output: totalOutput, cacheRead: totalCacheRead, cacheCreation: totalCacheCreation },
       };
     }
 
     // Intermediate tool-use turn — text was streamed to Slack for live feedback
-    // but will be reset at the start of the next turn. Not accumulated into
-    // responseText to avoid repetition.
+    // and will be reset at the start of the next turn.  Text is accumulated
+    // into fullResponseText so the final message contains the full analysis.
 
     // Append the full assistant message (text + tool_use blocks)
     messages.push({ role: 'assistant', content: msg.content });
@@ -464,7 +461,7 @@ async function runWithTools(
   );
 
   return {
-    responseText: lastSubstantialText || lastTurnText || 'I ran out of processing turns. Please try a more specific question.',
+    responseText: fullResponseText.trim() || lastTurnText || 'I ran out of processing turns. Please try a more specific question.',
     turns: maxTurns,
     usage: { input: totalInput, output: totalOutput, cacheRead: totalCacheRead, cacheCreation: totalCacheCreation },
   };
