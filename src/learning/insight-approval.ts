@@ -66,6 +66,7 @@ export async function sendInsightsForApproval(
   meetingId: string,
   meetingTitle: string,
   meetingDate: string,
+  participants?: string[] | null,
 ): Promise<{ durable: number; situational: number }> {
   if (insights.length === 0) return { durable: 0, situational: 0 };
 
@@ -90,6 +91,7 @@ export async function sendInsightsForApproval(
       status: "auto_saved",
       durability: "situational",
       seq: null,
+      participants: participants ?? null,
     }));
 
     await supabase.from("pending_insights").insert(sitRows);
@@ -145,6 +147,7 @@ export async function sendInsightsForApproval(
     status: "pending",
     durability: "durable",
     seq: i + 1,
+    participants: participants ?? null,
   }));
 
   const { data: inserted, error } = await supabase

@@ -39,7 +39,7 @@ export async function ingestNewTranscripts(): Promise<number> {
   const supabase = getDaiSupabase();
   const { data: meetings, error } = await supabase
     .from('meetings')
-    .select('id, title, date, speakers, short_summary')
+    .select('id, title, date, speakers, short_summary, participant_emails, organizer_email')
     .gt('date', since)
     .order('date', { ascending: true });
 
@@ -71,9 +71,15 @@ export async function ingestNewTranscripts(): Promise<number> {
       meeting.short_summary ?? undefined,
     );
 
+    const extra = {
+      participants: meeting.participant_emails as string[] | null,
+      organizer_email: meeting.organizer_email as string | null,
+      meeting_date: meeting.date as string | null,
+    };
+
     if (!pattern) {
       // Log as skipped — no matching pattern
-      await logIngestion(meeting.id, meeting.title, null, 0);
+      await logIngestion(meeting.id, meeting.title, null, 0, extra);
       continue;
     }
 
@@ -92,7 +98,7 @@ export async function ingestNewTranscripts(): Promise<number> {
         });
       }
 
-      await logIngestion(meeting.id, meeting.title, pattern.id, deduped.length);
+      await logIngestion(meeting.id, meeting.title, pattern.id, deduped.length, extra);
       totalInsights += deduped.length;
 
       logger.info(
@@ -105,7 +111,7 @@ export async function ingestNewTranscripts(): Promise<number> {
         'Failed to ingest meeting transcript, continuing',
       );
       // Log as attempted with 0 insights so we don't retry
-      await logIngestion(meeting.id, meeting.title, pattern.id, 0);
+      await logIngestion(meeting.id, meeting.title, pattern.id, 0, extra);
     }
   }
 
@@ -257,6 +263,7 @@ async function logIngestion(
   meetingTitle: string | null,
   patternId: string | null,
   insightsExtracted: number,
+  extra?: { participants?: string[] | null; organizer_email?: string | null; meeting_date?: string | null },
 ): Promise<void> {
   const supabase = getDaiSupabase();
 
@@ -270,6 +277,9 @@ async function logIngestion(
           meeting_title: meetingTitle,
           pattern_id: patternId,
           insights_extracted: insightsExtracted,
+          participants: extra?.participants ?? null,
+          organizer_email: extra?.organizer_email ?? null,
+          meeting_date: extra?.meeting_date ?? null,
         },
         { onConflict: 'meeting_id', ignoreDuplicates: true },
       );
@@ -302,7 +312,7 @@ export async function monitorNinaDanielCalls(): Promise<number> {
   // 1. Fetch recent meetings from Daniel's recordings (skip pipeline-processed ones)
   const { data: meetings, error } = await supabase
     .from('meetings')
-    .select('id, title, date, speakers, short_summary')
+    .select('id, title, date, speakers, short_summary, participant_emails, organizer_email')
     .eq('organizer_email', DANIEL_ORGANIZER_EMAIL)
     .gt('date', since)
     .is('pipeline_status', null)
@@ -325,6 +335,8 @@ export async function monitorNinaDanielCalls(): Promise<number> {
     date: string | null;
     speakers: string[] | null;
     short_summary: string | null;
+    participant_emails: string[] | null;
+    organizer_email: string | null;
   }>).filter((m) => {
     const title = (m.title ?? '').toLowerCase();
     const speakers = (m.speakers ?? []).map((s) => s.toLowerCase());
@@ -359,6 +371,11 @@ export async function monitorNinaDanielCalls(): Promise<number> {
       ? new Date(meeting.date).toISOString().slice(0, 10)
       : new Date().toISOString().slice(0, 10);
     const meetingTitle = meeting.title ?? 'Untitled Nina/Daniel call';
+    const extra = {
+      participants: meeting.participant_emails,
+      organizer_email: meeting.organizer_email,
+      meeting_date: meeting.date,
+    };
 
     try {
       // Extract insights via two-stage pipeline
@@ -370,7 +387,9 @@ export async function monitorNinaDanielCalls(): Promise<number> {
 
       if (insights.length > 0) {
         // Send for Slack approval (splits durable vs situational)
-        const counts = await sendInsightsForApproval(insights, meeting.id, meetingTitle, meetingDate);
+        const counts = await sendInsightsForApproval(
+          insights, meeting.id, meetingTitle, meetingDate, meeting.participant_emails,
+        );
         logger.info(
           { meetingId: meeting.id, title: meetingTitle, durable: counts.durable, situational: counts.situational },
           'Processed Nina/Daniel insights',
@@ -383,7 +402,7 @@ export async function monitorNinaDanielCalls(): Promise<number> {
       }
 
       // Log as processed (so we don't re-process)
-      await logIngestion(meeting.id, meetingTitle, NINA_DANIEL_PATTERN_ID, insights.length);
+      await logIngestion(meeting.id, meetingTitle, NINA_DANIEL_PATTERN_ID, insights.length, extra);
       totalProcessed++;
     } catch (err) {
       logger.error(
@@ -391,7 +410,7 @@ export async function monitorNinaDanielCalls(): Promise<number> {
         'Failed to process Nina/Daniel meeting',
       );
       // Log as attempted so we don't retry indefinitely
-      await logIngestion(meeting.id, meetingTitle, NINA_DANIEL_PATTERN_ID, 0);
+      await logIngestion(meeting.id, meetingTitle, NINA_DANIEL_PATTERN_ID, 0, extra);
     }
   }
 
