@@ -962,7 +962,7 @@ register({
   definition: {
     name: 'get_domo_funnel',
     description:
-      'Get Salesforce funnel data from Domo — downstream metrics that Meta/Google don\'t have: appointments (opportunities_sf), CPA from Salesforce, CR2 (lead-to-appointment rate), lead quality (first care share, degree of suffering, prescription share), autoclose rate. Data is from Domo CSV exports uploaded manually. Use groupBy to control aggregation: "date" for daily trends, "ad" for per-ad, "campaign" for per-campaign, "adset" for per-adset, "account" for single total. Returns computed metrics: cpa_sf, cr2, autoclose_rate, first_care_share, severe_suffering_share, rx_share, data_completeness.',
+      'Get Salesforce funnel data from Domo — downstream metrics that Meta/Google don\'t have: appointments (opportunities_sf), CPA from Salesforce, CR2 (lead-to-appointment rate), lead quality (first care share, degree of suffering, prescription share), autoclose rate. Data is from Domo CSV exports uploaded manually. Use groupBy to control aggregation: "date" for daily trends, "ad" for per-ad, "campaign" for per-campaign, "adset" for per-adset, "account" for single total. IMPORTANT: The same creative can exist across multiple campaigns with different ad_ids — use adName with the creative name (e.g. "SENSATION-IMAGE-4x5-ADBNx3431v1") to search across all campaigns rather than filtering by a single adId. Do NOT search by ACT code (account-level, not ad-level). Returns computed metrics: cpa_sf, cr2, autoclose_rate, first_care_share, severe_suffering_share, rx_share, data_completeness.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -972,7 +972,7 @@ register({
         },
         days: {
           type: 'number',
-          description: 'Number of days to look back (default 7)',
+          description: 'Number of days to look back (default 30)',
         },
         campaignId: {
           type: 'string',
@@ -984,7 +984,11 @@ register({
         },
         adId: {
           type: 'string',
-          description: 'Optional ad ID filter',
+          description: 'Optional ad ID filter (numeric Meta ad ID). Prefer adName over adId since the same creative has different ad_ids in different campaigns.',
+        },
+        adName: {
+          type: 'string',
+          description: 'Search ad name (case-insensitive partial match). Use the creative name to find all instances across campaigns — e.g. "SENSATION-IMAGE-4x5-ADBNx3431v1" for a specific ad, or "SENSATION" for all variants. Do NOT use ACT codes (they are account-level, shared across many creatives).',
         },
         groupBy: {
           type: 'string',
@@ -1002,6 +1006,7 @@ register({
       campaignId: input.campaignId as string | undefined,
       adsetId: input.adsetId as string | undefined,
       adId: input.adId as string | undefined,
+      adName: input.adName as string | undefined,
       groupBy: input.groupBy as string | undefined,
     });
   },

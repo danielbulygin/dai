@@ -976,16 +976,85 @@ function round4(n: number): number {
   return Math.round(n * 10000) / 10000;
 }
 
+// Given a set of ad_ids, find all ad_ids that share the same image_hash or video_hash.
+// This finds all copies of the same creative asset across the entire account.
+async function expandAdIdsByHash(
+  supabase: ReturnType<typeof getSupabase>,
+  clientId: string,
+  adIds: string[],
+): Promise<{ expandedIds: string[]; hashInfo: string | null }> {
+  if (adIds.length === 0) return { expandedIds: [], hashInfo: null };
+
+  // Step 1: Get hashes for the given ad_ids
+  const { data: creatives } = await supabase
+    .from("creatives")
+    .select("ad_id, image_hash, video_hash, video_id, ad_type")
+    .eq("client_id", clientId)
+    .in("ad_id", adIds);
+
+  if (!creatives || creatives.length === 0) {
+    return { expandedIds: adIds, hashInfo: null };
+  }
+
+  // Collect unique hashes
+  const imageHashes = new Set<string>();
+  const videoHashes = new Set<string>();
+  for (const c of creatives) {
+    if (c.image_hash) imageHashes.add(c.image_hash);
+    if (c.video_hash) videoHashes.add(c.video_hash);
+    if (c.video_id) videoHashes.add(c.video_id); // video_id also identifies the asset
+  }
+
+  if (imageHashes.size === 0 && videoHashes.size === 0) {
+    return { expandedIds: adIds, hashInfo: null };
+  }
+
+  // Step 2: Find all ad_ids sharing those hashes
+  const allAdIds = new Set(adIds);
+  const hashType = imageHashes.size > 0 ? "image_hash" : "video_hash";
+  const hashes = imageHashes.size > 0 ? [...imageHashes] : [...videoHashes];
+
+  const { data: siblings } = await supabase
+    .from("creatives")
+    .select("ad_id")
+    .eq("client_id", clientId)
+    .in(hashType, hashes);
+
+  if (siblings) {
+    for (const s of siblings) allAdIds.add(s.ad_id);
+  }
+
+  // Also check video_id if we had video hashes
+  if (videoHashes.size > 0) {
+    const { data: videoSiblings } = await supabase
+      .from("creatives")
+      .select("ad_id")
+      .eq("client_id", clientId)
+      .in("video_id", [...videoHashes]);
+    if (videoSiblings) {
+      for (const s of videoSiblings) allAdIds.add(s.ad_id);
+    }
+  }
+
+  const expanded = [...allAdIds];
+  const hashInfo = expanded.length > adIds.length
+    ? `Expanded from ${adIds.length} to ${expanded.length} ad_ids via ${hashType} matching (same creative asset in different campaigns/ad sets).`
+    : null;
+
+  return { expandedIds: expanded, hashInfo };
+}
+
 export async function getDomoFunnel(params: {
   clientCode: string;
   days?: number;
   campaignId?: string;
   adsetId?: string;
   adId?: string;
+  adName?: string;
   groupBy?: string;
 }): Promise<string> {
   try {
-    const days = params.days ?? 7;
+    const days = params.days ?? 30;
     const since = daysAgoISO(days);
     const groupBy = params.groupBy ?? "date";
 
@@ -995,6 +1064,7 @@ export async function getDomoFunnel(params: {
         days,
         groupBy,
         campaignId: params.campaignId,
+        adName: params.adName,
       },
       "Querying Domo funnel data",
     );
@@ -1003,6 +1073,30 @@ export async function getDomoFunnel(params: {
     if ("error" in resolved) return JSON.stringify(resolved);
 
     const supabase = getSupabase();
+
+    // When filtering by adName or adId, expand via image_hash/video_hash to find
+    // all copies of the same creative asset across the account.
+    let hashResolvedIds: string[] | null = null;
+    let hashInfo: string | null = null;
+
+    if (params.adName || params.adId) {
+      // First pass: find matching ad_ids from domo_ad_daily
+      let seedQuery = supabase
+        .from("domo_ad_daily")
+        .select("ad_id")
+        .eq("client_id", resolved.id);
+      if (params.adId) seedQuery = seedQuery.eq("ad_id", params.adId);
+      if (params.adName) seedQuery = seedQuery.ilike("ad_name", `%${params.adName}%`);
+      const { data: seedRows } = await seedQuery.limit(500);
+
+      const seedIds = [...new Set((seedRows ?? []).map(r => r.ad_id))];
+      if (seedIds.length > 0) {
+        const result = await expandAdIdsByHash(supabase, resolved.id, seedIds);
+        hashResolvedIds = result.expandedIds;
+        hashInfo = result.hashInfo;
+      }
+    }
+
     let query = supabase
       .from("domo_ad_daily")
       .select(
@@ -1017,8 +1111,14 @@ export async function getDomoFunnel(params: {
     if (params.adsetId) {
       query = query.eq("adset_id", params.adsetId);
     }
-    if (params.adId) {
+
+    if (hashResolvedIds) {
+      // Use the hash-expanded ad_id list
+      query = query.in("ad_id", hashResolvedIds);
+    } else if (params.adId) {
       query = query.eq("ad_id", params.adId);
+    } else if (params.adName) {
+      query = query.ilike("ad_name", `%${params.adName}%`);
     }
 
     const { data, error } = await query
@@ -1039,23 +1139,42 @@ export async function getDomoFunnel(params: {
 
     const aggregated = aggregateDomoRows(data as DomoRow[], groupBy);
 
+    // Data quality check: detect rows with spend but null leads (incomplete attribution)
+    const rows = data as DomoRow[];
+    const nullLeadRows = rows.filter(r => r.leads_sf == null && (r.costs ?? 0) > 0);
+    const nullLeadCost = nullLeadRows.reduce((s, r) => s + (r.costs ?? 0), 0);
+    const totalCost = rows.reduce((s, r) => s + (r.costs ?? 0), 0);
+    const nullPct = totalCost > 0 ? Math.round(nullLeadCost / totalCost * 100) : 0;
+
     logger.debug(
       {
         clientCode: params.clientCode,
         rawRows: data.length,
         aggregatedRows: aggregated.length,
         groupBy,
+        nullLeadRows: nullLeadRows.length,
+        nullLeadCostPct: nullPct,
       },
       "Got Domo funnel data",
     );
 
+    const meta: Record<string, unknown> = {
+      raw_row_count: data.length,
+      note: "cr2 = opportunities_sf / leads_sf. cpa_sf = costs / opportunities_sf. data_completeness: 'complete' when open_leads_sf = 0 (all leads processed by sales).",
+    };
+
+    if (hashInfo) {
+      meta.hash_resolution = hashInfo;
+    }
+
+    if (nullPct >= 20) {
+      meta.data_quality_warning = `${nullPct}% of spend (€${Math.round(nullLeadCost)} of €${Math.round(totalCost)}) comes from rows with no lead attribution data. Actual leads may be HIGHER than reported. This happens when the Domo CSV export was uploaded before Salesforce lead attribution was complete, or when leads are only attributed to certain campaign placements in Domo. Check the Domo dashboard directly for the most accurate lead counts.`;
+    }
+
     return JSON.stringify({
       period: { from: since, days, groupBy },
       rows: aggregated,
-      _meta: {
-        raw_row_count: data.length,
-        note: "cr2 = opportunities_sf / leads_sf. cpa_sf = costs / opportunities_sf. data_completeness: 'complete' when open_leads_sf = 0 (all leads processed by sales).",
-      },
+      _meta: meta,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

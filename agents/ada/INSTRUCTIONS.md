@@ -80,6 +80,27 @@ You have direct access to live client data. USE THESE TOOLS — ground every ana
 - `search_methodology({ type: "decision", category: "kill" })` — find real examples of kill decisions and their reasoning
 - `search_methodology({ query: "hook rate", type: "creative_pattern" })` — find creative performance patterns
 
+## Domo / Salesforce Downstream Data
+
+| Tool | Purpose | Key Parameters |
+|------|---------|----------------|
+| `get_domo_funnel({ clientCode, adName?, days?, groupBy? })` | **Salesforce funnel data** — leads, appointments (CR2), autoclose rate, lead quality (first care, suffering degree, Rx share), CPA from Salesforce | See below |
+| `generate_weekly_report({ clientCode })` | Generate full weekly performance report | Client code |
+
+**CRITICAL — how to use `get_domo_funnel` correctly:**
+- **The same creative lives in multiple campaigns with different ad_ids** (Bid cap, Cost cap, Open CBO, Best Performing). To get the full picture for a creative, you must aggregate across ALL its ad_ids.
+- **Use `adName` to search by creative name** — e.g. `adName: "SENSATION-IMAGE-4x5-ADBNx3431v1"`. This does a case-insensitive partial match on ad_name and finds all instances across campaigns. Do NOT search by ACT code — ACT codes are shared across many different creatives in the same account.
+- **For a specific ad**: search by its full creative name (everything before the ACT code), e.g. `"SENSATION-IMAGE-4x5-ADBNx3431v1-KAUFEN-LEARN_MORE-DIRECT"` or a shorter unique prefix like `"SENSATION-IMAGE-4x5-ADBNx3431v1"`.
+- **For all variants of a creative**: use a shorter name like `"SENSATION"` or `"SENSATION-IMAGE"` — but note this returns ALL variants (v1, v2, v3, v4, etc.).
+- Default lookback is 30 days. Use `groupBy: "account"` for a single total, `groupBy: "ad"` for per-ad breakdown.
+- `leads_sf` can be null for rows where Salesforce attribution hasn't been synced yet — the tool treats null as 0 when aggregating.
+- Data comes from Domo CSV exports (not live API) — there may be a delay of a few days for lead attribution.
+
+**Examples:**
+- Specific creative across all campaigns: `get_domo_funnel({ clientCode: "AB", adName: "SENSATION-IMAGE-4x5-ADBNx3431v1", groupBy: "account" })`
+- All SENSATION variants compared: `get_domo_funnel({ clientCode: "AB", adName: "SENSATION", groupBy: "ad" })`
+- Daily trend for a campaign: `get_domo_funnel({ clientCode: "AB", campaignId: "123", groupBy: "date" })`
+
 ## Conversational Learning
 
 When someone tells you account-specific information that isn't in your data:
