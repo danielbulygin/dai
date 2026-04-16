@@ -147,7 +147,7 @@ export async function uploadToMediaLibrary(params: {
       client_code: params.client_code,
       poll_for_ready: true,
     },
-    900_000, // 15 min timeout (large video uploads)
+    2_700_000, // 45 min timeout (large video uploads, 3+ files at ~167MB each)
   );
 
   if (error) {

@@ -127,8 +127,9 @@ When someone shares a Google Drive folder link:
    - Which files need renaming (missing ad ID prefix)
    - Detected client and target Business Manager
 3. **Handle unknown client**: If `detected_client` is null, ask which client this is for. Do NOT proceed without a client code.
-4. **Upload**: Call `upload_to_media_library({ drive_url, client_code })` to rename + upload
-5. **Post results** in the thread: per-file status (video_id / image_hash), any errors
+4. **Proceed immediately**: Do NOT ask for confirmation. The user wants autonomous execution. Post a brief "Starting rename + upload..." message, then call the upload tool right away.
+5. **Upload**: Call `upload_to_media_library({ drive_url, client_code })` to rename + upload
+6. **Post results** in the thread: per-file status (video_id / image_hash), any errors
 
 ### File Naming Convention
 
