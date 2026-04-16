@@ -14,6 +14,7 @@ import * as googleTools from './tools/google-tools.js';
 import * as browserTools from './tools/browser-tools.js';
 import * as creativeTools from './tools/creative-tools.js';
 import * as metaApiTools from './tools/meta-api-tools.js';
+import * as mediaLibraryTools from './tools/media-library-tools.js';
 import * as reportTools from '../reports/index.js';
 import * as methodologySanitizer from '../client-agents/methodology-sanitizer.js';
 import { logger } from '../utils/logger.js';
@@ -352,6 +353,61 @@ register({
       breakdowns: input.breakdowns as string | undefined,
       fields: input.fields as string | undefined,
       limit: input.limit as number | undefined,
+    });
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Media Library tools (Google Drive -> Meta Business Media Library)
+// ---------------------------------------------------------------------------
+
+register({
+  definition: {
+    name: 'scan_media_library_folder',
+    description:
+      'Scan a Google Drive folder to preview media files before uploading to the Meta Business Media Library. Returns file list with naming status (which files need ad ID prefix), auto-detected client code, and target Business Manager routing. Use this FIRST when someone shares a Google Drive folder link, before calling upload_to_media_library.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        drive_url: {
+          type: 'string',
+          description: 'Google Drive folder URL (e.g. https://drive.google.com/drive/folders/abc123)',
+        },
+      },
+      required: ['drive_url'],
+    },
+  },
+  async execute(input) {
+    return mediaLibraryTools.scanMediaLibraryFolder({
+      drive_url: input.drive_url as string,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'upload_to_media_library',
+    description:
+      'Rename files in Google Drive (prepend ad ID prefix) and upload them to the Meta Business Media Library. Routes to the correct Business Manager based on client code: TL and LA go to Growth Squad, all others go to Ads on Tap. Always call scan_media_library_folder first to preview what will happen. This operation can take several minutes for large video files.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        drive_url: {
+          type: 'string',
+          description: 'Google Drive folder URL',
+        },
+        client_code: {
+          type: 'string',
+          description: 'Client code (e.g. TL, LA, NP, MEOW). Determines which Business Manager to upload to.',
+        },
+      },
+      required: ['drive_url', 'client_code'],
+    },
+  },
+  async execute(input) {
+    return mediaLibraryTools.uploadToMediaLibrary({
+      drive_url: input.drive_url as string,
+      client_code: input.client_code as string,
     });
   },
 });

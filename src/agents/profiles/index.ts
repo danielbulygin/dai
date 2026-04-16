@@ -22,6 +22,7 @@ export const toolProfiles = {
     'correct_methodology', 'delete_methodology',
     'query_tasks', 'create_task', 'update_task', 'add_task_comment', 'search_notion',
     'generate_weekly_report',
+    'scan_media_library_folder', 'upload_to_media_library',
   ],
   creative_strategist: [
     'recall', 'remember', 'search_memories',
