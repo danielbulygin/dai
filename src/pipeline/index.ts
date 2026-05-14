@@ -41,6 +41,34 @@ export async function processMeeting(meetingId: string): Promise<void> {
     return;
   }
 
+  // Pipeline-level dedup: skip if a meeting with the same normalized title
+  // (±5 min) was already processed. Handles "Meet – X" vs "X" variants.
+  if (meeting.title && meeting.date) {
+    const normalizedTitle = normalizeMeetingTitle(meeting.title);
+    const meetingDate = new Date(meeting.date);
+    const windowStart = new Date(meetingDate.getTime() - 5 * 60 * 1000).toISOString();
+    const windowEnd = new Date(meetingDate.getTime() + 5 * 60 * 1000).toISOString();
+
+    const { data: duplicates } = await supabase
+      .from('meetings')
+      .select('id, title')
+      .not('pipeline_status', 'is', null)
+      .neq('id', meetingId)
+      .gte('date', windowStart)
+      .lte('date', windowEnd);
+
+    const alreadyProcessed = (duplicates ?? []).some(
+      (d: { id: string; title: string }) => normalizeMeetingTitle(d.title) === normalizedTitle,
+    );
+
+    if (alreadyProcessed) {
+      logger.info({ meetingId, title: meeting.title }, 'Skipping duplicate meeting (similar title already processed)');
+      // Mark as processed so we don't re-check it every cycle
+      await supabase.from('meetings').update({ pipeline_status: 'deduped' }).eq('id', meetingId);
+      return;
+    }
+  }
+
   const row = meeting as MeetingRow & { full_transcript: string; pipeline_status: string | null };
 
   logger.info({ meetingId, title: row.title }, 'Processing meeting through pipeline');
@@ -94,6 +122,13 @@ export async function processMeeting(meetingId: string): Promise<void> {
     },
     'Meeting pipeline complete',
   );
+}
+
+/**
+ * Strip common meeting title prefixes (e.g. "Meet – ") for dedup comparison.
+ */
+function normalizeMeetingTitle(title: string): string {
+  return title.replace(/^Meet\s*[\-–—]\s*/i, '').trim();
 }
 
 /**
