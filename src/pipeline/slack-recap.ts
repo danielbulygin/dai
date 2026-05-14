@@ -23,13 +23,9 @@ export async function postMeetingRecap(
 ): Promise<void> {
   const slack = getDedicatedBotClient('otto');
 
-  // Determine target channel: client channel if available, else review channel
-  let channel: string | undefined;
-  if (classification.client_code) {
-    const domain = CLIENT_CODE_TO_DOMAIN[classification.client_code];
-    if (domain) channel = getSlackChannelForDomain(domain);
-  }
-  channel ??= env.SLACK_REVIEW_CHANNEL_ID ?? env.SLACK_OWNER_USER_ID;
+  // TODO: Re-enable client channel routing once dedup and confidence threshold are in place
+  // For now, all recaps go to #dai-testing only
+  const channel = 'C0AH90HRTNC'; // #dai-testing
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const blocks: any[] = [];
