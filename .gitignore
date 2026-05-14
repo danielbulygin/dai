@@ -7,3 +7,12 @@ data/
 *.db-shm
 .DS_Store
 *.log
+
+# Meta migration: scripts are tracked, generated outputs are not (client data)
+scripts/meta-migrate/manifest.json
+scripts/meta-migrate/id-map.json
+scripts/meta-migrate/image-hash-map.json
+scripts/meta-migrate/share-audiences-result.json
+scripts/meta-migrate/needs-manual.csv
+scripts/meta-migrate/rebuild-priorities.md
+scripts/meta-migrate/summary.md
