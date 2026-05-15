@@ -19,6 +19,13 @@ cd /root/dai
 PREV_COMMIT=$(git rev-parse HEAD)
 echo "Current commit: $PREV_COMMIT"
 
+# Ensure we're on main before pulling (detached HEAD would break `git pull`)
+CURRENT_BRANCH=$(git symbolic-ref --short -q HEAD || echo "")
+if [ "$CURRENT_BRANCH" != "main" ]; then
+  echo "Not on main (was: '${CURRENT_BRANCH:-detached HEAD}'), checking out main..."
+  git checkout main
+fi
+
 # Pull latest code
 git pull
 
@@ -38,23 +45,25 @@ if ! pnpm build 2>&1; then
   exit 1
 fi
 
-# Verify bundle has no unexpected external imports that would crash at runtime
-EXTERNAL_ISSUES=$(grep -P '^import .+ from "(?!node:|#)' dist/index.js | grep -v '"playwright-core"' || true)
-if [ -n "$EXTERNAL_ISSUES" ]; then
-  echo "WARNING: Bundle has external imports that may not be available at runtime:"
-  echo "$EXTERNAL_ISSUES"
-  echo "Attempting rebuild with pnpm install..."
-  pnpm install
+# Sanity check: dist/index.js exists and isn't suspiciously small.
+# tsup externalises everything except `zod` by design, so we don't try to
+# validate the import list. Just confirm the build produced a bundle.
+if [ ! -f dist/index.js ]; then
+  echo "ERROR: dist/index.js missing after build, rolling back..."
+  git checkout "$PREV_COMMIT"
+  pnpm install --frozen-lockfile
   pnpm build
-  EXTERNAL_ISSUES=$(grep -P '^import .+ from "(?!node:|#)' dist/index.js | grep -v '"playwright-core"' || true)
-  if [ -n "$EXTERNAL_ISSUES" ]; then
-    echo "ERROR: External imports still present after rebuild, rolling back..."
-    git checkout "$PREV_COMMIT"
-    pnpm install --frozen-lockfile
-    pnpm build
-    exit 1
-  fi
+  exit 1
 fi
+BUNDLE_SIZE=$(stat -c %s dist/index.js)
+if [ "$BUNDLE_SIZE" -lt 102400 ]; then
+  echo "ERROR: dist/index.js is only ${BUNDLE_SIZE} bytes (<100KB), build likely broken. Rolling back..."
+  git checkout "$PREV_COMMIT"
+  pnpm install --frozen-lockfile
+  pnpm build
+  exit 1
+fi
+echo "Bundle size: ${BUNDLE_SIZE} bytes"
 
 echo "Build verified. Restarting service..."
 systemctl restart dai
