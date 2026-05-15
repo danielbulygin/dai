@@ -61,6 +61,7 @@ export function registerMentionListener(app: App): void {
           channelId: channel,
           threadTs,
           onText: responder.onText,
+          onTurnReset: responder.resetAccumulated,
         }),
       );
 

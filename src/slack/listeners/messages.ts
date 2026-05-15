@@ -92,6 +92,7 @@ export function registerMessageListener(app: App): void {
           channelId: msg.channel as string,
           threadTs: threadTs ?? messageTs,
           onText: responder.onText,
+          onTurnReset: responder.resetAccumulated,
         }),
       );
 
