@@ -193,3 +193,88 @@ export async function queryMetaInsights(params: {
     return JSON.stringify({ error: msg });
   }
 }
+
+// ---------------------------------------------------------------------------
+// query_meta_creatives — direct Facebook Marketing API access for creative
+// configuration (Instagram identity, page, object_story_spec, link URL, etc.)
+// ---------------------------------------------------------------------------
+
+const DEFAULT_CREATIVE_FIELDS =
+  "id,name,status,effective_status," +
+  "creative{id,name,instagram_actor_id,effective_instagram_actor_id," +
+  "instagram_user_id,instagram_permalink_url," +
+  "page_id,object_story_id,effective_object_story_id,object_story_spec," +
+  "thumbnail_url,video_id,image_url,image_hash,title,body," +
+  "link_url,call_to_action_type,asset_feed_spec}";
+
+export async function queryMetaCreatives(params: {
+  clientCode: string;
+  campaignId?: string;
+  adsetId?: string;
+  adIds?: string[];
+  fields?: string;
+  effectiveStatus?: string[]; // e.g. ["ACTIVE"]
+  limit?: number;
+}): Promise<string> {
+  try {
+    const resolved = await resolveAdAccountId(params.clientCode);
+    if ("error" in resolved) return JSON.stringify(resolved);
+
+    const { adAccountId } = resolved;
+
+    if (!params.campaignId && !params.adsetId && !(params.adIds && params.adIds.length > 0)) {
+      return JSON.stringify({
+        error:
+          "Must specify campaignId, adsetId, or adIds. Querying every ad in an account is not supported.",
+      });
+    }
+
+    const apiParams: Record<string, string> = {
+      fields: params.fields ?? DEFAULT_CREATIVE_FIELDS,
+    };
+
+    const filtering: Array<Record<string, unknown>> = [];
+    if (params.campaignId) {
+      filtering.push({ field: "campaign.id", operator: "EQUAL", value: params.campaignId });
+    }
+    if (params.adsetId) {
+      filtering.push({ field: "adset.id", operator: "EQUAL", value: params.adsetId });
+    }
+    if (params.adIds && params.adIds.length > 0) {
+      filtering.push({ field: "ad.id", operator: "IN", value: params.adIds });
+    }
+    if (filtering.length > 0) {
+      apiParams.filtering = JSON.stringify(filtering);
+    }
+
+    if (params.effectiveStatus && params.effectiveStatus.length > 0) {
+      apiParams.effective_status = JSON.stringify(params.effectiveStatus);
+    }
+
+    apiParams.limit = String(params.limit ?? 100);
+
+    const result = await metaApiRequest(`${adAccountId}/ads`, apiParams);
+
+    if (result.error) {
+      return JSON.stringify({ error: result.error });
+    }
+
+    logger.info(
+      { clientCode: params.clientCode, ads: result.data?.length },
+      "Meta Creatives API query complete",
+    );
+
+    return JSON.stringify({
+      client: params.clientCode,
+      ad_account_id: adAccountId,
+      campaign_id: params.campaignId ?? null,
+      adset_id: params.adsetId ?? null,
+      ad_count: result.data?.length ?? 0,
+      data: result.data,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ error: msg }, "queryMetaCreatives failed");
+    return JSON.stringify({ error: msg });
+  }
+}

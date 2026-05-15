@@ -357,6 +357,61 @@ register({
   },
 });
 
+register({
+  definition: {
+    name: 'query_meta_creatives',
+    description:
+      'Query the Facebook Marketing API directly for ad CREATIVE CONFIGURATION — Instagram identity (instagram_actor_id, effective_instagram_actor_id), page identity, link URL, call-to-action, video_id/image_hash, and the full object_story_spec. Use this when you need creative SETUP details that the Supabase tables do not store (e.g. "which ads in this campaign link to the wrong Instagram profile?", "what page is this ad running under?", "does this ad point to the right landing page?"). For creative METADATA (ad copy, transcripts, AI tags, fatigue), prefer get_creative_details — it is faster and pre-aggregated. Must scope by campaign_id, adset_id, or explicit ad_ids — account-wide queries are blocked.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        client_code: {
+          type: 'string',
+          description: 'Client code (e.g. "laori", "ninepine", "press_london")',
+        },
+        campaign_id: {
+          type: 'string',
+          description: 'Filter to all ads inside this campaign',
+        },
+        adset_id: {
+          type: 'string',
+          description: 'Filter to all ads inside this adset',
+        },
+        ad_ids: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Filter to an explicit list of ad IDs',
+        },
+        effective_status: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Filter by effective_status (e.g. ["ACTIVE"], ["ACTIVE","PAUSED"]). Default: all.',
+        },
+        fields: {
+          type: 'string',
+          description: 'Optional comma-separated fields override. Default includes id, name, status, creative{instagram_actor_id, effective_instagram_actor_id, page_id, object_story_spec, link_url, video_id, image_url, title, body, call_to_action_type, ...}.',
+        },
+        limit: {
+          type: 'number',
+          description: 'Max rows per page (default 100). Paging is collected automatically up to 500.',
+        },
+      },
+      required: ['client_code'],
+    },
+  },
+  async execute(input, context) {
+    return metaApiTools.queryMetaCreatives({
+      clientCode: (context.clientScope?.clientCode ?? input.client_code) as string,
+      campaignId: input.campaign_id as string | undefined,
+      adsetId: input.adset_id as string | undefined,
+      adIds: input.ad_ids as string[] | undefined,
+      effectiveStatus: input.effective_status as string[] | undefined,
+      fields: input.fields as string | undefined,
+      limit: input.limit as number | undefined,
+    });
+  },
+});
+
 // ---------------------------------------------------------------------------
 // Media Library tools (Google Drive -> Meta Business Media Library)
 // ---------------------------------------------------------------------------
@@ -2633,6 +2688,7 @@ const SCOPED_BMAD_TOOLS = new Set([
   'get_creative_details', 'get_alerts', 'get_learnings',
   'get_domo_funnel',
   'query_meta_insights',
+  'query_meta_creatives',
 ]);
 
 export async function executeTool(
