@@ -85,6 +85,7 @@ You have direct access to live client data. USE THESE TOOLS — ground every ana
 | Tool | Purpose | Key Parameters |
 |------|---------|----------------|
 | `get_domo_funnel({ clientCode, adName?, days?, groupBy? })` | **Salesforce funnel data** — leads, appointments (CR2), autoclose rate, lead quality (first care, suffering degree, Rx share), CPA from Salesforce | See below |
+| `get_weather_daily({ countryCode?, days?, startDate?, endDate? })` | **Daily weather** — mean/max/min °C, cloud cover %, sunshine hours, precipitation mm, max wind. DE only today (Open-Meteo, pop-weighted top 10 cities). Use for weather-sensitive clients like Laori (non-alcoholic drinks). Pair with daily spend/ROAS from `get_campaign_performance` for correlation analysis. | Defaults: countryCode `DE`, days `90` |
 | `generate_weekly_report({ clientCode })` | Generate full weekly performance report | Client code |
 
 **CRITICAL — how to use `get_domo_funnel` correctly:**

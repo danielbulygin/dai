@@ -724,6 +724,66 @@ export async function getAccountChanges(params: {
   }
 }
 
+export async function getWeatherDaily(params: {
+  countryCode?: string;
+  days?: number;
+  startDate?: string;
+  endDate?: string;
+}): Promise<string> {
+  try {
+    const country = (params.countryCode ?? "DE").toUpperCase();
+    const end = params.endDate ?? new Date().toISOString().slice(0, 10);
+    const start =
+      params.startDate ?? daysAgoISO(params.days ?? 90);
+
+    logger.debug(
+      { country, start, end },
+      "Querying weather daily",
+    );
+
+    const supabase = getSupabase();
+    const { data, error } = await supabase
+      .from("fact_weather_daily")
+      .select(
+        "date, temp_mean_c, temp_max_c, temp_min_c, cloud_cover_mean_pct, sunshine_hours, precipitation_mm, wind_max_kmh",
+      )
+      .eq("country_code", country)
+      .gte("date", start)
+      .lte("date", end)
+      .order("date", { ascending: true });
+
+    if (error) {
+      logger.error({ error }, "Failed to get weather daily");
+      return JSON.stringify({ error: error.message });
+    }
+
+    if (!data || data.length === 0) {
+      return JSON.stringify({
+        country_code: country,
+        rows: 0,
+        note: `No weather rows for ${country} between ${start} and ${end}. Only DE is populated today (Open-Meteo, population-weighted across top 10 cities).`,
+        data: [],
+      });
+    }
+
+    logger.debug(
+      { country, rows: data.length },
+      "Got weather daily",
+    );
+    return JSON.stringify({
+      country_code: country,
+      source: "open-meteo",
+      aggregation: "pop-weighted-top10-cities",
+      rows: data.length,
+      data,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ error: msg }, "getWeatherDaily failed");
+    return JSON.stringify({ error: msg });
+  }
+}
+
 export async function getCreativeDetails(params: {
   clientCode: string;
   creativeId?: string;

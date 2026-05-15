@@ -974,6 +974,44 @@ register({
 
 register({
   definition: {
+    name: 'get_weather_daily',
+    description:
+      'Get daily country-level weather (mean/max/min temperature °C, cloud cover %, sunshine hours, precipitation mm, max wind km/h) from BMAD. Currently populated for DE only (Open-Meteo, population-weighted across top 10 cities). Use to correlate weather with performance for weather-sensitive clients like Laori (non-alcoholic drinks — warmer/sunnier days drive demand). Combine with daily spend/ROAS from get_campaign_performance or get_client_performance (groupBy=date) to compute correlations.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        countryCode: {
+          type: 'string',
+          description: 'ISO-2 country code (e.g. "DE"). Default "DE". Only DE is currently populated.',
+        },
+        days: {
+          type: 'number',
+          description: 'Number of days to look back from today. Default 90. Ignored if startDate/endDate provided.',
+        },
+        startDate: {
+          type: 'string',
+          description: 'Optional ISO date (YYYY-MM-DD) for the start of the range.',
+        },
+        endDate: {
+          type: 'string',
+          description: 'Optional ISO date (YYYY-MM-DD) for the end of the range. Defaults to today.',
+        },
+      },
+      required: [],
+    },
+  },
+  async execute(input) {
+    return await supabaseTools.getWeatherDaily({
+      countryCode: input.countryCode as string | undefined,
+      days: input.days as number | undefined,
+      startDate: input.startDate as string | undefined,
+      endDate: input.endDate as string | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
     name: 'get_creative_details',
     description:
       'Get creative metadata — ad copy, headlines, video transcripts, AI tags, fatigue status, performance scores. Use for creative analysis without needing to see the actual media.',
