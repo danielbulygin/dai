@@ -1263,6 +1263,408 @@ Estimated cost: ~$12/month for 2GB RAM droplet in Frankfurt.
 
 ---
 
+## Phase 11: Ad Launch Pipeline (Drive → Meta with Approval)
+
+**Goal:** Enable Ada to take uploaded creatives and create real ad sets + ads in client accounts, into per-client locked sandbox campaigns, with Slack approval, landing-page intelligence, transcript-driven copy, and durable audit log. Ada can pause launched batches but **cannot delete anything in any ad account** — pause is the only "undo" verb available to her.
+
+**Prerequisites:** Existing media library upload (`scan_media_library_folder` + `upload_to_media_library`) — DONE. BMAD `safe_meta_api.py` with `create_adset` + `create_ad` and per-client locked sandbox campaigns — DONE for 4 clients.
+
+**Status:** Not started.
+
+### Current state (May 2026)
+
+- BMAD `pma/tools/creative-uploader/server.py` runs on droplet `:8080` and already exposes:
+  - `/api/media-library/scan` + `/api/media-library/upload` (used by Ada today via `media-library-tools.ts`)
+  - `/api/upload` (full pipeline: videos → adset → ads, used by BMAD dashboard `/upload` page)
+- `safe_meta_api.py` enforces: locked PAUSED sandbox campaign per client, `validate_only` dry run before every create, before/after snapshots, force-PAUSED status on all writes, local-file audit log under `~/.config/pma/audit_logs/`.
+- `CLIENT_CONFIGS` configured for 4 clients: URV-US, URV-DE, SLB (Slumber), MEOW (Strayz).
+- Remaining ~9 clients NOT configured: TL, NP, LA, COM, BFM, JVA, PL, SS, NOSO, AB.
+
+### Design decisions
+
+- **One locked sandbox campaign per client** (kept as the safety boundary)
+- **Landing pages**: keyword → URL mapping per client, confidence scored, always confirmed in Slack before launch; confidence self-tunes from user corrections
+- **Config storage**: HYBRID — safety-critical IDs (`ad_account_id`, `pixel_id`, `page_id`, `instagram_actor_id`, `locked_campaign_id`) stay in code; editable bits (landing pages, naming templates, copy defaults, compliance rules) move to Supabase
+- **Approval**: Slack confirmation required before any create
+- **Ad set scope**: default is "new ad set per Drive folder"; `ads_only` mode when the user references an existing ad set / ASC campaign in the thread
+- **Copy**: generated from transcript + visual analysis at preview time — the transcripts and visual analysis are written to BMAD's `creatives` table so Maya's diversity scoring stays current "for free"
+- **Audit log → Supabase** (replaces local file log) — durable, queryable, survives droplet rebuild
+- **Idempotency keys** on every launch so retries can't create duplicates
+- **Launch batches** are first-class objects with one-call **pause** (no delete — see below)
+- **No deletion in ad accounts.** Ada has zero DELETE capability against Meta. The "undo" verb is **pause**: flip ad + adset status to PAUSED. Removal of paused objects is manual in Ads Manager by Daniel/Nina. This is non-negotiable — see [[ada-meta-no-delete]] in memory. Rationale: a single buggy/hallucinated DELETE call can't be un-done, and the cost of paused junk accumulating in sandbox campaigns is near-zero (quarterly cleanup script).
+- **Meta token scope.** Ada's `safe_meta_api.py` access token is on a System User with `ads_management` for create+read only. Even if all code-level guards were bypassed, Meta's API would 403 any DELETE attempt. This is enforced at Meta, not in code.
+- **Trust threshold per client**: first 10 supervised successful launches required before autonomous mode unlocks; even then, full approval still required if any QC check is yellow
+
+### 11A. Schema additions
+
+BMAD Supabase migration: `supabase/migrations/20260522000000_ad_launch_pipeline.sql`
+
+```sql
+-- Per-client editable config
+create table if not exists client_meta_configs (
+  client_code text primary key,
+  landing_pages jsonb not null default '{}'::jsonb,    -- { "winter": "/collections/winter", "default": "/" }
+  default_cta text,
+  default_primary_text text,
+  default_headline text,
+  default_description text,
+  adset_name_template text,
+  ad_name_template text,
+  compliance_rules jsonb default '{}'::jsonb,          -- { "market_language": "de", "required_disclaimers": [...], "blocked_terms": [...] }
+  trust_level int not null default 0,                  -- supervised successful launches; autonomous unlocks at >= 10
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+-- Launch batches: traceability + pause/undo
+create table if not exists launch_batches (
+  batch_id uuid primary key default gen_random_uuid(),
+  client_code text not null,
+  adset_id text,                                       -- Meta adset ID (null if ads_only)
+  ad_ids text[] not null default '{}',
+  mode text not null,                                  -- 'new_adset' | 'ads_only'
+  brief_notion_id text,                                -- traceability: which Notion brief produced this batch?
+  source_drive_url text,
+  initiated_by text,                                   -- Slack user ID
+  status text not null,                                -- 'pending' | 'approved' | 'launched' | 'paused' | 'cancelled' | 'failed'
+  preview_payload jsonb,                               -- full preview shown in Slack (so pause / re-render works)
+  created_at timestamptz default now(),
+  approved_at timestamptz,
+  launched_at timestamptz,
+  paused_at timestamptz
+);
+create index on launch_batches(client_code, created_at desc);
+create index on launch_batches(status);
+
+-- Durable audit log (replaces local-file log)
+create table if not exists meta_api_audit (
+  id bigserial primary key,
+  client_code text not null,
+  batch_id uuid references launch_batches(batch_id),
+  event_type text not null,                            -- ADSET_VALIDATION_PASSED | AD_CREATED | AD_PAUSED | ADSET_PAUSED | ...
+  meta_object_id text,                                 -- adset_id / ad_id / creative_id
+  payload jsonb,
+  error jsonb,
+  created_at timestamptz default now()
+);
+create index on meta_api_audit(client_code, created_at desc);
+create index on meta_api_audit(batch_id);
+
+-- Idempotency keys
+create table if not exists launch_idempotency (
+  key text primary key,
+  batch_id uuid references launch_batches(batch_id),
+  result jsonb,
+  created_at timestamptz default now()
+);
+-- Cleanup older than 24h via scheduled job (cleanup_launch_idempotency RPC, daily 3am)
+
+-- Lander mapping stats (for confidence self-tuning)
+create table if not exists lander_mapping_stats (
+  client_code text not null,
+  keyword text not null,
+  accepts int not null default 0,
+  overrides int not null default 0,
+  last_override_url text,
+  last_override_count int not null default 0,
+  updated_at timestamptz default now(),
+  primary key (client_code, keyword)
+);
+
+-- Traceability columns on creatives
+alter table creatives add column if not exists batch_id uuid references launch_batches(batch_id);
+alter table creatives add column if not exists brief_notion_id text;
+alter table creatives add column if not exists launched_by text;
+```
+
+### 11B. BMAD server endpoints
+
+Add to `pma/tools/creative-uploader/server.py`:
+
+**`POST /api/ada/preview-launch`** — build a preview, no Meta side effects.
+
+Inputs:
+```json
+{
+  "client_code": "MEOW",
+  "video_ids": ["123", "124", "125"],
+  "mode": "new_adset",
+  "target_adset_id": null,
+  "brief_notion_id": "abc...",
+  "source_drive_url": "https://drive..."
+}
+```
+
+Steps:
+1. Load client config (Python `CLIENT_CONFIGS` + Supabase `client_meta_configs` merge)
+2. For each video: fetch transcript (AssemblyAI) + visual analysis (Gemini) → cache in `creatives` table (skip if already present)
+3. For each video: classify Format × Angle × Style via Haiku → write `creatives.format_code`, `angle_code`, `style_tags`
+4. For each video: resolve landing page (see 11D) → `{ url, confidence, reason, alternatives }`
+5. For each video: generate `{ primary_text, headline, description }` from transcript + visual + client tone (Haiku)
+6. Run pre-launch QC (see 11C)
+7. Persist preview to `launch_batches` with `status='pending'`
+8. Return `{ batch_id, adset_preview, ad_previews: [...], qc_warnings: [...], confidence_summary }`
+
+**`POST /api/ada/launch`** — execute after Slack approval.
+
+Inputs:
+```json
+{
+  "batch_id": "uuid",
+  "idempotency_key": "uuid-from-slack-button-click",
+  "edits": { "ad_overrides": {...}, "lander_overrides": {...} }
+}
+```
+
+Steps:
+1. Check `launch_idempotency`: if key exists, return stored result (no Meta calls)
+2. Verify batch `status='pending'` (refuse if `launched` / `rolled_back` / `cancelled`)
+3. Apply edits to preview payload
+4. If `mode='new_adset'`: call `safe_meta_api.create_adset` → write audit row
+5. For each video: call `safe_meta_api.create_ad` → write audit row
+6. Backfill `creatives.batch_id`, `creatives.brief_notion_id`, `creatives.launched_by`
+7. Update `launch_batches` to `status='launched'`, fill `adset_id` + `ad_ids` + `launched_at`
+8. Store result in `launch_idempotency`
+9. Return `{ batch_id, adset_id, ad_ids: [...], audit_entries: [...], ads_manager_url }`
+
+**`POST /api/ada/pause`** — pause a launched batch (the only "undo" Ada has).
+
+Inputs: `{ batch_id, reason }`
+
+Steps:
+1. Load batch, refuse if `status != 'launched'`
+2. For each `ad_id`: `POST {ad_id} status=PAUSED` via Meta API, write `AD_PAUSED` audit row
+3. If `mode='new_adset'`: `POST {adset_id} status=PAUSED`, write `ADSET_PAUSED` audit row
+4. Update batch to `status='paused'`, fill `paused_at`
+5. Return `{ batch_id, paused: { adset, ads: [...] }, failures: [...] }`
+
+**There is no `/api/ada/rollback`, `/api/ada/delete`, or any other DELETE endpoint.** Removal of paused objects from Meta is manual, performed by Daniel/Nina in Ads Manager. The Meta access token used by `safe_meta_api.py` must be scoped to `ads_management` (create + read + update) only, never granted any role that includes deletion — see "Meta token scope" in design decisions.
+
+**`POST /api/ada/update-lander`** — record a learned mapping.
+
+Inputs: `{ client_code, keyword, url, source: 'user_correction' | 'manual' }`
+
+Updates `client_meta_configs.landing_pages` and records in `lander_mapping_stats`.
+
+**Auth.** All `/api/ada/*` endpoints require `X-API-Key` header validated against `ADA_API_KEY` env var (same pattern as DAI Hono API). Retrofit the same to existing `/api/media-library/*` endpoints.
+
+### 11C. Pre-launch QC
+
+Module: `pma/tools/creative-uploader/launch_qc.py`
+
+Each check returns `{ severity: 'block' | 'warn' | 'ok', code, message }`. Block-severity items prevent launch; warn-severity items show as ⚠️ in Slack but allow approval.
+
+| Check | Severity | Logic |
+|-------|----------|-------|
+| Landing page reachable | block | HEAD with redirect follow; status < 400; final URL on expected domain |
+| Language vs market | warn | `langdetect` on primary_text; compare to `compliance_rules.market_language` |
+| Aspect ratio vs placements | warn | Video aspect ∈ {1:1, 4:5, 9:16}; matches ad set expected placements |
+| Required disclaimers | block | If `compliance_rules.required_disclaimers` set, primary_text must contain them |
+| Blocked terms | block | If `compliance_rules.blocked_terms` matches anywhere in copy |
+| Asset ID collision | warn | Same normalized name launched in last 30d for same client (likely duplicate) |
+| Naming template conformance | warn | Adset/ad name matches `adset_name_template` / `ad_name_template` regex |
+
+Compliance rules for regulated clients (Slumber CBD, Audibene hearing aids) are pre-populated from existing methodology — pull required disclaimers from `methodology_knowledge` rows where `category='compliance'`.
+
+### 11D. Landing page resolver
+
+Module: `pma/tools/creative-uploader/lander_resolver.py`
+
+```python
+def resolve_lander(filename: str, asset_id: str, client_code: str) -> dict:
+    """Returns { url, confidence: 0.0-1.0, reason, alternatives }"""
+    config = load_client_meta_config(client_code)
+    landing_pages = config['landing_pages']  # { keyword: url }
+
+    tokens = tokenize(filename, asset_id)  # lowercase, split on -/_, drop client code + numbers
+
+    matches = []
+    for keyword, url in landing_pages.items():
+        if keyword == 'default':
+            continue
+        score = jaccard(tokens, tokenize(keyword))
+        if score > 0:
+            matches.append({ 'keyword': keyword, 'url': url, 'score': score })
+
+    matches.sort(key=lambda m: -m['score'])
+
+    # Apply confidence self-tuning multiplier from lander_mapping_stats
+    for m in matches:
+        stats = get_mapping_stats(client_code, m['keyword'])
+        acceptance_rate = stats['accepts'] / max(1, stats['accepts'] + stats['overrides'])
+        m['confidence'] = m['score'] * (0.5 + 0.5 * acceptance_rate)
+
+    if matches and matches[0]['confidence'] >= 0.5:
+        return {
+            'url': matches[0]['url'],
+            'confidence': matches[0]['confidence'],
+            'reason': f"matched keyword '{matches[0]['keyword']}'",
+            'alternatives': matches[1:3],
+        }
+
+    return {
+        'url': landing_pages.get('default', ''),
+        'confidence': 0.2 if landing_pages.get('default') else 0.0,
+        'reason': 'no keyword match — fell back to default',
+        'alternatives': matches[:3],
+    }
+```
+
+Confidence display in Slack preview:
+- ≥ 0.8: ✅ no badge
+- 0.5–0.8: 🟡 "moderate confidence — matched `{keyword}`"
+- < 0.5: ⚠️ "low confidence — defaulting to {url}. Edit?"
+
+### 11E. Confidence self-tuning
+
+- On `Launch` button click with no lander overrides: increment `lander_mapping_stats(client_code, keyword, accepts)` for each matched keyword
+- On `Edit landers` modal submit: increment `lander_mapping_stats(client_code, keyword, overrides)`, record the override URL
+- If `last_override_count >= 3` for a (client, keyword) where override URL is consistent: surface a proposal in next preview: "Should `{keyword}` → `{new_url}` become a permanent mapping? React ✅ to save."
+- The `update_landing_page_mapping` tool persists the change to `client_meta_configs.landing_pages`
+
+### 11F. Trust threshold per client
+
+Each client starts at `trust_level = 0`. Increment by 1 when:
+- Preview was approved unchanged (no edits), AND
+- Launch succeeded, AND
+- No rollback within 24h
+
+Preview header always shows trust:
+```
+Client: MEOW (Strayz) — trust level 3/10 (supervised mode)
+```
+
+Once `trust_level >= 10` AND all QC checks `ok` AND all lander confidences ≥ 0.8, Ada offers a "fast confirm" path: a 30-second countdown with ❌ cancel reaction. Below threshold, full button approval required regardless of confidence.
+
+### 11G. Ada tools
+
+Create `src/agents/tools/ad-launch-tools.ts`:
+
+```ts
+export interface PreviewLaunchInput {
+  client_code: string;
+  video_ids: string[];            // from upload_to_media_library response
+  mode: 'new_adset' | 'ads_only';
+  target_adset_id?: string;       // required if mode === 'ads_only'
+  brief_notion_id?: string;
+  source_drive_url?: string;
+}
+
+export async function previewAdLaunch(input: PreviewLaunchInput): Promise<string>;
+export async function launchAds(input: { batch_id: string; idempotency_key: string; edits?: unknown }): Promise<string>;
+export async function pauseLaunch(input: { batch_id: string; reason: string }): Promise<string>;
+export async function updateLandingPageMapping(input: { client_code: string; keyword: string; url: string }): Promise<string>;
+
+// NOTE: There is intentionally no `rollbackLaunch`, `deleteAd`, or any other delete-capable tool.
+// Pause is the only "undo" Ada has. See [[ada-meta-no-delete]] in memory.
+```
+
+Register in `src/agents/tool-registry.ts`. Add to `media_buyer` profile in `src/agents/profiles/index.ts`. All four are thin HTTP wrappers to `/api/ada/*` on the droplet (same pattern as existing `media-library-tools.ts`).
+
+### 11H. Slack approval flow
+
+Module: `src/slack/listeners/launch-actions.ts`
+
+When Ada calls `previewAdLaunch`, she posts a Block Kit message in the thread:
+
+```
+🚀 Launch Preview — batch a8f3
+Client: MEOW (Strayz) — trust level 3/10 (supervised mode)
+
+📁 New ad set: "[AOT] 22 May 2026 winter campaign"
+   Campaign: [ALWAYS_OFF] AOT UPLOADS (locked sandbox) ✓
+   Targeting: DE, 18–65, excluded customer lists ✓
+
+🎬 Ads (3):
+   1. MEOWx4203_winter_v1.mp4
+      → Landing: /collections/winter ✅ matched 'winter'
+      → Primary: "Wenn der Winter kommt..."
+      → Headline: "Bio-Katzenfutter für die kalte Jahreszeit"
+   2. MEOWx4204_winter_v2.mp4
+      → Landing: /collections/bio-katzenfutter 🟡 moderate — matched 'bio'
+   3. MEOWx4205_hook_v1.mp4
+      → Landing: /collections/bio-katzenfutter ⚠️ low — defaulting
+
+⚠️ QC warnings:
+   • Ad 3 has low lander confidence (0.2)
+
+[Launch 3 ads] [Edit landers] [Edit copy] [Cancel]
+```
+
+Button handlers:
+- `Launch 3 ads` → `launchAds({ batch_id, idempotency_key: <button_action_ts> })`. Posts result in thread: batch ID + Ads Manager URL + per-ad status.
+- `Edit landers` → modal with one URL dropdown per ad (alternatives from `resolve_lander`); on submit, persists overrides, re-renders preview.
+- `Edit copy` → modal with text fields per ad; same flow.
+- `Cancel` → mark batch `cancelled`, update message to ❌ Cancelled.
+
+After launch, if the user types "undo" / "pause" within the thread (or reacts ⏸ to the launched message), Ada offers `pauseLaunch`. Ada must never use language like "delete", "remove", or "roll back" — the only thing she can do is pause. If the user explicitly asks to *delete* the ads, Ada replies that she can't, and walks them through doing it in Ads Manager.
+
+### 11I. INSTRUCTIONS.md updates
+
+Add section to `agents/ada/INSTRUCTIONS.md`: "Ad Launch Workflow"
+
+- When to use `new_adset` vs `ads_only`:
+  - Default: new ad set per Drive folder upload
+  - Switch to `ads_only` if the user references an existing ad set name / ASC campaign in the thread; ask for the target adset ID if not explicit
+- Always preview before launch — never call `launchAds` directly
+- If any lander confidence < 0.5, mention it explicitly in your reply ("Lander for ad 3 is a default fallback — please confirm or correct")
+- After launch, post the batch ID and Ads Manager link in the thread
+- If user says "undo" / "pause" within the thread → offer `pauseLaunch`, don't auto-execute
+- If user asks Ada to delete ads → explain that Ada cannot delete anything in any ad account, and walk them through removing the paused ads in Ads Manager. This is a hard rule, not a softenable preference
+- When the user corrects a lander in conversation ("for SENSATION creatives use /sensation"), call `updateLandingPageMapping` so the mapping is persistent — don't just remember it as a learning
+
+### 11J. Client onboarding
+
+For each unconfigured client (TL, NP, LA, COM, BFM, JVA, PL, SS, NOSO, AB):
+
+1. Add entry to `CLIENT_CONFIGS` in `safe_meta_api.py`: `ad_account_id`, `pixel_id`, `page_id`, `instagram_actor_id`, `locked_campaign_id` (must exist and be PAUSED — `_verify_campaign_exists` will fail loudly otherwise), geo, age range, excluded audiences
+2. Insert row into `client_meta_configs`: `landing_pages` map (seed with `default` URL + 5–10 known product/keyword mappings), copy templates, compliance rules
+3. Smoke test with `preview-launch` against a known video — verify no Meta calls, preview renders
+4. First real launch: supervised, full approval, even if QC green
+
+Create `docs/client-onboarding-checklist.md` with the above as a runnable checklist.
+
+### 11K. Cleanup
+
+- Delete stale BMAD worktrees after confirming no uncommitted work:
+  - `bmad/.claude/worktrees/sleepy-almeida-a00034/`
+  - `bmad/.claude/worktrees/wonderful-benz-96df36/`
+- Backfill existing local audit logs into `meta_api_audit` table: `scripts/backfill-audit-logs.py` reads `~/.config/pma/audit_logs/*.jsonl` on the droplet, inserts into Supabase, archives the files
+- Add daily cron: cleanup `launch_idempotency` rows older than 24h
+
+### Validation
+
+End-to-end on MEOW (already configured):
+1. Scan → upload → `previewAdLaunch` → verify preview shows 3 ads, transcripts written to `creatives` table, format/angle codes populated
+2. Approve via Slack button → verify ads created PAUSED in `[ALWAYS_OFF] AOT UPLOADS`, audit rows in `meta_api_audit`, batch in `launch_batches` with `status='launched'`
+3. Trigger `launchAds` again with same `idempotency_key` → returns first result, no duplicate ads
+4. `pauseLaunch` → verify all 3 ads + adset show `status=PAUSED` in Meta (NOT deleted), audit rows for each pause, batch `status='paused'`. Manually attempting a DELETE via curl with Ada's token returns 403 (Meta-side permission enforcement)
+5. Submit a launch where one video's filename matches no keyword → low-confidence warning shown in preview, default URL used unless edited
+6. Submit a launch with a 404 landing page (force it for the test) → preview returns `block`-severity QC error, no batch created
+7. Approve 10 supervised launches on MEOW → verify `trust_level` ticks to 10, "fast confirm" path appears on next preview
+8. Override a lander 3× for the same keyword with the same target URL → next preview shows the "Should `{keyword}` → `{url}` become a permanent mapping?" proposal
+
+### Files
+
+| Action | File |
+|--------|------|
+| Create | BMAD: `supabase/migrations/20260522000000_ad_launch_pipeline.sql` |
+| Create | BMAD: `pma/tools/creative-uploader/launch_qc.py` |
+| Create | BMAD: `pma/tools/creative-uploader/lander_resolver.py` |
+| Modify | BMAD: `pma/tools/creative-uploader/server.py` (new `/api/ada/*` endpoints + `X-API-Key` auth — no rollback/delete endpoints) |
+| Modify | BMAD: `pma/tools/creative-uploader/safe_meta_api.py` (Supabase config loader + Supabase audit writer + `pause_adset` / `pause_ad` methods — NO delete methods) |
+| Manual | Meta Business Manager: ensure Ada's System User token has `ads_management` only, no admin role that would grant DELETE |
+| Create | DAI: `src/agents/tools/ad-launch-tools.ts` |
+| Modify | DAI: `src/agents/tool-registry.ts` |
+| Modify | DAI: `src/agents/profiles/index.ts` (add launch tools to `media_buyer`) |
+| Create | DAI: `src/slack/listeners/launch-actions.ts` |
+| Modify | DAI: `src/slack/listeners/index.ts` (wire `launch-actions`) |
+| Modify | DAI: `agents/ada/INSTRUCTIONS.md` (Ad Launch Workflow section) |
+| Create | DAI: `docs/client-onboarding-checklist.md` |
+| Create | DAI: `scripts/backfill-audit-logs.py` |
+
+---
+
 ## File Index
 
 ### Phase 1: Data Layer
@@ -1345,6 +1747,23 @@ Estimated cost: ~$12/month for 2GB RAM droplet in Frankfurt.
 | Create | `docker-compose.yml` |
 | Create | `scripts/deploy.sh` |
 
+### Phase 11: Ad Launch Pipeline
+| Action | File |
+|--------|------|
+| Create | BMAD: `supabase/migrations/20260522000000_ad_launch_pipeline.sql` |
+| Create | BMAD: `pma/tools/creative-uploader/launch_qc.py` |
+| Create | BMAD: `pma/tools/creative-uploader/lander_resolver.py` |
+| Modify | BMAD: `pma/tools/creative-uploader/server.py` |
+| Modify | BMAD: `pma/tools/creative-uploader/safe_meta_api.py` |
+| Create | DAI: `src/agents/tools/ad-launch-tools.ts` |
+| Modify | DAI: `src/agents/tool-registry.ts` |
+| Modify | DAI: `src/agents/profiles/index.ts` |
+| Create | DAI: `src/slack/listeners/launch-actions.ts` |
+| Modify | DAI: `src/slack/listeners/index.ts` |
+| Modify | DAI: `agents/ada/INSTRUCTIONS.md` |
+| Create | DAI: `docs/client-onboarding-checklist.md` |
+| Create | DAI: `scripts/backfill-audit-logs.py` |
+
 ---
 
 ## Dependencies Between Phases
@@ -1359,14 +1778,20 @@ Phase 3 (Extraction) ──→ Phase 4 (Soul/Methodology)    Phase 7 (Account Ag
 Phase 1 ──→ Phase 8 (Creative Agent)
 
 Phase 1-9 ──→ Phase 10 (Deployment)
+
+Existing media library upload ──→ Phase 11 (Ad Launch Pipeline)
+                                       ↑
+                                  Maya Phase 2 (shares creative classification + creatives table writes)
 ```
 
 **Can run in parallel:**
 - Phase 1 + Phase 3 (data layer + transcript extraction are independent)
 - Phase 2 + Phase 4 (metrics doc + soul doc, once Phase 1/3 are done)
 - Phase 8 can start after Phase 1 (independent of Phases 5-7)
+- Phase 11 is independent of Phases 2-10 — only depends on the already-shipped media library upload + BMAD `safe_meta_api.py`
 
 **Must be sequential:**
 - Phase 1 → Phase 2 → Phase 5 → Phase 9
 - Phase 3 → Phase 4
 - Phase 6 → Phase 7
+- Phase 11 backfills `creatives.format_code` / `angle_code` / `style_tags`; if Maya Phase 2's nightly classifier is changed after Phase 11 ships, keep the column contract identical so both producers stay compatible
