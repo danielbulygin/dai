@@ -1626,9 +1626,7 @@ Create `docs/client-onboarding-checklist.md` with the above as a runnable checkl
 
 ### 11K. Cleanup
 
-- Delete stale BMAD worktrees after confirming no uncommitted work:
-  - `bmad/.claude/worktrees/sleepy-almeida-a00034/`
-  - `bmad/.claude/worktrees/wonderful-benz-96df36/`
+- ~~Delete stale BMAD worktrees~~ — verified 2026-05-22 these worktrees (`sleepy-almeida-a00034`, `wonderful-benz-96df36`) hold active in-progress work (cora agent + recent commits on branches). Leave them. Their `pma/tools/creative-uploader/` copies are just the inherited branch contents, not duplicate code to maintain.
 - Backfill existing local audit logs into `meta_api_audit` table: `scripts/backfill-audit-logs.py` reads `~/.config/pma/audit_logs/*.jsonl` on the droplet, inserts into Supabase, archives the files
 - Add daily cron: cleanup `launch_idempotency` rows older than 24h
 
