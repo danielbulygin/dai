@@ -555,6 +555,11 @@ register({
           description:
             "REQUIRED for tiered clients (currently BFM only). Three buckets: US (US-only), T1 (16 countries: AE, AT, AU, AX, CA, CH, CZ, DE, DK, GB, IE, NL, NO, NZ, SE, US — wealthy/anglo + DACH + Nordics + ME), T2 (17 countries: BE, CL, ES, FI, FR, GR, IL, IT, JP, MX, PE, PL, PT, RO, SG, TR, TW — LATAM + South Europe + Asia + Israel). Always ASK the user which tier before previewing on BFM — never guess. For non-tiered clients (PL, AOT, MEOW, SLB, URV), omit this; their geo is fixed in CLIENT_CONFIGS.",
         },
+        scheduled_for: {
+          type: 'string',
+          description:
+            "Optional ISO 8601 timestamp with explicit timezone offset (NO colon in offset) for Meta-native scheduled activation. Format: 'YYYY-MM-DDTHH:MM:SS-0400' (e.g. '2026-05-25T06:00:00-0400' = next Monday 06:00 EDT). When set: adset + ads are created ACTIVE with start_time = this timestamp, Meta holds delivery until then, then auto-runs. When omitted: adset + ads created PAUSED (status quo, user flips manually). BFM's typical workflow: upload Friday, schedule for next Monday 06:00 ET. Guards: rejected if in the past, <5min ahead, or >30 days out. Use client's timezone — BFM is America/New_York so always -0400 (EDT Mar-Nov) or -0500 (EST Nov-Mar). Pause via pause_launch still works as undo even after scheduling.",
+        },
       },
       required: ['client_code', 'creatives'],
     },

@@ -415,6 +415,26 @@ folder for BFM: <drive_url>"), my workflow is:
    The tier becomes part of the adset name (e.g. `[AOT] 23 May 2026 T1 procrastination`).
    Without it the droplet returns HTTP 400 and the flow stops.
 
+3b. **Ask: go live now (paused) or scheduled?** BFM's standard workflow is
+    upload Friday → schedule for next Monday 06:00 ET. Ask explicitly:
+
+   > "Go live now (I'll create them paused and you flip manually in Ads Manager),
+   > or schedule for Monday 06:00 ET? You can also pick another time."
+
+   Default schedule slot for BFM: **next Monday 06:00 in client's timezone
+   (America/New_York)**. Resolve "Monday" to the next upcoming Monday — not
+   today if today is already Monday. Format the timestamp as ISO 8601 with NO
+   colon in the offset: `2026-05-25T06:00:00-0400` (EDT Mar–Nov, -0500 Nov–Mar).
+
+   When scheduled:
+   - Both adset AND ads are created with `status=ACTIVE` and `start_time=<scheduled_for>`
+   - Meta holds delivery until the timestamp, then auto-runs
+   - Pause via `pause_launch` still works to cancel before/after activation
+   - Guards: past timestamps, <5min ahead, and >30 days out are rejected (HTTP 400)
+
+   When go-live-now (the default for non-BFM clients): adset + ads PAUSED at
+   create, user flips manually.
+
 4. **Build the preview.** Call `preview_ad_launch` with:
    - `client_code` from the upload
    - `creatives: [{video_id, filename, asset_id, media_type: "video"}, ...]` from the
@@ -422,6 +442,8 @@ folder for BFM: <drive_url>"), my workflow is:
      droplet falls back to the auto-fetch cache, which is what we want.
    - `mode: "new_adset"` (default) unless the user names an existing adset
    - `geo_tier: "US" | "T1" | "T2"` for BFM (required) — omit for flat clients
+   - `scheduled_for: "2026-05-25T06:00:00-0400"` when user opted into scheduling
+     (omit for immediate-paused launches)
    - `source_drive_url` from the upload input
    - `initiated_by` set to the Slack user ID
 

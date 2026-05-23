@@ -150,6 +150,7 @@ export async function previewAdLaunch(params: {
   source_drive_url?: string;
   initiated_by?: string;
   geo_tier?: "US" | "T1" | "T2";
+  scheduled_for?: string;
 }): Promise<string> {
   const body: Record<string, unknown> = {
     client_code: params.client_code.toUpperCase(),
@@ -161,6 +162,7 @@ export async function previewAdLaunch(params: {
   if (params.source_drive_url) body.source_drive_url = params.source_drive_url;
   if (params.initiated_by) body.initiated_by = params.initiated_by;
   if (params.geo_tier) body.geo_tier = params.geo_tier;
+  if (params.scheduled_for) body.scheduled_for = params.scheduled_for;
 
   const { data, error } = await dropletRequest(
     "/api/ada/preview-launch",
