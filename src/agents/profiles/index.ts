@@ -46,6 +46,13 @@ export const toolProfiles = {
     'search_methodology_safe',
     'reply_in_thread',
   ],
+  production_manager: [
+    'recall', 'remember', 'search_memories',
+    'list_clients',
+    'query_aot_tasks', 'query_aot_adsets', 'check_ads_in_meta', 'search_notion',
+    'search_meetings', 'get_meeting_summary', 'get_meeting_transcript', 'list_recent_meetings',
+    'post_message', 'reply_in_thread',
+  ],
 } as const;
 
 export type ToolProfile = keyof typeof toolProfiles;

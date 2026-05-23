@@ -41,3 +41,9 @@ agents:
     icon: ":art:"
     description: "Creative strategist - ad creative briefs, concept development, creative QA, format × angle framework"
     tags: [creative, advertising, briefs, strategy]
+  - id: piper
+    path: piper
+    display_name: Piper
+    icon: ":factory:"
+    description: "Production pipeline manager - reads Notion ad sets and tasks, reports what's slipping, on track, or blocked across all clients"
+    tags: [production, pipeline, project-management, notion]

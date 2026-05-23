@@ -56,6 +56,11 @@ function getDedicatedBotConfigs(): DedicatedBotConfig[] {
       botToken: env.MAYA_BOT_TOKEN,
       appToken: env.MAYA_APP_TOKEN,
     },
+    {
+      agentId: 'piper',
+      botToken: env.PIPER_BOT_TOKEN,
+      appToken: env.PIPER_APP_TOKEN,
+    },
   ];
 }
 

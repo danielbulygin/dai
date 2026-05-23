@@ -278,3 +278,99 @@ export async function queryMetaCreatives(params: {
     return JSON.stringify({ error: msg });
   }
 }
+
+// ---------------------------------------------------------------------------
+// check_ads_in_meta — does an AOT ad_id_code (e.g. PLx3942) exist in the
+// client's Meta ad account, as either an ad set name or an ad name?
+//
+// Used by Piper to reconcile open "Upload and Configure Campaign" tasks
+// against the actual Meta account. The naming convention is reliable: every
+// ad and ad set carries the ad_id_code in its name.
+//
+// Status-agnostic by design — paused/archived ads still count as "uploaded".
+// ---------------------------------------------------------------------------
+
+interface MetaNameMatch {
+  id: string;
+  name: string;
+  effective_status: string;
+  status?: string;
+}
+
+interface AdIdCodeReport {
+  ad_id_code: string;
+  found: boolean;
+  matched_adsets: MetaNameMatch[];
+  matched_ads: Array<MetaNameMatch & { adset_id?: string; campaign_id?: string }>;
+}
+
+async function lookupCodeInMeta(
+  adAccountId: string,
+  code: string,
+): Promise<AdIdCodeReport> {
+  const filterFor = (value: string) =>
+    JSON.stringify([{ field: 'name', operator: 'CONTAIN', value }]);
+
+  const [adsetResult, adResult] = await Promise.all([
+    metaApiRequest(`${adAccountId}/adsets`, {
+      filtering: filterFor(code),
+      fields: 'id,name,effective_status,status,campaign_id',
+      limit: '50',
+    }),
+    metaApiRequest(`${adAccountId}/ads`, {
+      filtering: filterFor(code),
+      fields: 'id,name,effective_status,status,adset_id,campaign_id',
+      limit: '50',
+    }),
+  ]);
+
+  const adsets = (adsetResult.data ?? []) as MetaNameMatch[];
+  const ads = (adResult.data ?? []) as Array<MetaNameMatch & { adset_id?: string; campaign_id?: string }>;
+
+  return {
+    ad_id_code: code,
+    found: adsets.length > 0 || ads.length > 0,
+    matched_adsets: adsets,
+    matched_ads: ads,
+  };
+}
+
+export async function checkAdsInMeta(params: {
+  clientCode: string;
+  adIdCodes: string[];
+}): Promise<string> {
+  try {
+    if (!params.adIdCodes || params.adIdCodes.length === 0) {
+      return JSON.stringify({ error: 'adIdCodes must be a non-empty array' });
+    }
+    if (params.adIdCodes.length > 50) {
+      return JSON.stringify({ error: 'Too many ad_id_codes — max 50 per call (one Graph request per code per level).' });
+    }
+
+    const resolved = await resolveAdAccountId(params.clientCode);
+    if ('error' in resolved) return JSON.stringify(resolved);
+    const { adAccountId } = resolved;
+
+    const uniqueCodes = Array.from(new Set(params.adIdCodes));
+    const reports = await Promise.all(uniqueCodes.map((code) => lookupCodeInMeta(adAccountId, code)));
+
+    const foundCount = reports.filter((r) => r.found).length;
+    logger.info(
+      { clientCode: params.clientCode, codes: uniqueCodes.length, found: foundCount },
+      'Meta ad-existence check complete',
+    );
+
+    return JSON.stringify({
+      client: params.clientCode,
+      ad_account_id: adAccountId,
+      codes_checked: uniqueCodes.length,
+      found_count: foundCount,
+      not_found_count: uniqueCodes.length - foundCount,
+      reports,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ error: msg }, 'checkAdsInMeta failed');
+    return JSON.stringify({ error: msg });
+  }
+}
