@@ -1780,14 +1780,14 @@ register({
   definition: {
     name: 'query_aot_tasks',
     description:
-      'Query the AOT production-pipeline Tasks Notion database. Each task is linked to an Ad Set and a Client. Returns task name, status, stage, due date, ad set info, assignee display names (assignee_names) alongside their Notion user IDs, priority, impact severity, overdue flag, and the live Delay Alert formula text. Default returns active tasks (not Done/Cancelled) and excludes tasks on dead ad sets (Completed/Cancelled/On Hold), sorted by due date ascending. Always cite assignees by their assignee_names, not the user IDs.',
+      'Query the AOT production-pipeline Tasks Notion database. Each task is linked to an Ad Set and a Client. Returns task name, status, stage, due date, ad set info, assignee display names (assignee_names) alongside their Notion user IDs, priority, impact severity, overdue flag, and the live Delay Alert formula text. Default returns active tasks (not Done/Cancelled) and excludes tasks on dead ad sets (Completed/Cancelled/On Hold), sorted by due date ascending. **Default freshness window is 90 days** on last_edited_time — tasks nobody has touched in 3+ months are treated as zombies and filtered out. This is what the team usually cares about (recent actionable work). For forensic audits of old data, explicitly pass `freshness_window_days: 0`. **Pagination is automatic**: the tool fetches every matching page up to a 2000-row safety ceiling, so results are complete by default. The response includes `truncated_at_ceiling: true` ONLY if the ceiling was hit — in that case, narrow the filter and re-query. Always cite assignees by their assignee_names, not the user IDs.',
     input_schema: {
       type: 'object' as const,
       properties: {
         status_group: {
           type: 'string',
           enum: ['active', 'done', 'all'],
-          description: 'active = exclude Done/Cancelled (default), done = only Done, all = everything',
+          description: 'active = exclude Done/Cancelled/Complete/Archived Task (default — these are all terminal statuses the team uses interchangeably), done = only Done, all = everything including archived/soft-archived rows',
         },
         overdue_only: {
           type: 'boolean',
@@ -1825,9 +1825,13 @@ register({
           type: 'boolean',
           description: 'Exclude tasks whose Ad Set Stage rollup is Completed, Cancelled, or On Hold. Default true (filters out year-old zombie tasks on dead ad sets). Set false to inspect raw task state.',
         },
+        freshness_window_days: {
+          type: 'number',
+          description: 'Only return tasks whose Notion last_edited_time is within the last N days. Default 90 (filters out abandoned tasks nobody has touched in 3+ months — the dominant source of database noise). Pass 0 to disable and return tasks of any age (forensic/zombie audits only — expect large result sets and likely truncation).',
+        },
         limit: {
           type: 'number',
-          description: 'Max tasks to return (default 50, max 100)',
+          description: 'Optional cap on total tasks returned. Default and max = 2000 (the safety ceiling). Pagination is automatic, so leaving this unset returns ALL matching tasks. Set a lower value only if you explicitly want a sample (e.g. "first 10 by due date").',
         },
       },
     },
@@ -1844,6 +1848,7 @@ register({
       client_name_contains: input.client_name_contains as string | undefined,
       task_name_contains: input.task_name_contains as string | undefined,
       exclude_dead_ad_sets: input.exclude_dead_ad_sets as boolean | undefined,
+      freshness_window_days: input.freshness_window_days as number | undefined,
       limit: input.limit as number | undefined,
     });
   },
@@ -1853,7 +1858,7 @@ register({
   definition: {
     name: 'query_aot_adsets',
     description:
-      'Query the AOT production-pipeline Ad Sets Notion database. An ad set is the unit of work that travels through stages (Concept → Brief → Production → Editing → QC → Media Buying → Done). Returns ad_id_code (e.g. ADBNx3475), ad_title, stage, format, ad_delivery_date, client_code + client_status, owner_names (resolved from Notion user IDs), the currently-active task name (active_task) and its assignee (task_assignee_name), task_progress (0-1), overdue_tasks_count, task_count, brief_relation_ids, drive_folder_url, final_ads_folder_url, frameio_url, and health_check. Default excludes ad sets in dead stages (Completed/Cancelled/On Hold). Use this for cadence reads ("what is each client producing this week"), capacity gaps ("what is in concept vs production"), and overdue-ad-set surfacing. Use query_aot_tasks when you need the per-task detail underneath. Always cite owners by owner_names, not user IDs.',
+      'Query the AOT production-pipeline Ad Sets Notion database. An ad set is the unit of work that travels through stages (Concept → Brief → Production → Editing → QC → Media Buying → Done). Returns ad_id_code (e.g. ADBNx3475), ad_title, stage, format, ad_delivery_date, client_code + client_status, owner_names (resolved from Notion user IDs), the currently-active task name (active_task) and its assignee (task_assignee_name), task_progress (0-1), overdue_tasks_count, task_count, brief_relation_ids, drive_folder_url, final_ads_folder_url, frameio_url, and health_check. Default excludes ad sets in dead stages (Completed/Cancelled/On Hold). **Default freshness window is 90 days** on last_edited_time — ad sets nobody has touched in 3+ months are treated as zombies and filtered out. For forensic audits of old data, explicitly pass `freshness_window_days: 0`. Use this for cadence reads ("what is each client producing this week"), capacity gaps ("what is in concept vs production"), and overdue-ad-set surfacing. Use query_aot_tasks when you need the per-task detail underneath. **Pagination is automatic**: the tool fetches every matching page up to a 2000-row safety ceiling, so results are complete by default. The response includes `truncated_at_ceiling: true` ONLY if the ceiling was hit — in that case, narrow the filter and re-query. Always cite owners by owner_names, not user IDs.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -1893,6 +1898,10 @@ register({
           type: 'boolean',
           description: 'Only return ad sets where the Overdue Tasks Count rollup is greater than 0. Use this to surface ad sets actually slipping vs ad sets with stale tasks already filtered out.',
         },
+        freshness_window_days: {
+          type: 'number',
+          description: 'Only return ad sets whose Notion last_edited_time is within the last N days. Default 90 (filters out abandoned ad sets nobody has touched in 3+ months — the dominant source of database noise). Pass 0 to disable and return ad sets of any age (forensic audits only).',
+        },
         sort_by: {
           type: 'string',
           enum: ['delivery_date_asc', 'delivery_date_desc', 'last_edited_desc', 'created_desc'],
@@ -1900,7 +1909,7 @@ register({
         },
         limit: {
           type: 'number',
-          description: 'Max ad sets to return (default 50, max 100)',
+          description: 'Optional cap on total ad sets returned. Default and max = 2000 (the safety ceiling). Pagination is automatic, so leaving this unset returns ALL matching ad sets. Set a lower value only if you explicitly want a sample.',
         },
       },
     },
@@ -1916,6 +1925,7 @@ register({
       delivery_on_or_before: input.delivery_on_or_before as string | undefined,
       delivery_on_or_after: input.delivery_on_or_after as string | undefined,
       has_overdue_tasks: input.has_overdue_tasks as boolean | undefined,
+      freshness_window_days: input.freshness_window_days as number | undefined,
       sort_by: input.sort_by as 'delivery_date_asc' | 'delivery_date_desc' | 'last_edited_desc' | 'created_desc' | undefined,
       limit: input.limit as number | undefined,
     });

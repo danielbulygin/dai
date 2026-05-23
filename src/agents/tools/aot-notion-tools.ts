@@ -69,6 +69,49 @@ interface ExtractedTask {
 
 const DEAD_AD_SET_STAGES = new Set(['Completed', 'Cancelled', 'On Hold']);
 
+// Pagination: Notion's max page_size is 100. We paginate to completion by
+// default; the safety ceiling prevents a runaway query from silently
+// processing tens of thousands of rows. If the ceiling is hit, the response
+// surfaces `truncated_at_ceiling: true` so Piper can flag the gap explicitly.
+const NOTION_PAGE_SIZE = 100;
+const DEFAULT_MAX_ROWS = 2000;
+
+async function fetchAllAotPages(args: {
+  dataSourceId: string;
+  filter?: unknown;
+  sorts: unknown;
+  maxRows: number;
+}): Promise<{ pages: PageObjectResponse[]; truncated: boolean }> {
+  const notion = getNotion();
+  const collected: PageObjectResponse[] = [];
+  let cursor: string | undefined = undefined;
+
+  while (collected.length < args.maxRows) {
+    const remaining = args.maxRows - collected.length;
+    const pageSize = Math.min(NOTION_PAGE_SIZE, remaining);
+    const response = await notion.dataSources.query({
+      data_source_id: args.dataSourceId,
+      page_size: pageSize,
+      sorts: args.sorts as never,
+      ...(args.filter ? { filter: args.filter as never } : {}),
+      ...(cursor ? { start_cursor: cursor } : {}),
+    });
+    const pages = response.results.filter(
+      (page): page is PageObjectResponse => page.object === 'page' && 'properties' in page,
+    );
+    collected.push(...pages);
+    if (!response.has_more || !response.next_cursor) {
+      return { pages: collected, truncated: false };
+    }
+    cursor = response.next_cursor;
+  }
+
+  // We exited the loop because we hit maxRows. There may or may not be more
+  // rows in Notion; we don't know without one more request. The presence of a
+  // cursor at this point implies there are more, but we don't follow it.
+  return { pages: collected, truncated: true };
+}
+
 function rich(text: Array<{ plain_text?: string }> | undefined): string | null {
   if (!text || text.length === 0) return null;
   return text.map((t) => t.plain_text ?? '').join('').trim() || null;
@@ -161,8 +204,18 @@ type NotionFilter =
   | { property: string; rollup: { number: { equals?: number; greater_than?: number; greater_than_or_equal_to?: number } } }
   | { property: string; select: { equals: string } }
   | { property: string; title: { contains?: string; equals?: string } }
+  | { timestamp: 'last_edited_time'; last_edited_time: { on_or_after?: string; on_or_before?: string; after?: string; before?: string } }
+  | { timestamp: 'created_time'; created_time: { on_or_after?: string; on_or_before?: string; after?: string; before?: string } }
   | { and: NotionFilter[] }
   | { or: NotionFilter[] };
+
+const DEFAULT_FRESHNESS_WINDOW_DAYS = 90;
+
+function freshnessFilterClause(days: number): NotionFilter | null {
+  if (days <= 0) return null;
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+  return { timestamp: 'last_edited_time', last_edited_time: { on_or_after: cutoff } };
+}
 
 function buildTaskFilter(params: {
   statusGroup?: 'active' | 'done' | 'all';
@@ -173,6 +226,7 @@ function buildTaskFilter(params: {
   clientRelationId?: string;
   adSetRelationId?: string;
   taskNameContains?: string;
+  freshnessWindowDays?: number;
 }): NotionFilter | undefined {
   const clauses: NotionFilter[] = [];
 
@@ -180,6 +234,10 @@ function buildTaskFilter(params: {
   if (group === 'active') {
     clauses.push({ property: 'Status', status: { does_not_equal: 'Done' } });
     clauses.push({ property: 'Status', status: { does_not_equal: 'Cancelled' } });
+    // "Archived Task" is a soft-archive status the team uses to remove rows
+    // from active views without deleting them. Treat as done for `active` queries.
+    clauses.push({ property: 'Status', status: { does_not_equal: 'Archived Task' } });
+    clauses.push({ property: 'Status', status: { does_not_equal: 'Complete' } });
   } else if (group === 'done') {
     clauses.push({ property: 'Status', status: { equals: 'Done' } });
   }
@@ -208,6 +266,8 @@ function buildTaskFilter(params: {
     // Title property in the AOT Tasks DB has a trailing space: 'Task name '
     clauses.push({ property: 'Task name ', title: { contains: params.taskNameContains } });
   }
+  const fresh = freshnessFilterClause(params.freshnessWindowDays ?? DEFAULT_FRESHNESS_WINDOW_DAYS);
+  if (fresh) clauses.push(fresh);
 
   if (clauses.length === 0) return undefined;
   if (clauses.length === 1) return clauses[0];
@@ -229,12 +289,12 @@ export async function queryAotTasks(params: {
   client_name_contains?: string;
   task_name_contains?: string;
   exclude_dead_ad_sets?: boolean;
+  freshness_window_days?: number;
   limit?: number;
 }): Promise<string> {
   try {
-    const limit = Math.min(params.limit ?? 50, 100);
+    const maxRows = Math.min(params.limit ?? DEFAULT_MAX_ROWS, DEFAULT_MAX_ROWS);
     const dsId = await resolveDataSourceId(env.NOTION_AOT_TASKS_DB_ID);
-    const notion = getNotion();
 
     const filter = buildTaskFilter({
       statusGroup: params.status_group,
@@ -245,20 +305,20 @@ export async function queryAotTasks(params: {
       clientRelationId: params.client_relation_id,
       adSetRelationId: params.ad_set_relation_id,
       taskNameContains: params.task_name_contains,
+      freshnessWindowDays: params.freshness_window_days,
     });
 
-    logger.debug({ filter, limit }, 'Querying AOT Tasks DB');
+    logger.debug({ filter, maxRows }, 'Querying AOT Tasks DB');
 
-    const response = await notion.dataSources.query({
-      data_source_id: dsId,
-      page_size: limit,
+    const { pages, truncated } = await fetchAllAotPages({
+      dataSourceId: dsId,
+      filter,
       sorts: [{ property: 'Task Due Date', direction: 'ascending' }],
-      ...(filter ? { filter: filter as never } : {}),
+      maxRows,
     });
 
-    let tasks = response.results
-      .filter((page): page is PageObjectResponse => page.object === 'page' && 'properties' in page)
-      .map(extractTask);
+    let tasks = pages.map(extractTask);
+    const rawCount = tasks.length;
 
     if (params.client_name_contains) {
       const needle = params.client_name_contains.toLowerCase();
@@ -280,10 +340,15 @@ export async function queryAotTasks(params: {
         .filter((name): name is string => !!name);
     }
 
-    logger.info({ count: tasks.length, hadFilter: !!filter, excludedDead: excludeDead }, 'AOT Tasks query complete');
+    logger.info(
+      { count: tasks.length, rawCount, hadFilter: !!filter, excludedDead: excludeDead, truncated },
+      'AOT Tasks query complete',
+    );
     return JSON.stringify({
       count: tasks.length,
-      has_more: response.has_more,
+      raw_count_before_inmemory_filters: rawCount,
+      truncated_at_ceiling: truncated,
+      max_rows: maxRows,
       tasks,
     });
   } catch (err) {
@@ -394,6 +459,7 @@ function buildAdSetFilter(params: {
   deliveryOnOrBefore?: string;
   deliveryOnOrAfter?: string;
   hasOverdueTasks?: boolean;
+  freshnessWindowDays?: number;
 }): NotionFilter | undefined {
   const clauses: NotionFilter[] = [];
 
@@ -420,6 +486,8 @@ function buildAdSetFilter(params: {
     // Notion requires the rollup filter nested under `rollup.number`, not flat.
     clauses.push({ property: 'Overdue Tasks Count', rollup: { number: { greater_than: 0 } } });
   }
+  const fresh = freshnessFilterClause(params.freshnessWindowDays ?? DEFAULT_FRESHNESS_WINDOW_DAYS);
+  if (fresh) clauses.push(fresh);
 
   if (clauses.length === 0) return undefined;
   if (clauses.length === 1) return clauses[0];
@@ -440,13 +508,13 @@ export async function queryAotAdSets(params: {
   delivery_on_or_before?: string;
   delivery_on_or_after?: string;
   has_overdue_tasks?: boolean;
+  freshness_window_days?: number;
   sort_by?: 'delivery_date_asc' | 'delivery_date_desc' | 'last_edited_desc' | 'created_desc';
   limit?: number;
 }): Promise<string> {
   try {
-    const limit = Math.min(params.limit ?? 50, 100);
+    const maxRows = Math.min(params.limit ?? DEFAULT_MAX_ROWS, DEFAULT_MAX_ROWS);
     const dsId = await resolveDataSourceId(env.NOTION_AOT_ADSETS_DB_ID);
-    const notion = getNotion();
 
     const filter = buildAdSetFilter({
       stage: params.stage,
@@ -456,6 +524,7 @@ export async function queryAotAdSets(params: {
       deliveryOnOrBefore: params.delivery_on_or_before,
       deliveryOnOrAfter: params.delivery_on_or_after,
       hasOverdueTasks: params.has_overdue_tasks,
+      freshnessWindowDays: params.freshness_window_days,
     });
 
     const sortBy = params.sort_by ?? 'delivery_date_asc';
@@ -468,18 +537,17 @@ export async function queryAotAdSets(params: {
             ? [{ timestamp: 'last_edited_time', direction: 'descending' }]
             : [{ timestamp: 'created_time', direction: 'descending' }];
 
-    logger.debug({ filter, limit, sortBy }, 'Querying AOT Ad Sets DB');
+    logger.debug({ filter, maxRows, sortBy }, 'Querying AOT Ad Sets DB');
 
-    const response = await notion.dataSources.query({
-      data_source_id: dsId,
-      page_size: limit,
-      sorts: sorts as never,
-      ...(filter ? { filter: filter as never } : {}),
+    const { pages, truncated } = await fetchAllAotPages({
+      dataSourceId: dsId,
+      filter,
+      sorts,
+      maxRows,
     });
 
-    let adsets = response.results
-      .filter((page): page is PageObjectResponse => page.object === 'page' && 'properties' in page)
-      .map(extractAdSet);
+    let adsets = pages.map(extractAdSet);
+    const rawCount = adsets.length;
 
     if (params.client_name_contains) {
       const needle = params.client_name_contains.toLowerCase();
@@ -501,10 +569,15 @@ export async function queryAotAdSets(params: {
         .filter((name): name is string => !!name);
     }
 
-    logger.info({ count: adsets.length, hadFilter: !!filter, excludedDead: excludeDead }, 'AOT Ad Sets query complete');
+    logger.info(
+      { count: adsets.length, rawCount, hadFilter: !!filter, excludedDead: excludeDead, truncated },
+      'AOT Ad Sets query complete',
+    );
     return JSON.stringify({
       count: adsets.length,
-      has_more: response.has_more,
+      raw_count_before_inmemory_filters: rawCount,
+      truncated_at_ceiling: truncated,
+      max_rows: maxRows,
       adsets,
     });
   } catch (err) {
