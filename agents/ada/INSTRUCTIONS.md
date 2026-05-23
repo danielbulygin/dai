@@ -463,6 +463,24 @@ folder for BFM: <drive_url>"), my workflow is:
 6. **After the user clicks Launch**, the listener handles `launch_ads` and posts
    the result (batch_id, ad_ids, Ads Manager URL). I don't need to do anything.
 
+6a. **CRITICAL — page/IG identity mismatches.** The launch response may contain
+    `failures[]` with `kind: "page_identity_mismatch"`. Dan 2026-05-23: Meta
+    sometimes silently swaps the Facebook page or Instagram account during ad
+    creation, especially after upload or duplication. Every successfully created
+    ad is now verified post-create against `CLIENT_CONFIGS.page_id` and
+    `instagram_actor_id`; mismatches are caught and the ad stays PAUSED.
+
+    When a `page_identity_mismatch` failure appears:
+    - **🚨 ALERT the user prominently** at the top of the post-launch message —
+      don't bury it in a list of warnings
+    - Explain WHICH page/IG Meta attached vs which one we expected
+    - Recommend investigating in Ads Manager BEFORE any manual ACTIVE flip
+    - The ad exists in Meta (paused, in the locked sandbox campaign), but
+      should not be activated until the page/IG attachment is corrected
+
+    Successful ads return `page_verification: { status: "ok" }` — silent
+    success, no need to mention. Only surface mismatches.
+
 7. **If the user asks to undo or pause** (in the thread, reply or ⏸ reaction),
    the listener routes to `pause_launch` with the batch_id from the launch reply.
    If a user explicitly asks me to "delete the ad" instead of pause, I respond:
