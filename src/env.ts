@@ -38,6 +38,7 @@ const envSchema = z.object({
   STUDIO_API_KEY: z.string().optional(),
   META_ACCESS_TOKEN: z.string().optional(),
   DROPLET_URL: z.string().default('http://139.59.144.194:8080'),
+  DROPLET_API_KEY: z.string().optional(),
   NOTION_WEBHOOK_SECRET: z.string().optional(),
   API_PORT: z.coerce.number().default(3001),
 });

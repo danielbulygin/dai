@@ -15,6 +15,7 @@ import * as browserTools from './tools/browser-tools.js';
 import * as creativeTools from './tools/creative-tools.js';
 import * as metaApiTools from './tools/meta-api-tools.js';
 import * as mediaLibraryTools from './tools/media-library-tools.js';
+import * as adLaunchTools from './tools/ad-launch-tools.js';
 import * as reportTools from '../reports/index.js';
 import * as methodologySanitizer from '../client-agents/methodology-sanitizer.js';
 import { logger } from '../utils/logger.js';
@@ -464,6 +465,128 @@ register({
       drive_url: input.drive_url as string,
       client_code: input.client_code as string,
     });
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Ad Launch tools (Phase 11)
+// ---------------------------------------------------------------------------
+
+register({
+  definition: {
+    name: 'get_client_capabilities',
+    description:
+      'Check whether Ada can launch real ads for a client (i.e. the client is in CLIENT_CONFIGS). Returns {upload, launch, locked_campaign_name, has_meta_config}. Call this AFTER upload_to_media_library completes — if launch=false, the client is upload-only (e.g. Sweetspot, Audibene) and you stop there. If launch=true, ask the user whether to proceed with preview_ad_launch.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        client_code: { type: 'string', description: 'Client code (e.g. PL, BFM, MEOW, AOT)' },
+      },
+      required: ['client_code'],
+    },
+  },
+  async execute(input) {
+    return adLaunchTools.getClientCapabilities({ client_code: input.client_code as string });
+  },
+});
+
+register({
+  definition: {
+    name: 'preview_ad_launch',
+    description:
+      'Build a launch preview for a client. No Meta side effects — resolves landing pages, generates copy via Opus, runs QC, persists a pending launch_batches row. Returns batch_id + the full preview payload that you render as a Slack Block Kit message with [Launch] [Edit landers] [Edit copy] [Cancel] buttons. For each creative, prefer NOT to pass transcript/visual_summary — the droplet falls back to the media_library_assets cache populated by the post-upload auto-fetch.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        client_code: { type: 'string' },
+        creatives: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              video_id: { type: 'string' },
+              filename: { type: 'string' },
+              asset_id: { type: 'string' },
+              media_type: { type: 'string', enum: ['video', 'image'] },
+              transcript: { type: 'string' },
+              visual_summary: { type: 'string' },
+            },
+            required: ['video_id'],
+          },
+        },
+        mode: { type: 'string', enum: ['new_adset', 'ads_only'] },
+        target_adset_id: { type: 'string' },
+        brief_notion_id: { type: 'string' },
+        source_drive_url: { type: 'string' },
+        initiated_by: { type: 'string', description: 'Slack user ID who triggered this' },
+      },
+      required: ['client_code', 'creatives'],
+    },
+  },
+  async execute(input) {
+    return adLaunchTools.previewAdLaunch(input as Parameters<typeof adLaunchTools.previewAdLaunch>[0]);
+  },
+});
+
+register({
+  definition: {
+    name: 'launch_ads',
+    description:
+      'Execute a previously-previewed launch. Creates PAUSED adset + PAUSED ads in the client\'s locked sandbox campaign. Idempotent — second call with same idempotency_key returns the original result. Typically called from a Slack button handler, not directly by Ada; if Ada calls it, derive idempotency_key from the user prompt timestamp.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        batch_id: { type: 'string' },
+        idempotency_key: { type: 'string' },
+        edits: { type: 'object' },
+      },
+      required: ['batch_id', 'idempotency_key'],
+    },
+  },
+  async execute(input) {
+    return adLaunchTools.launchAds(input as Parameters<typeof adLaunchTools.launchAds>[0]);
+  },
+});
+
+register({
+  definition: {
+    name: 'pause_launch',
+    description:
+      'Pause a launched batch. Flips configured_status=PAUSED on the adset and every ad in the batch. This is the ONLY undo verb — Ada cannot delete anything in Meta, ever. If a user asks to "delete" or "remove" the ads, explain you can only pause; deletion is manual in Ads Manager.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        batch_id: { type: 'string' },
+        reason: { type: 'string', description: 'Why are we pausing — user request, mistake, etc.' },
+      },
+      required: ['batch_id', 'reason'],
+    },
+  },
+  async execute(input) {
+    return adLaunchTools.pauseLaunch({ batch_id: input.batch_id as string, reason: input.reason as string });
+  },
+});
+
+register({
+  definition: {
+    name: 'update_landing_page_mapping',
+    description:
+      'Persist a (client, keyword) → URL mapping in client_meta_configs.landing_pages. Use when the user gives a durable correction like "for PL ginger ads use /products/wellness-shot-pack as the default" — make it stick so future previews pick it up automatically. For a single URL replacement pass { client_code, keyword, url, label }. For an ordered list pass { client_code, keyword, urls: [...] }. Default source is "user_correction".',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        client_code: { type: 'string' },
+        keyword: { type: 'string' },
+        url: { type: 'string' },
+        urls: { type: 'array' },
+        label: { type: 'string' },
+        source: { type: 'string', enum: ['user_correction', 'manual', 'mining'] },
+      },
+      required: ['client_code', 'keyword'],
+    },
+  },
+  async execute(input) {
+    return adLaunchTools.updateLandingPageMapping(input as Parameters<typeof adLaunchTools.updateLandingPageMapping>[0]);
   },
 });
 

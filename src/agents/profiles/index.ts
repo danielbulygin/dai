@@ -23,6 +23,8 @@ export const toolProfiles = {
     'query_tasks', 'create_task', 'update_task', 'add_task_comment', 'search_notion',
     'generate_weekly_report',
     'scan_media_library_folder', 'upload_to_media_library',
+    'get_client_capabilities', 'preview_ad_launch', 'launch_ads',
+    'pause_launch', 'update_landing_page_mapping',
   ],
   creative_strategist: [
     'recall', 'remember', 'search_memories',
