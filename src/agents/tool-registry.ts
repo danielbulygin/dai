@@ -6,6 +6,7 @@ import * as slackTools from './tools/slack-tools.js';
 import * as supabaseTools from './tools/supabase-tools.js';
 import * as firefliesTools from './tools/fireflies-tools.js';
 import * as notionTools from './tools/notion-tools.js';
+import * as aotNotionTools from './tools/aot-notion-tools.js';
 import * as monitoringTools from './tools/monitoring-tools.js';
 import * as decisionTools from './tools/decision-tools.js';
 import * as clientConfigTools from './tools/client-config-tools.js';
@@ -413,6 +414,35 @@ register({
   },
 });
 
+register({
+  definition: {
+    name: 'check_ads_in_meta',
+    description:
+      'For each AOT ad_id_code (e.g. PLx3942, ADBNx3475), check whether it has been uploaded to the client\'s Meta ad account by searching ad-set names AND ad names. Returns found=true if the code appears in either an ad set name OR an ad name (status-agnostic — paused, archived, and active all count as "uploaded successfully"). Use this to reconcile open "Upload and Configure Campaign" tasks against Meta reality: if found=true the Notion task is stale (close it); if found=false the upload is genuinely owed. Returns matched_adsets and matched_ads with id, name, effective_status, and parent IDs. Naming convention is reliable: every ad/ad-set carries its ad_id_code in the name.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        client_code: {
+          type: 'string',
+          description: 'Client code (e.g., PL, ADBN, NP). Used to look up the ad_account_id in Supabase.',
+        },
+        ad_id_codes: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Array of ad_id_codes to check (e.g., ["PLx3942", "PLx3943"]). Max 50 per call.',
+        },
+      },
+      required: ['client_code', 'ad_id_codes'],
+    },
+  },
+  async execute(input, context) {
+    return await metaApiTools.checkAdsInMeta({
+      clientCode: (context.clientScope?.clientCode ?? input.client_code) as string,
+      adIdCodes: input.ad_id_codes as string[],
+    });
+  },
+});
+
 // ---------------------------------------------------------------------------
 // Media Library tools (Google Drive -> Meta Business Media Library)
 // ---------------------------------------------------------------------------
@@ -519,6 +549,12 @@ register({
         brief_notion_id: { type: 'string' },
         source_drive_url: { type: 'string' },
         initiated_by: { type: 'string', description: 'Slack user ID who triggered this' },
+        geo_tier: {
+          type: 'string',
+          enum: ['US', 'T1', 'T2'],
+          description:
+            "REQUIRED for tiered clients (currently BFM only). Three buckets: US (US-only), T1 (16 countries: AE, AT, AU, AX, CA, CH, CZ, DE, DK, GB, IE, NL, NO, NZ, SE, US — wealthy/anglo + DACH + Nordics + ME), T2 (17 countries: BE, CL, ES, FI, FR, GR, IL, IT, JP, MX, PE, PL, PT, RO, SG, TR, TW — LATAM + South Europe + Asia + Israel). Always ASK the user which tier before previewing on BFM — never guess. For non-tiered clients (PL, AOT, MEOW, SLB, URV), omit this; their geo is fixed in CLIENT_CONFIGS.",
+        },
       },
       required: ['client_code', 'creatives'],
     },
@@ -1726,6 +1762,156 @@ register({
   async execute(input) {
     return await notionTools.searchNotion({
       query: input.query as string,
+      limit: input.limit as number | undefined,
+    });
+  },
+});
+
+// ---------------------------------------------------------------------------
+// AOT-shaped Notion tools (production pipeline)
+// ---------------------------------------------------------------------------
+
+register({
+  definition: {
+    name: 'query_aot_tasks',
+    description:
+      'Query the AOT production-pipeline Tasks Notion database. Each task is linked to an Ad Set and a Client. Returns task name, status, stage, due date, ad set info, assignee display names (assignee_names) alongside their Notion user IDs, priority, impact severity, overdue flag, and the live Delay Alert formula text. Default returns active tasks (not Done/Cancelled) and excludes tasks on dead ad sets (Completed/Cancelled/On Hold), sorted by due date ascending. Always cite assignees by their assignee_names, not the user IDs.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        status_group: {
+          type: 'string',
+          enum: ['active', 'done', 'all'],
+          description: 'active = exclude Done/Cancelled (default), done = only Done, all = everything',
+        },
+        overdue_only: {
+          type: 'boolean',
+          description: 'Only return tasks where the live Overdue Check formula is true.',
+        },
+        due_on_or_before: {
+          type: 'string',
+          description: 'ISO date (YYYY-MM-DD) — tasks with due dates on or before this date',
+        },
+        due_on_or_after: {
+          type: 'string',
+          description: 'ISO date (YYYY-MM-DD) — tasks with due dates on or after this date',
+        },
+        assignee_user_id: {
+          type: 'string',
+          description: 'Notion user ID (without the user:// prefix) to filter by assignee',
+        },
+        client_relation_id: {
+          type: 'string',
+          description: 'Notion page ID of a client to filter by',
+        },
+        ad_set_relation_id: {
+          type: 'string',
+          description: 'Notion page ID of an ad set to filter by',
+        },
+        client_name_contains: {
+          type: 'string',
+          description: 'Case-insensitive substring of the client name (resolved in-memory after fetch — use for ad-hoc filtering when you do not know the client page ID)',
+        },
+        task_name_contains: {
+          type: 'string',
+          description: 'Substring of the task name (case-insensitive). Pushed down as a Notion title.contains filter. Common values: "upload" (find upload-and-configure tasks), "QC", "brief", "send to client".',
+        },
+        exclude_dead_ad_sets: {
+          type: 'boolean',
+          description: 'Exclude tasks whose Ad Set Stage rollup is Completed, Cancelled, or On Hold. Default true (filters out year-old zombie tasks on dead ad sets). Set false to inspect raw task state.',
+        },
+        limit: {
+          type: 'number',
+          description: 'Max tasks to return (default 50, max 100)',
+        },
+      },
+    },
+  },
+  async execute(input) {
+    return await aotNotionTools.queryAotTasks({
+      status_group: input.status_group as 'active' | 'done' | 'all' | undefined,
+      overdue_only: input.overdue_only as boolean | undefined,
+      due_on_or_before: input.due_on_or_before as string | undefined,
+      due_on_or_after: input.due_on_or_after as string | undefined,
+      assignee_user_id: input.assignee_user_id as string | undefined,
+      client_relation_id: input.client_relation_id as string | undefined,
+      ad_set_relation_id: input.ad_set_relation_id as string | undefined,
+      client_name_contains: input.client_name_contains as string | undefined,
+      task_name_contains: input.task_name_contains as string | undefined,
+      exclude_dead_ad_sets: input.exclude_dead_ad_sets as boolean | undefined,
+      limit: input.limit as number | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'query_aot_adsets',
+    description:
+      'Query the AOT production-pipeline Ad Sets Notion database. An ad set is the unit of work that travels through stages (Concept → Brief → Production → Editing → QC → Media Buying → Done). Returns ad_id_code (e.g. ADBNx3475), ad_title, stage, format, ad_delivery_date, client_code + client_status, owner_names (resolved from Notion user IDs), the currently-active task name (active_task) and its assignee (task_assignee_name), task_progress (0-1), overdue_tasks_count, task_count, brief_relation_ids, drive_folder_url, final_ads_folder_url, frameio_url, and health_check. Default excludes ad sets in dead stages (Completed/Cancelled/On Hold). Use this for cadence reads ("what is each client producing this week"), capacity gaps ("what is in concept vs production"), and overdue-ad-set surfacing. Use query_aot_tasks when you need the per-task detail underneath. Always cite owners by owner_names, not user IDs.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        stage: {
+          type: 'string',
+          description: 'Filter by exact Stage status name (e.g., "Concept", "Brief", "Production", "Editing", "QC", "Media Buying", "Done"). Omit to return ad sets across all active stages.',
+        },
+        exclude_dead_ad_sets: {
+          type: 'boolean',
+          description: 'Exclude ad sets whose Stage is Completed, Cancelled, or On Hold. Default true. Set false to inspect dead/archived ad sets.',
+        },
+        client_relation_id: {
+          type: 'string',
+          description: 'Notion page ID of a client to filter by',
+        },
+        client_name_contains: {
+          type: 'string',
+          description: 'Case-insensitive substring of the client name (resolved in-memory after fetch — use for ad-hoc filtering when you do not know the client page ID)',
+        },
+        owner_user_id: {
+          type: 'string',
+          description: 'Notion user ID (without the user:// prefix) to filter by ad-set owner',
+        },
+        format: {
+          type: 'string',
+          description: 'Filter by Format select value (e.g., "UGC", "Static", "Video Ad", "Motion Graphic", "Special Project")',
+        },
+        delivery_on_or_before: {
+          type: 'string',
+          description: 'ISO date (YYYY-MM-DD) — ad sets with Ad Delivery Date on or before this date',
+        },
+        delivery_on_or_after: {
+          type: 'string',
+          description: 'ISO date (YYYY-MM-DD) — ad sets with Ad Delivery Date on or after this date',
+        },
+        has_overdue_tasks: {
+          type: 'boolean',
+          description: 'Only return ad sets where the Overdue Tasks Count rollup is greater than 0. Use this to surface ad sets actually slipping vs ad sets with stale tasks already filtered out.',
+        },
+        sort_by: {
+          type: 'string',
+          enum: ['delivery_date_asc', 'delivery_date_desc', 'last_edited_desc', 'created_desc'],
+          description: 'Sort order. Default delivery_date_asc (next-delivery first).',
+        },
+        limit: {
+          type: 'number',
+          description: 'Max ad sets to return (default 50, max 100)',
+        },
+      },
+    },
+  },
+  async execute(input) {
+    return await aotNotionTools.queryAotAdSets({
+      stage: input.stage as string | undefined,
+      exclude_dead_ad_sets: input.exclude_dead_ad_sets as boolean | undefined,
+      client_relation_id: input.client_relation_id as string | undefined,
+      client_name_contains: input.client_name_contains as string | undefined,
+      owner_user_id: input.owner_user_id as string | undefined,
+      format: input.format as string | undefined,
+      delivery_on_or_before: input.delivery_on_or_before as string | undefined,
+      delivery_on_or_after: input.delivery_on_or_after as string | undefined,
+      has_overdue_tasks: input.has_overdue_tasks as boolean | undefined,
+      sort_by: input.sort_by as 'delivery_date_asc' | 'delivery_date_desc' | 'last_edited_desc' | 'created_desc' | undefined,
       limit: input.limit as number | undefined,
     });
   },

@@ -400,10 +400,20 @@ folder for BFM: <drive_url>"), my workflow is:
 3. **Ask the user before launching.** Use language like:
 
    > "Uploaded 4 videos to BrainFM's media library. Want me to create adsets in
-   > `AOT // BFM SANDBOX // ALWAYS PAUSED`? I'd make 1 adset and add all 4 as paused
+   > `AOT // Ads Bank // Always Off`? I'd make 1 adset and add all 4 as paused
    > ads. I'll show you the full preview with QC before any Meta writes."
 
    Wait for explicit confirmation before calling `preview_ad_launch`.
+
+3a. **For BFM (and any other tiered client): ask which geo tier.** BFM's
+    `preview_ad_launch` requires `geo_tier` set to one of: `US`, `T1`, `T2`.
+    Never guess — always ask:
+
+   > "Which geo do you want — US-only, T1 (Anglo + DACH + Nordics, 16 countries),
+   > or T2 (LATAM + South Europe + Asia, 17 countries)?"
+
+   The tier becomes part of the adset name (e.g. `[AOT] 23 May 2026 T1 procrastination`).
+   Without it the droplet returns HTTP 400 and the flow stops.
 
 4. **Build the preview.** Call `preview_ad_launch` with:
    - `client_code` from the upload
@@ -411,6 +421,7 @@ folder for BFM: <drive_url>"), my workflow is:
      upload's `results` array. Do NOT pass `transcript` or `visual_summary` — the
      droplet falls back to the auto-fetch cache, which is what we want.
    - `mode: "new_adset"` (default) unless the user names an existing adset
+   - `geo_tier: "US" | "T1" | "T2"` for BFM (required) — omit for flat clients
    - `source_drive_url` from the upload input
    - `initiated_by` set to the Slack user ID
 
