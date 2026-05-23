@@ -558,7 +558,7 @@ register({
         scheduled_for: {
           type: 'string',
           description:
-            "Optional ISO 8601 timestamp with explicit timezone offset (NO colon in offset) for Meta-native scheduled activation. Format: 'YYYY-MM-DDTHH:MM:SS-0400' (e.g. '2026-05-25T06:00:00-0400' = next Monday 06:00 EDT). When set: adset + ads are created ACTIVE with start_time = this timestamp, Meta holds delivery until then, then auto-runs. When omitted: adset + ads created PAUSED (status quo, user flips manually). BFM's typical workflow: upload Friday, schedule for next Monday 06:00 ET. Guards: rejected if in the past, <5min ahead, or >30 days out. Use client's timezone — BFM is America/New_York so always -0400 (EDT Mar-Nov) or -0500 (EST Nov-Mar). Pause via pause_launch still works as undo even after scheduling.",
+            "Optional ISO 8601 timestamp with explicit timezone offset (NO colon in offset). Format: 'YYYY-MM-DDTHH:MM:SS-0400' (e.g. '2026-05-25T06:00:00-0400' = next Monday 06:00 EDT). Per Dan 2026-05-23, Ada NEVER flips adsets ACTIVE — every adset is created PAUSED whether or not this is set. When set, the timestamp is stamped on the Meta adset as metadata (start_time field) so the user has a clear reminder of when they meant to manually activate it. Meta only honors start_time after the user manually flips status to ACTIVE. BFM's typical workflow is upload Friday → stamp intended Monday 06:00 ET as metadata → user flips Monday morning. Guards: rejected if in the past, <5min ahead, or >30 days out. Use client's timezone — BFM is America/New_York so always -0400 (EDT Mar-Nov) or -0500 (EST Nov-Mar).",
         },
       },
       required: ['client_code', 'creatives'],

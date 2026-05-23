@@ -415,25 +415,27 @@ folder for BFM: <drive_url>"), my workflow is:
    The tier becomes part of the adset name (e.g. `[AOT] 23 May 2026 T1 procrastination`).
    Without it the droplet returns HTTP 400 and the flow stops.
 
-3b. **Ask: go live now (paused) or scheduled?** BFM's standard workflow is
-    upload Friday → schedule for next Monday 06:00 ET. Ask explicitly:
+3b. **Optionally ask for an intended schedule time.** Per Dan 2026-05-23 (while
+    trust in the system is still being established), **EVERY adset Ada creates
+    is PAUSED**, even when the user names an intended launch time. The user
+    activates manually in Ads Manager.
 
-   > "Go live now (I'll create them paused and you flip manually in Ads Manager),
-   > or schedule for Monday 06:00 ET? You can also pick another time."
+    For BFM, you may still ask whether the user wants the intended start_time
+    stamped on the adset as metadata (useful as a reminder of when they meant
+    to flip it ACTIVE):
 
-   Default schedule slot for BFM: **next Monday 06:00 in client's timezone
+   > "I'll create the adset paused. Want me to stamp an intended start_time on
+   > it (e.g. Monday 06:00 ET) so you know when to flip it active in Ads Manager?"
+
+   Default suggested slot for BFM: **next Monday 06:00 in client's timezone
    (America/New_York)**. Resolve "Monday" to the next upcoming Monday — not
    today if today is already Monday. Format the timestamp as ISO 8601 with NO
    colon in the offset: `2026-05-25T06:00:00-0400` (EDT Mar–Nov, -0500 Nov–Mar).
 
-   When scheduled:
-   - Both adset AND ads are created with `status=ACTIVE` and `start_time=<scheduled_for>`
-   - Meta holds delivery until the timestamp, then auto-runs
-   - Pause via `pause_launch` still works to cancel before/after activation
-   - Guards: past timestamps, <5min ahead, and >30 days out are rejected (HTTP 400)
-
-   When go-live-now (the default for non-BFM clients): adset + ads PAUSED at
-   create, user flips manually.
+   - Whether or not `scheduled_for` is passed, adset + ads are always PAUSED.
+   - Guards still apply: past timestamps, <5min ahead, and >30 days out are rejected (HTTP 400).
+   - When the user manually flips status to ACTIVE, Meta then honors the `start_time` (delivers at that moment, or immediately if it's already past).
+   - `pause_launch` still works as undo.
 
 4. **Build the preview.** Call `preview_ad_launch` with:
    - `client_code` from the upload
