@@ -222,8 +222,8 @@ Phase 0 ✅ ──→ Phase 1 ──→ Phase 2 ──→ Phase 3 ──→ Phas
 | Phase 0 | ✅ | 2026-05-23/24 | v1.0 → v1.3 + accuracy work |
 | Phase 1 | ✅ | 2026-05-24 | Mirror live (10K tasks + 2.3K ad sets), nightly + webhook + droplet timers + cadence_targets + data-quality probes |
 | Phase 1.5 | ✅ | 2026-05-24 | piper_actions audit log + inspect_piper_actions; middleware on every dai tool call |
-| Phase 2 v1 | ✅ | 2026-05-24 | get_cadence_read + get_cadence_read_all — tracking-vs-target + concept-queue gap. ADBN verified at 131% of 4/week target. |
-| Phase 2 v2 | — | — | Gated on snapshot history (~2 wks): forecast, stage-lag, drift alerts, capacity, risk scoring |
+| Phase 2 v1 | ✅ tools / ⏸ data | 2026-05-24 | get_cadence_read + get_cadence_read_all shipped. Tools work end-to-end. PARKED on `client_cadence_targets` seeding — needs Vanessa's real contracted numbers. ADBN's smoke-test target was deleted to avoid misleading reads. |
+| Phase 2 v2 | — | — | Gated on (a) Vanessa's cadence data landed, AND (b) ~2 wks snapshot history for forecast/stage-lag/drift/capacity/risk |
 | Phase 3 | — | — | First Slack surface |
 | Phase 4 | — | — | DM follow-ups |
 | Phase 5 | — | — | Highest-stakes |
