@@ -50,6 +50,7 @@ export const toolProfiles = {
     'recall', 'remember', 'search_memories',
     'list_clients',
     'query_aot_tasks', 'query_aot_adsets', 'count_aot_tasks', 'count_aot_adsets', 'check_ads_in_meta', 'search_notion',
+    'inspect_piper_actions',
     'search_meetings', 'get_meeting_summary', 'get_meeting_transcript', 'list_recent_meetings',
     'post_message', 'reply_in_thread',
   ],

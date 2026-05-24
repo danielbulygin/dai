@@ -20,6 +20,7 @@ import * as adLaunchTools from './tools/ad-launch-tools.js';
 import * as reportTools from '../reports/index.js';
 import * as methodologySanitizer from '../client-agents/methodology-sanitizer.js';
 import { logger } from '../utils/logger.js';
+import { logToolCall, fetchRecentActions } from './action-log.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -2064,6 +2065,50 @@ register({
   },
 });
 
+register({
+  definition: {
+    name: 'inspect_piper_actions',
+    description:
+      'Inspect the audit log of recent dai-agent tool calls (piper_actions table). Useful for self-audit ("what have I done for Press London this week"), debugging ("which tool failed and why"), and answering "why did you say X" by retracing the calls that produced an earlier answer. Returns rows ordered by timestamp desc with id, timestamp, agent_id, session_id, tool_name, params (jsonb), result_summary (truncated to ~800 chars), status, duration_ms, error. **Eventually consistent**: rows are inserted fire-and-forget so a call made in the same turn (within ~1 second) may not yet be visible. For "did my last call get logged?" verification, call this tool in a *later* turn rather than the same one. Skips logging itself to avoid recursion.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        hours_back: {
+          type: 'number',
+          description: 'How far back to look. Default 24, max effectively unlimited but rows are capped by limit.',
+        },
+        agent_id: {
+          type: 'string',
+          description: 'Filter to one agent (e.g. "piper", "ada", "maya"). Omit to see all agents.',
+        },
+        tool_name: {
+          type: 'string',
+          description: 'Filter to one tool name (e.g. "query_aot_tasks", "count_aot_adsets").',
+        },
+        status: {
+          type: 'string',
+          enum: ['success', 'failed'],
+          description: 'Filter to only successes or only failures.',
+        },
+        limit: {
+          type: 'number',
+          description: 'Max rows returned. Default 50, max 500.',
+        },
+      },
+    },
+  },
+  async execute(input) {
+    const rows = await fetchRecentActions({
+      hoursBack: input.hours_back as number | undefined,
+      agentId: input.agent_id as string | undefined,
+      toolName: input.tool_name as string | undefined,
+      status: input.status as 'success' | 'failed' | undefined,
+      limit: input.limit as number | undefined,
+    });
+    return JSON.stringify({ count: rows.length, rows });
+  },
+});
+
 // ---------------------------------------------------------------------------
 // Channel monitoring tools
 // ---------------------------------------------------------------------------
@@ -3173,13 +3218,38 @@ export async function executeTool(
     }
   }
 
+  const startedAt = Date.now();
   try {
     const result = await tool.execute(input, context);
-    logger.debug({ toolName: name }, 'Tool executed successfully');
+    const durationMs = Date.now() - startedAt;
+    logger.debug({ toolName: name, durationMs }, 'Tool executed successfully');
+    // Skip self-logging the audit-log read tool to avoid recursive noise.
+    if (name !== 'inspect_piper_actions') {
+      logToolCall({
+        toolName: name,
+        context,
+        params: input,
+        result,
+        status: 'success',
+        durationMs,
+      });
+    }
     return { result, isError: false };
   } catch (err) {
+    const durationMs = Date.now() - startedAt;
     const msg = err instanceof Error ? err.message : String(err);
-    logger.error({ toolName: name, error: msg }, 'Tool execution failed');
+    logger.error({ toolName: name, error: msg, durationMs }, 'Tool execution failed');
+    if (name !== 'inspect_piper_actions') {
+      logToolCall({
+        toolName: name,
+        context,
+        params: input,
+        result: `Tool error: ${msg}`,
+        status: 'failed',
+        durationMs,
+        error: msg,
+      });
+    }
     return { result: `Tool error: ${msg}`, isError: true };
   }
 }
