@@ -649,3 +649,317 @@ async function getClientNameMap(pageIds: string[]): Promise<Map<string, string>>
   );
   return clientNameCache;
 }
+
+// ---------------------------------------------------------------------------
+// Count tools — sidestep the 60K char per-tool runtime cap
+// ---------------------------------------------------------------------------
+// Same filter semantics as queryAotTasks / queryAotAdSets, but return only
+// aggregates (total + optional group_by buckets). When no group_by is
+// requested, the row payload isn't parsed at all — we just count pages.
+
+export type TaskGroupBy =
+  | 'status'
+  | 'stage'
+  | 'ad_set_stage'
+  | 'assignee'
+  | 'client'
+  | 'priority'
+  | 'department'
+  | 'format'
+  | 'overdue';
+
+export type AdSetGroupBy =
+  | 'stage'
+  | 'client'
+  | 'owner'
+  | 'format'
+  | 'department'
+  | 'client_status'
+  | 'health_check';
+
+function bumpBucket(buckets: Map<string, number>, key: string | null): void {
+  const k = key ?? '(none)';
+  buckets.set(k, (buckets.get(k) ?? 0) + 1);
+}
+
+function bucketsToSorted(buckets: Map<string, number>): Record<string, number> {
+  return Object.fromEntries(
+    Array.from(buckets.entries()).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])),
+  );
+}
+
+export async function countAotTasks(params: {
+  status_group?: 'active' | 'done' | 'all';
+  overdue_only?: boolean;
+  due_on_or_before?: string;
+  due_on_or_after?: string;
+  assignee_user_id?: string;
+  client_relation_id?: string;
+  ad_set_relation_id?: string;
+  client_name_contains?: string;
+  task_name_contains?: string;
+  exclude_dead_ad_sets?: boolean;
+  freshness_window_days?: number;
+  group_by?: TaskGroupBy;
+  limit?: number;
+}): Promise<string> {
+  try {
+    const maxRows = Math.min(params.limit ?? DEFAULT_MAX_ROWS, DEFAULT_MAX_ROWS);
+    const dsId = await resolveDataSourceId(env.NOTION_AOT_TASKS_DB_ID);
+
+    const filter = buildTaskFilter({
+      statusGroup: params.status_group,
+      overdueOnly: params.overdue_only,
+      dueOnOrBefore: params.due_on_or_before,
+      dueOnOrAfter: params.due_on_or_after,
+      assigneeUserId: params.assignee_user_id,
+      clientRelationId: params.client_relation_id,
+      adSetRelationId: params.ad_set_relation_id,
+      taskNameContains: params.task_name_contains,
+      freshnessWindowDays: params.freshness_window_days,
+    });
+
+    const { pages, truncated } = await fetchAllAotPages({
+      dataSourceId: dsId,
+      filter,
+      sorts: [{ property: 'Task Due Date', direction: 'ascending' }],
+      maxRows,
+    });
+
+    const needInMemoryFiltering =
+      !!params.client_name_contains || (params.exclude_dead_ad_sets ?? true);
+    const needGroupExtract = !!params.group_by;
+
+    // Fast path: no in-memory filtering, no grouping — just count pages.
+    if (!needInMemoryFiltering && !needGroupExtract) {
+      logger.info({ total: pages.length, truncated }, 'AOT Tasks count complete (fast path)');
+      return JSON.stringify({
+        total: pages.length,
+        raw_count_before_inmemory_filters: pages.length,
+        truncated_at_ceiling: truncated,
+        max_rows: maxRows,
+      });
+    }
+
+    let tasks = pages.map(extractTask);
+    const rawCount = tasks.length;
+
+    if (params.client_name_contains) {
+      const needle = params.client_name_contains.toLowerCase();
+      const clientNameMap = await getClientNameMap(tasks.flatMap((t) => t.client_relation_ids));
+      tasks = tasks.filter((t) =>
+        t.client_relation_ids.some((id) => (clientNameMap.get(id) ?? '').toLowerCase().includes(needle)),
+      );
+    }
+
+    const excludeDead = params.exclude_dead_ad_sets ?? true;
+    if (excludeDead) {
+      tasks = tasks.filter((t) => !t.ad_set_stage || !DEAD_AD_SET_STAGES.has(t.ad_set_stage));
+    }
+
+    const result: {
+      total: number;
+      raw_count_before_inmemory_filters: number;
+      truncated_at_ceiling: boolean;
+      max_rows: number;
+      group_by?: TaskGroupBy;
+      groups?: Record<string, number>;
+      multi_value_group?: boolean;
+    } = {
+      total: tasks.length,
+      raw_count_before_inmemory_filters: rawCount,
+      truncated_at_ceiling: truncated,
+      max_rows: maxRows,
+    };
+
+    if (params.group_by) {
+      const buckets = new Map<string, number>();
+      let multiValue = false;
+
+      if (params.group_by === 'assignee') {
+        multiValue = true;
+        const allUserIds = tasks.flatMap((t) => t.assignee_user_ids);
+        const userNameMap = await getUserNameMap(allUserIds);
+        for (const t of tasks) {
+          if (t.assignee_user_ids.length === 0) {
+            bumpBucket(buckets, '(unassigned)');
+          } else {
+            for (const uid of t.assignee_user_ids) {
+              bumpBucket(buckets, userNameMap.get(uid) ?? `user:${uid.slice(0, 8)}`);
+            }
+          }
+        }
+      } else if (params.group_by === 'client') {
+        multiValue = true;
+        const allClientIds = tasks.flatMap((t) => t.client_relation_ids);
+        const clientNameMap = await getClientNameMap(allClientIds);
+        for (const t of tasks) {
+          if (t.client_relation_ids.length === 0) {
+            bumpBucket(buckets, '(no client)');
+          } else {
+            for (const cid of t.client_relation_ids) {
+              bumpBucket(buckets, clientNameMap.get(cid) ?? `client:${cid.slice(0, 8)}`);
+            }
+          }
+        }
+      } else if (params.group_by === 'overdue') {
+        for (const t of tasks) bumpBucket(buckets, t.overdue ? 'overdue' : 'not_overdue');
+      } else {
+        const field = params.group_by;
+        for (const t of tasks) bumpBucket(buckets, t[field]);
+      }
+
+      result.group_by = params.group_by;
+      result.groups = bucketsToSorted(buckets);
+      if (multiValue) result.multi_value_group = true;
+    }
+
+    logger.info(
+      { total: tasks.length, rawCount, groupBy: params.group_by, truncated },
+      'AOT Tasks count complete',
+    );
+    return JSON.stringify(result);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ error: msg }, 'countAotTasks failed');
+    return JSON.stringify({ error: msg });
+  }
+}
+
+export async function countAotAdSets(params: {
+  stage?: string;
+  exclude_dead_ad_sets?: boolean;
+  client_relation_id?: string;
+  client_name_contains?: string;
+  owner_user_id?: string;
+  format?: string;
+  delivery_on_or_before?: string;
+  delivery_on_or_after?: string;
+  has_overdue_tasks?: boolean;
+  freshness_window_days?: number;
+  group_by?: AdSetGroupBy;
+  limit?: number;
+}): Promise<string> {
+  try {
+    const maxRows = Math.min(params.limit ?? DEFAULT_MAX_ROWS, DEFAULT_MAX_ROWS);
+    const dsId = await resolveDataSourceId(env.NOTION_AOT_ADSETS_DB_ID);
+
+    const filter = buildAdSetFilter({
+      stage: params.stage,
+      clientRelationId: params.client_relation_id,
+      ownerUserId: params.owner_user_id,
+      format: params.format,
+      deliveryOnOrBefore: params.delivery_on_or_before,
+      deliveryOnOrAfter: params.delivery_on_or_after,
+      hasOverdueTasks: params.has_overdue_tasks,
+      freshnessWindowDays: params.freshness_window_days,
+    });
+
+    const { pages, truncated } = await fetchAllAotPages({
+      dataSourceId: dsId,
+      filter,
+      sorts: [{ property: 'Ad Delivery Date', direction: 'ascending' }],
+      maxRows,
+    });
+
+    const needInMemoryFiltering =
+      !!params.client_name_contains || (params.exclude_dead_ad_sets ?? true);
+    const needGroupExtract = !!params.group_by;
+
+    if (!needInMemoryFiltering && !needGroupExtract) {
+      logger.info({ total: pages.length, truncated }, 'AOT Ad Sets count complete (fast path)');
+      return JSON.stringify({
+        total: pages.length,
+        raw_count_before_inmemory_filters: pages.length,
+        truncated_at_ceiling: truncated,
+        max_rows: maxRows,
+      });
+    }
+
+    let adsets = pages.map(extractAdSet);
+    const rawCount = adsets.length;
+
+    if (params.client_name_contains) {
+      const needle = params.client_name_contains.toLowerCase();
+      const clientNameMap = await getClientNameMap(adsets.flatMap((a) => a.client_relation_ids));
+      adsets = adsets.filter((a) =>
+        a.client_relation_ids.some((id) => (clientNameMap.get(id) ?? '').toLowerCase().includes(needle)),
+      );
+    }
+
+    const excludeDead = params.exclude_dead_ad_sets ?? true;
+    if (excludeDead) {
+      adsets = adsets.filter((a) => !a.stage || !DEAD_AD_SET_STAGES.has(a.stage));
+    }
+
+    const result: {
+      total: number;
+      raw_count_before_inmemory_filters: number;
+      truncated_at_ceiling: boolean;
+      max_rows: number;
+      group_by?: AdSetGroupBy;
+      groups?: Record<string, number>;
+      multi_value_group?: boolean;
+    } = {
+      total: adsets.length,
+      raw_count_before_inmemory_filters: rawCount,
+      truncated_at_ceiling: truncated,
+      max_rows: maxRows,
+    };
+
+    if (params.group_by) {
+      const buckets = new Map<string, number>();
+      let multiValue = false;
+
+      if (params.group_by === 'owner') {
+        multiValue = true;
+        const userNameMap = await getUserNameMap(adsets.flatMap((a) => a.owner_user_ids));
+        for (const a of adsets) {
+          if (a.owner_user_ids.length === 0) {
+            bumpBucket(buckets, '(unowned)');
+          } else {
+            for (const uid of a.owner_user_ids) {
+              bumpBucket(buckets, userNameMap.get(uid) ?? `user:${uid.slice(0, 8)}`);
+            }
+          }
+        }
+      } else if (params.group_by === 'client') {
+        multiValue = true;
+        // Prefer the client_code rollup when present (cheaper, already on the row).
+        // Fall back to resolving relation IDs to names.
+        const needsName = adsets.some((a) => !a.client_code && a.client_relation_ids.length > 0);
+        const clientNameMap = needsName
+          ? await getClientNameMap(adsets.flatMap((a) => a.client_relation_ids))
+          : new Map<string, string>();
+        for (const a of adsets) {
+          if (a.client_code) {
+            bumpBucket(buckets, a.client_code);
+          } else if (a.client_relation_ids.length === 0) {
+            bumpBucket(buckets, '(no client)');
+          } else {
+            for (const cid of a.client_relation_ids) {
+              bumpBucket(buckets, clientNameMap.get(cid) ?? `client:${cid.slice(0, 8)}`);
+            }
+          }
+        }
+      } else {
+        const field = params.group_by;
+        for (const a of adsets) bumpBucket(buckets, a[field]);
+      }
+
+      result.group_by = params.group_by;
+      result.groups = bucketsToSorted(buckets);
+      if (multiValue) result.multi_value_group = true;
+    }
+
+    logger.info(
+      { total: adsets.length, rawCount, groupBy: params.group_by, truncated },
+      'AOT Ad Sets count complete',
+    );
+    return JSON.stringify(result);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ error: msg }, 'countAotAdSets failed');
+    return JSON.stringify({ error: msg });
+  }
+}

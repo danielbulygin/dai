@@ -1932,6 +1932,138 @@ register({
   },
 });
 
+register({
+  definition: {
+    name: 'count_aot_tasks',
+    description:
+      'Count AOT Tasks matching the same filters as query_aot_tasks, without returning row payloads. Use this whenever you only need an aggregate ("how many overdue across all clients", "how many active tasks per client", "how many tasks on Audibene this week") — it sidesteps the runtime payload cap that query_aot_tasks hits on large result sets. Returns `total`, `truncated_at_ceiling`, and (if `group_by` is set) a `groups` object mapping bucket → count, sorted by count desc. For `group_by` = `assignee` or `client`, a task with N assignees/clients is counted in each bucket, so group sums may exceed `total` — the response includes `multi_value_group: true` when this can happen. Tasks with no assignee → `(unassigned)`; no client → `(no client)`; null property values → `(none)`. Filter semantics, freshness defaults, and dead-ad-set exclusion match query_aot_tasks exactly.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        status_group: {
+          type: 'string',
+          enum: ['active', 'done', 'all'],
+          description: 'active = exclude Done/Cancelled/Complete/Archived Task (default), done = only Done, all = everything',
+        },
+        overdue_only: {
+          type: 'boolean',
+          description: 'Only count tasks where the live Overdue Check formula is true.',
+        },
+        due_on_or_before: { type: 'string', description: 'ISO date (YYYY-MM-DD)' },
+        due_on_or_after: { type: 'string', description: 'ISO date (YYYY-MM-DD)' },
+        assignee_user_id: { type: 'string', description: 'Notion user ID to filter by assignee' },
+        client_relation_id: { type: 'string', description: 'Notion page ID of a client to filter by' },
+        ad_set_relation_id: { type: 'string', description: 'Notion page ID of an ad set to filter by' },
+        client_name_contains: {
+          type: 'string',
+          description: 'Case-insensitive substring of the client name (resolved in-memory after fetch)',
+        },
+        task_name_contains: {
+          type: 'string',
+          description: 'Substring of the task name (case-insensitive, pushed down as title.contains).',
+        },
+        exclude_dead_ad_sets: {
+          type: 'boolean',
+          description: 'Exclude tasks on Completed/Cancelled/On Hold ad sets. Default true.',
+        },
+        freshness_window_days: {
+          type: 'number',
+          description: 'Only count tasks with last_edited_time in the last N days. Default 90. Pass 0 to disable.',
+        },
+        group_by: {
+          type: 'string',
+          enum: ['status', 'stage', 'ad_set_stage', 'assignee', 'client', 'priority', 'department', 'format', 'overdue'],
+          description: 'Optional grouping dimension. Returns `groups: { bucket_name: count }` sorted desc. Omit for a single `total`.',
+        },
+        limit: {
+          type: 'number',
+          description: 'Cap on rows scanned. Default and max = 2000. Lower this only for sampling.',
+        },
+      },
+    },
+  },
+  async execute(input) {
+    return await aotNotionTools.countAotTasks({
+      status_group: input.status_group as 'active' | 'done' | 'all' | undefined,
+      overdue_only: input.overdue_only as boolean | undefined,
+      due_on_or_before: input.due_on_or_before as string | undefined,
+      due_on_or_after: input.due_on_or_after as string | undefined,
+      assignee_user_id: input.assignee_user_id as string | undefined,
+      client_relation_id: input.client_relation_id as string | undefined,
+      ad_set_relation_id: input.ad_set_relation_id as string | undefined,
+      client_name_contains: input.client_name_contains as string | undefined,
+      task_name_contains: input.task_name_contains as string | undefined,
+      exclude_dead_ad_sets: input.exclude_dead_ad_sets as boolean | undefined,
+      freshness_window_days: input.freshness_window_days as number | undefined,
+      group_by: input.group_by as aotNotionTools.TaskGroupBy | undefined,
+      limit: input.limit as number | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'count_aot_adsets',
+    description:
+      'Count AOT Ad Sets matching the same filters as query_aot_adsets, without returning row payloads. Use this whenever you only need an aggregate ("how many ad sets in Editing across all clients", "stage distribution for Audibene", "owner workload for Press London") — it sidesteps the runtime payload cap that query_aot_adsets hits on large result sets. Returns `total`, `truncated_at_ceiling`, and (if `group_by` is set) a `groups` object mapping bucket → count, sorted by count desc. For `group_by` = `owner` or `client`, ad sets with N owners/clients are counted in each bucket, so group sums may exceed `total` — `multi_value_group: true` flags this. `group_by: "client"` uses the cheap client_code rollup when available and only resolves names for rows missing it. Filter semantics and dead-stage exclusion match query_aot_adsets exactly.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        stage: {
+          type: 'string',
+          description: 'Filter by exact Stage status name (e.g. "Concept", "Brief", "Production", "Editing", "QC", "Media Buying").',
+        },
+        exclude_dead_ad_sets: {
+          type: 'boolean',
+          description: 'Exclude ad sets in Completed/Cancelled/On Hold stages. Default true.',
+        },
+        client_relation_id: { type: 'string', description: 'Notion page ID of a client to filter by' },
+        client_name_contains: {
+          type: 'string',
+          description: 'Case-insensitive substring of the client name (resolved in-memory after fetch)',
+        },
+        owner_user_id: { type: 'string', description: 'Notion user ID to filter by ad-set owner' },
+        format: { type: 'string', description: 'Filter by Format select value' },
+        delivery_on_or_before: { type: 'string', description: 'ISO date (YYYY-MM-DD)' },
+        delivery_on_or_after: { type: 'string', description: 'ISO date (YYYY-MM-DD)' },
+        has_overdue_tasks: {
+          type: 'boolean',
+          description: 'Only count ad sets where Overdue Tasks Count rollup > 0.',
+        },
+        freshness_window_days: {
+          type: 'number',
+          description: 'Only count ad sets with last_edited_time in the last N days. Default 90. Pass 0 to disable.',
+        },
+        group_by: {
+          type: 'string',
+          enum: ['stage', 'client', 'owner', 'format', 'department', 'client_status', 'health_check'],
+          description: 'Optional grouping dimension. Returns `groups: { bucket_name: count }` sorted desc. Omit for a single `total`.',
+        },
+        limit: {
+          type: 'number',
+          description: 'Cap on rows scanned. Default and max = 2000. Lower this only for sampling.',
+        },
+      },
+    },
+  },
+  async execute(input) {
+    return await aotNotionTools.countAotAdSets({
+      stage: input.stage as string | undefined,
+      exclude_dead_ad_sets: input.exclude_dead_ad_sets as boolean | undefined,
+      client_relation_id: input.client_relation_id as string | undefined,
+      client_name_contains: input.client_name_contains as string | undefined,
+      owner_user_id: input.owner_user_id as string | undefined,
+      format: input.format as string | undefined,
+      delivery_on_or_before: input.delivery_on_or_before as string | undefined,
+      delivery_on_or_after: input.delivery_on_or_after as string | undefined,
+      has_overdue_tasks: input.has_overdue_tasks as boolean | undefined,
+      freshness_window_days: input.freshness_window_days as number | undefined,
+      group_by: input.group_by as aotNotionTools.AdSetGroupBy | undefined,
+      limit: input.limit as number | undefined,
+    });
+  },
+});
+
 // ---------------------------------------------------------------------------
 // Channel monitoring tools
 // ---------------------------------------------------------------------------
