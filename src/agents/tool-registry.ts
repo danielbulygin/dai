@@ -21,6 +21,8 @@ import * as reportTools from '../reports/index.js';
 import * as methodologySanitizer from '../client-agents/methodology-sanitizer.js';
 import { logger } from '../utils/logger.js';
 import { logToolCall, fetchRecentActions } from './action-log.js';
+import * as cadenceTools from './tools/cadence-tools.js';
+import { getSupabase } from '../integrations/supabase.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -2106,6 +2108,99 @@ register({
       limit: input.limit as number | undefined,
     });
     return JSON.stringify({ count: rows.length, rows });
+  },
+});
+
+register({
+  definition: {
+    name: 'remember_cadence_target',
+    description:
+      'Save or update a client\'s contracted cadence target. Stored in client_cadence_targets (bmad Supabase) and read by Phase 2 cadence intelligence to compute "tracking X% of target". Only the fields you pass are updated — omitted fields preserve their existing value. Use this when the user tells you a contracted number ("Audibene is 4 ad sets per week", "Press London concept queue should stay above 12"). ads_per_week is the contracted weekly throughput; concept_queue_target is the minimum concept-stage depth before brief-writing slips; max_cycle_days is the concept→done end-to-end SLA in days.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        client_code: { type: 'string', description: 'Client code, case-insensitive (e.g. "ADBN", "PL", "BFM"). Required.' },
+        ads_per_week: { type: 'number', description: 'Contracted ad sets shipped per week.' },
+        concept_queue_target: { type: 'number', description: 'Minimum concept-stage depth.' },
+        max_cycle_days: { type: 'number', description: 'Max concept→done cycle time in days.' },
+        notes: { type: 'string', description: 'Free-text context (who set this, source, caveats).' },
+      },
+      required: ['client_code'],
+    },
+  },
+  async execute(input, context) {
+    return cadenceTools.rememberCadenceTarget({
+      client_code: input.client_code as string,
+      ads_per_week: input.ads_per_week as number | undefined,
+      concept_queue_target: input.concept_queue_target as number | undefined,
+      max_cycle_days: input.max_cycle_days as number | undefined,
+      notes: input.notes as string | undefined,
+      updated_by: context.userId,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'get_cadence_targets',
+    description:
+      'Read per-client cadence targets from client_cadence_targets. Omit client_code to get all clients. Returns ads_per_week / concept_queue_target / max_cycle_days plus the audit trail (updated_at, updated_by). Use this whenever computing whether a client is tracking against their contracted cadence.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        client_code: { type: 'string', description: 'Optional client code to filter by (case-insensitive). Omit for all.' },
+      },
+    },
+  },
+  async execute(input) {
+    return cadenceTools.getCadenceTargets({ client_code: input.client_code as string | undefined });
+  },
+});
+
+register({
+  definition: {
+    name: 'inspect_data_quality',
+    description:
+      'Read recent data-quality probe snapshots from piper_data_quality_snapshots. Each piper-sync run writes one row per metric (six metrics: tasks_null_ad_set_code, tasks_past_due_not_done, adsets_no_client, adsets_past_delivery_not_dead, adsets_inactive_client_not_dead, tasks_archived_on_live_adset). Returns the latest snapshot per metric by default; pass `trend=true` to get a daily series for the last 14 days. Use this when the user asks "is the data clean", "what\'s broken in Notion", or to surface drift in the morning digest.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        metric: { type: 'string', description: 'Optional single metric name to filter to.' },
+        trend: { type: 'boolean', description: 'If true, returns daily series for last 14 days instead of just the latest.' },
+      },
+    },
+  },
+  async execute(input) {
+    const supabase = getSupabase();
+    const metric = input.metric as string | undefined;
+    const trend = input.trend === true;
+    if (trend) {
+      const since = new Date(Date.now() - 14 * 86400_000).toISOString();
+      let q = supabase
+        .from('piper_data_quality_snapshots')
+        .select('metric, count, snapshot_at')
+        .gte('snapshot_at', since)
+        .order('snapshot_at', { ascending: true });
+      if (metric) q = q.eq('metric', metric);
+      const { data, error } = await q;
+      if (error) return JSON.stringify({ error: error.message });
+      return JSON.stringify({ count: (data ?? []).length, rows: data ?? [] });
+    }
+    // Latest per metric — DISTINCT ON not exposed through PostgREST; use RPC-less workaround:
+    // pull last 200 rows ordered desc and group client-side.
+    let q = supabase
+      .from('piper_data_quality_snapshots')
+      .select('metric, count, sample_ids, snapshot_at')
+      .order('snapshot_at', { ascending: false })
+      .limit(200);
+    if (metric) q = q.eq('metric', metric);
+    const { data, error } = await q;
+    if (error) return JSON.stringify({ error: error.message });
+    const latestByMetric = new Map<string, unknown>();
+    for (const row of (data ?? []) as Array<{ metric: string }>) {
+      if (!latestByMetric.has(row.metric)) latestByMetric.set(row.metric, row);
+    }
+    return JSON.stringify({ count: latestByMetric.size, latest: Array.from(latestByMetric.values()) });
   },
 });
 
