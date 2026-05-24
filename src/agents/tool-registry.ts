@@ -22,6 +22,7 @@ import * as methodologySanitizer from '../client-agents/methodology-sanitizer.js
 import { logger } from '../utils/logger.js';
 import { logToolCall, fetchRecentActions } from './action-log.js';
 import * as cadenceTools from './tools/cadence-tools.js';
+import * as cadenceReadTools from './tools/cadence-read-tools.js';
 import { getSupabase } from '../integrations/supabase.js';
 
 // ---------------------------------------------------------------------------
@@ -2154,6 +2155,56 @@ register({
   },
   async execute(input) {
     return cadenceTools.getCadenceTargets({ client_code: input.client_code as string | undefined });
+  },
+});
+
+register({
+  definition: {
+    name: 'get_cadence_read',
+    description:
+      'Phase 2 headline read: compute one client\'s cadence vs contracted target over a window (default 28 days). Returns target (ads_per_week/concept_queue_target/max_cycle_days), throughput (shipped_in_window, actual_per_week, tracking_pct), concept_queue (depth/target/gap), and in_flight count. "Shipped" is task-side: an ad set counts as shipped when all its tasks are terminal and max(task last_edited) is within the window — NOT when the ad set\'s coarse Stage column hits Completed. Use whenever the user asks "are we on track for X", "how is Audibene tracking", "what\'s the cadence on Y", or building a per-client digest. Pair with get_cadence_targets if the target is missing.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        client_code: {
+          type: 'string',
+          description: 'Client code, case-insensitive (e.g. "ADBN", "BFM"). Required.',
+        },
+        window_days: {
+          type: 'number',
+          description: 'Lookback window in days. Default 28 (4 weeks).',
+        },
+      },
+      required: ['client_code'],
+    },
+  },
+  async execute(input) {
+    return cadenceReadTools.getCadenceRead({
+      client_code: input.client_code as string,
+      window_days: input.window_days as number | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'get_cadence_read_all',
+    description:
+      'Pipeline-wide cadence digest: for every client with a stored cadence target, compute shipped/actual_per_week/tracking_pct in the window. Returns results sorted by tracking_pct ascending (worst-tracking first) so the digest leads with what\'s slipping. Use for morning digests, "how is everyone tracking", or cross-client review.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        window_days: {
+          type: 'number',
+          description: 'Lookback window in days. Default 28.',
+        },
+      },
+    },
+  },
+  async execute(input) {
+    return cadenceReadTools.getCadenceReadAll({
+      window_days: input.window_days as number | undefined,
+    });
   },
 });
 
