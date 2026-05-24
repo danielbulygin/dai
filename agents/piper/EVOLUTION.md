@@ -220,9 +220,9 @@ Phase 0 ✅ ──→ Phase 1 ──→ Phase 2 ──→ Phase 3 ──→ Phas
 | Phase | Status | Shipped | Notes |
 |---|---|---|---|
 | Phase 0 | ✅ | 2026-05-23/24 | v1.0 → v1.3 + accuracy work |
-| Phase 1 | — | — | Next major arc |
-| Phase 1.5 | — | — | Inline with Phase 1 |
-| Phase 2 | — | — | The cadence headline |
+| Phase 1 | ✅ | 2026-05-24 | Mirror live (10K tasks + 2.3K ad sets), nightly + webhook + droplet timers + cadence_targets + data-quality probes |
+| Phase 1.5 | ✅ | 2026-05-24 | piper_actions audit log + inspect_piper_actions; middleware on every dai tool call |
+| Phase 2 | — | — | Up next — cadence intelligence on top of the data layer |
 | Phase 3 | — | — | First Slack surface |
 | Phase 4 | — | — | DM follow-ups |
 | Phase 5 | — | — | Highest-stakes |
