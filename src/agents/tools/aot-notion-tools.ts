@@ -67,7 +67,10 @@ interface ExtractedTask {
   last_edited_time: string;
 }
 
-const DEAD_AD_SET_STAGES = new Set(['Completed', 'Cancelled', 'On Hold']);
+// "Archived" stage was added 2026-05-24 as the canonical terminal state for
+// ad sets that are no longer being worked on (whereas Completed = shipped,
+// Cancelled = killed, On Hold = paused). All four are dead.
+const DEAD_AD_SET_STAGES = new Set(['Completed', 'Cancelled', 'On Hold', 'Archived']);
 
 // Pagination: Notion's max page_size is 100. We paginate to completion by
 // default; the safety ceiling prevents a runaway query from silently
