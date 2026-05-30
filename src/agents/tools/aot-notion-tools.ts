@@ -628,7 +628,7 @@ async function getUserNameMap(userIds: string[]): Promise<Map<string, string>> {
   return userNameCache;
 }
 
-async function getClientNameMap(pageIds: string[]): Promise<Map<string, string>> {
+export async function getClientNameMap(pageIds: string[]): Promise<Map<string, string>> {
   const unique = Array.from(new Set(pageIds)).filter((id) => !clientNameCache.has(id));
   if (unique.length === 0) return clientNameCache;
 
