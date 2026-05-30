@@ -15,6 +15,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { WebClient } from '@slack/web-api';
 import { env } from '../env.js';
 import { logger } from '../utils/logger.js';
 import { runAgent } from '../agents/runner.js';
@@ -102,11 +103,16 @@ export async function runPiperDigest(
     return { posted: false, channel, digest, turns: result.turns };
   }
 
-  // Post AS Piper. getDedicatedBotClient falls back to the main bot if Piper's
-  // tokens aren't set — log a warning so a misconfigured deploy is visible.
-  const client = getDedicatedBotClient('piper');
-  if (!env.PIPER_BOT_TOKEN) {
+  // Post AS Piper. Build the client straight from PIPER_BOT_TOKEN so this works
+  // identically whether we're inside the running service or a standalone script
+  // (getDedicatedBotClient only resolves Piper once startDedicatedBots() has run,
+  // which the standalone runner never does — it would silently post as the main bot).
+  let client: WebClient;
+  if (env.PIPER_BOT_TOKEN) {
+    client = new WebClient(env.PIPER_BOT_TOKEN);
+  } else {
     logger.warn('PIPER_BOT_TOKEN unset — digest will post as the main DAI bot, not Piper.');
+    client = getDedicatedBotClient('piper');
   }
 
   const posted = await client.chat.postMessage({
