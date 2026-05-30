@@ -13,10 +13,15 @@ import { getDedicatedBotClient } from '../slack/dedicated-bots.js';
 import { env } from '../env.js';
 import { logger } from '../utils/logger.js';
 import { queryAotTasks, queryAotAdSets, getClientNameMap } from '../agents/tools/aot-notion-tools.js';
+import { getClientCapabilities } from '../agents/tools/ad-launch-tools.js';
 
 const ADA_CHANNEL = (env as Record<string, string | undefined>).ADA_UPLOAD_CHECK_CHANNEL_ID || 'C0AHX94CBF0';
 const NINA_USER_ID = (env as Record<string, string | undefined>).NINA_SLACK_USER_ID || 'U08LEQVHDRU';
 const DAN_USER_ID = (env as Record<string, string | undefined>).SLACK_OWNER_USER_ID || 'U084AS8QRA7';
+
+// Mirror of launch_qc_voice.CLIENT_QC_MAP keys (server-side). Keep in sync — these are
+// the clients with a founder-voice QC skill. Others get generic compliance QC only.
+const QC_COVERED = new Set(['LA', 'LA2', 'AB', 'ADBN', 'TL']);
 
 interface AotTask {
   task_id: string;
@@ -78,7 +83,7 @@ export async function buildReadyToUploadMessage(
     logger.warn({ err }, 'ready-to-upload: client name resolve failed; using client codes');
   }
 
-  const byClient = new Map<string, Entry[]>();
+  const byClient = new Map<string, { code: string | null; entries: Entry[] }>();
   for (const t of tasks) {
     const a = adsetFor(t);
     const client =
@@ -92,14 +97,40 @@ export async function buildReadyToUploadMessage(
       due: t.task_due_date,
       format: t.format ?? null,
     };
-    if (!byClient.has(client)) byClient.set(client, []);
-    byClient.get(client)!.push(entry);
+    if (!byClient.has(client)) byClient.set(client, { code: a?.client_code ?? null, entries: [] });
+    byClient.get(client)!.entries.push(entry);
   }
+
+  // Flag config gaps per client so nobody clicks "start" on a client Ada can't launch.
+  // See feedback_flag_missing_client_config.
+  const codes = [...new Set([...byClient.values()].map((g) => g.code).filter(Boolean))] as string[];
+  const capByCode = new Map<string, { launch: boolean; hasConfig: boolean }>();
+  await Promise.all(
+    codes.map(async (code) => {
+      try {
+        const cap = JSON.parse(await getClientCapabilities({ client_code: code })) as {
+          launch?: boolean;
+          has_meta_config?: boolean;
+        };
+        capByCode.set(code, { launch: !!cap.launch, hasConfig: !!cap.has_meta_config });
+      } catch {
+        /* leave unset → treated as no-config below */
+      }
+    }),
+  );
 
   const sections: string[] = [];
   for (const client of [...byClient.keys()].sort()) {
-    sections.push(`*${client}*`);
-    for (const e of byClient.get(client)!) {
+    const { code, entries } = byClient.get(client)!;
+    const cap = code ? capByCode.get(code) : undefined;
+    let flag = '';
+    if (!code || !cap || !cap.launch) {
+      flag = ' — :warning: *no launch config* — needs `/meta-launch-config` before Ada can launch';
+    } else if (!QC_COVERED.has(code.toUpperCase())) {
+      flag = ' — :warning: no client-voice QC skill (generic compliance checks only)';
+    }
+    sections.push(`*${client}*${code ? ` (${code})` : ''}${flag}`);
+    for (const e of entries) {
       const label = e.code ? `${e.title} (${e.code})` : e.title;
       const linked = e.url ? `<${e.url}|${label}>` : label; // Slack mrkdwn hyperlink to the Notion page
       const meta = [e.format, e.due ? `due ${e.due}` : null].filter(Boolean).join(' · ');
