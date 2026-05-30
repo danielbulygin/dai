@@ -34,6 +34,10 @@ const envSchema = z.object({
   MAYA_APP_TOKEN: z.string().optional(),
   PIPER_BOT_TOKEN: z.string().optional(),
   PIPER_APP_TOKEN: z.string().optional(),
+  /** Channel the morning digest auto-posts to (e.g. #piper). Resolved at digest time. */
+  PIPER_CHANNEL_ID: z.string().optional(),
+  /** Shared secret for droplet cron → /api/cron/* endpoints. Matches the systemd EnvironmentFile. */
+  CRON_SECRET: z.string().optional(),
   NOTION_AOT_TASKS_DB_ID: z.string().default('27e1398c921f81ee851dfacaf37eeee8'),
   NOTION_AOT_ADSETS_DB_ID: z.string().default('27e1398c921f81f28154d2a538afb769'),
   CHROMIUM_PATH: z.string().optional(),

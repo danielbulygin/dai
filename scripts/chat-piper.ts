@@ -7,21 +7,12 @@
  *
  * Override agent with PIPER_AGENT_ID env var, e.g. PIPER_AGENT_ID=ada pnpm chat:piper
  *
- * Stubs Slack env vars so you can run without registering the Piper Slack app
- * first. All Anthropic + Supabase + Notion env vars still need to be real.
+ * Uses the real Slack env vars from .env (the main dai bot), so Piper's
+ * post_message / reply_in_thread work against live Slack. Phase 3+ behaviour.
  */
 
 import readline from 'node:readline';
 import { randomUUID } from 'node:crypto';
-
-for (const key of [
-  'SLACK_BOT_TOKEN',
-  'SLACK_APP_TOKEN',
-  'SLACK_SIGNING_SECRET',
-  'SLACK_OWNER_USER_ID',
-]) {
-  if (!process.env[key]) process.env[key] = `stub-${key}`;
-}
 
 process.env.LOG_LEVEL = process.env.LOG_LEVEL ?? 'warn';
 

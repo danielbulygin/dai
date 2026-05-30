@@ -8,6 +8,7 @@ import { healthRouter } from './routes/health.js';
 import { chatRouter } from './routes/chat.js';
 import { conceptsRouter } from './routes/concepts.js';
 import { pipelineRouter } from './routes/pipeline.js';
+import { cronRouter } from './routes/cron.js';
 import { notionWebhookRouter } from '../webhooks/notion.js';
 
 export function startApiServer(): void {
@@ -33,6 +34,9 @@ export function startApiServer(): void {
 
   // Notion webhook (no API key — verified via HMAC signature)
   app.route('/', notionWebhookRouter);
+
+  // Cron endpoints (no X-API-Key — authed via CRON_SECRET bearer token)
+  app.route('/', cronRouter);
 
   // Authenticated routes
   app.use('/*', apiKeyAuth);

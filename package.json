@@ -17,7 +17,8 @@
     "extract:kousha": "tsx --env-file=.env scripts/extract-kousha-methodology.ts",
     "google:setup": "tsx --env-file=.env scripts/google-oauth-setup.ts",
     "creative-audit": "tsx --env-file=.env scripts/creative-audit.ts",
-    "chat:piper": "tsx --env-file=.env scripts/chat-piper.ts"
+    "chat:piper": "tsx --env-file=.env scripts/chat-piper.ts",
+    "digest:piper": "tsx --env-file=.env scripts/piper-digest.ts"
   },
   "keywords": [
     "slack",

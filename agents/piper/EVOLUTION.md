@@ -118,12 +118,13 @@ Piper reads Notion (tasks + ad sets), reconciles upload tasks against Meta, iden
 
 **Key builds:**
 
-- Slack app registration + `#piper` channel
-- `PIPER_BOT_TOKEN` + `PIPER_APP_TOKEN` in `dai/.env`; terminal stubs removed from `chat-piper.ts`
-- Morning digest auto-posted (cadence gaps + at-risk deliveries + real overdue work, NOT zombies)
-- Weekly per-client digest drafted in each client's Slack channel; AM reviews then sends
-- Pattern alerts: "Brain.fm cadence dropped 40% this month, here's what changed"
-- Full digest format from METHODOLOGY.md, posted as Slack Block Kit
+- ⏸ Slack app registration + `#piper` channel — MANUAL, blocks the rest. Manifest at `dai/piper-manifest.json`. Checklist in `docs/piper-digest-ops.md`.
+- ⏸ `PIPER_BOT_TOKEN` + `PIPER_APP_TOKEN` + `PIPER_CHANNEL_ID` in `dai/.env` (set once registered). ✅ Terminal stubs removed from `chat-piper.ts`.
+- ✅ Morning digest engine: `src/digest/piper-digest.ts` (runs Piper → posts as Piper via his dedicated bot client). Real overdue vs zombie separation + data-quality drift line + cadence-only-if-target. Spec in METHODOLOGY.md "Morning digest". Dry-run verified 2026-05-30.
+- ✅ `POST /api/cron/piper-digest` (dai Hono, `CRON_SECRET` bearer auth) + systemd timer docs (Mon-Fri 09:00 ET) in `docs/piper-digest-ops.md`. `pnpm digest:piper [--post]` standalone runner.
+- Weekly per-client digest drafted in each client's Slack channel; AM reviews then sends — NOT yet built (Phase 3 follow-on).
+- Pattern alerts: "Brain.fm cadence dropped 40% this month, here's what changed" — needs Phase 2 v2 (snapshot history).
+- Digest posts as Slack mrkdwn text (v1); Block Kit deferred.
 
 **Dependencies:** Phase 2 (the digest needs cadence intelligence to be worth posting). Phase 1.5 (auto-posts get logged).
 **Effort:** ~1 session (excluding token registration).
@@ -224,7 +225,7 @@ Phase 0 ✅ ──→ Phase 1 ──→ Phase 2 ──→ Phase 3 ──→ Phas
 | Phase 1.5 | ✅ | 2026-05-24 | piper_actions audit log + inspect_piper_actions; middleware on every dai tool call |
 | Phase 2 v1 | ✅ tools / ⏸ data | 2026-05-24 | get_cadence_read + get_cadence_read_all shipped. Tools work end-to-end. PARKED on `client_cadence_targets` seeding — needs Vanessa's real contracted numbers. ADBN's smoke-test target was deleted to avoid misleading reads. |
 | Phase 2 v2 | — | — | Gated on (a) Vanessa's cadence data landed, AND (b) ~2 wks snapshot history for forecast/stage-lag/drift/capacity/risk |
-| Phase 3 | — | — | First Slack surface |
+| Phase 3 | 🔧 code / ⏸ Slack reg | 2026-05-30 | Digest engine + `/api/cron/piper-digest` + systemd timer docs shipped & dry-run-verified. Blocked on manual Slack app registration (tokens + #piper) before it can post. |
 | Phase 4 | — | — | DM follow-ups |
 | Phase 5 | — | — | Highest-stakes |
 | Phase 6 | — | — | Polish + learning |
