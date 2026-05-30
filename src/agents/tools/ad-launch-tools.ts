@@ -190,6 +190,9 @@ export async function launchAds(params: {
   edits?: {
     lander_overrides?: Record<string, string>;
     ad_overrides?: Record<string, { primary_text?: string; headline?: string; description?: string }>;
+    adset_name?: string;
+    ad_name_overrides?: Record<string, string>;
+    allow_duplicate_asset_id?: boolean;
   };
 }): Promise<string> {
   const body: Record<string, unknown> = {
@@ -264,6 +267,135 @@ export async function updateLandingPageMapping(params: {
     "/api/ada/update-lander",
     { method: "POST", body, timeoutMs: 30_000 },
   );
+  if (error) return JSON.stringify({ error });
+  return JSON.stringify(data);
+}
+
+// ---------------------------------------------------------------------------
+// qcCopy — client-voice QC (Stella/Steven/Alex) before Gate 3
+// ---------------------------------------------------------------------------
+
+/**
+ * Run the client's voice-QC pass (the /laori-stella-qc, /audibene-steven-qc,
+ * /teethlovers-alex-qc skills, ported server-side) on generated copy BEFORE showing
+ * the user a launch preview. Returns a per-creative verdict (ship/revise/block) plus
+ * compliance + voice flags and suggested `rewrites`. Apply the rewrites by passing
+ * them as `edits.ad_overrides` to launchAds — this tool never writes to Meta.
+ *
+ * Pass either the generated `creatives` copy, or a `batch_id` to pull copy from a
+ * preview. Clients with no QC skill pass through with verdict="ship" + a note — that's
+ * expected, not an error.
+ */
+export async function qcCopy(params: {
+  client_code: string;
+  creatives?: Array<{
+    asset_id?: string;
+    video_id?: string;
+    image_hash?: string;
+    media_type?: "video" | "image";
+    primary_text?: string;
+    headline?: string;
+    description?: string;
+    hook?: string;
+    sku_hint?: string;
+    language?: string;
+  }>;
+  batch_id?: string;
+}): Promise<string> {
+  const body: Record<string, unknown> = { client_code: params.client_code.toUpperCase() };
+  if (params.creatives) body.creatives = params.creatives;
+  if (params.batch_id) body.batch_id = params.batch_id;
+  const { data, error } = await dropletRequest("/api/ada/qc", {
+    method: "POST",
+    body,
+    timeoutMs: 120_000,
+  });
+  if (error) return JSON.stringify({ error });
+  return JSON.stringify(data);
+}
+
+// ---------------------------------------------------------------------------
+// verifyLaunch — post-launch structural verification (MANDATORY after launchAds)
+// ---------------------------------------------------------------------------
+
+/**
+ * After every launchAds, verify the result is structurally correct on Meta — a 200
+ * from launch only means the API call succeeded, NOT that the adset landed in the
+ * right campaign / page+IG matched / LP stuck / name rendered without `// null //`
+ * artifacts. Returns verdict 🟢 OK / 🟡 WARN / 🔴 FAIL + findings. Never skip this.
+ *
+ * Input: { batch_id } (preferred) OR { adset_id, client_code }.
+ */
+export async function verifyLaunch(params: {
+  batch_id?: string;
+  adset_id?: string;
+  client_code?: string;
+}): Promise<string> {
+  const body: Record<string, unknown> = {};
+  if (params.batch_id) body.batch_id = params.batch_id;
+  if (params.adset_id) body.adset_id = params.adset_id;
+  if (params.client_code) body.client_code = params.client_code.toUpperCase();
+  const { data, error } = await dropletRequest("/api/ada/verify", {
+    method: "POST",
+    body,
+    timeoutMs: 60_000,
+  });
+  if (error) return JSON.stringify({ error });
+  return JSON.stringify(data);
+}
+
+// ---------------------------------------------------------------------------
+// pollAnalysis — transcript/visual readiness gate (before preview-launch)
+// ---------------------------------------------------------------------------
+
+/**
+ * Check whether uploaded videos have finished transcript + visual analysis. Run this
+ * after upload_to_media_library and BEFORE previewAdLaunch — without analysis, copy
+ * generation returns usable=false. Non-blocking by default (timeout_seconds=0 = single
+ * snapshot); pass a small timeout_seconds (≤180) to wait briefly for in-flight work.
+ */
+export async function pollAnalysis(params: {
+  client_code: string;
+  meta_video_ids: string[];
+  timeout_seconds?: number;
+}): Promise<string> {
+  const { data, error } = await dropletRequest("/api/ada/analysis-status", {
+    method: "POST",
+    body: {
+      client_code: params.client_code.toUpperCase(),
+      meta_video_ids: params.meta_video_ids,
+      timeout_seconds: params.timeout_seconds ?? 0,
+    },
+    timeoutMs: 200_000,
+  });
+  if (error) return JSON.stringify({ error });
+  return JSON.stringify(data);
+}
+
+// ---------------------------------------------------------------------------
+// setAdsetMarker — visible (🔴 …) TODO marker on an adset name (Gate 4 follow-ups)
+// ---------------------------------------------------------------------------
+
+/**
+ * Prepend a visible `(🔴 <ACTION>) ` marker to an adset's Meta name so anyone in Ads
+ * Manager sees a pending action before flipping it ACTIVE. Use for fallback-LP launches
+ * (`SWAP LP`), pending copy edits, etc. Cleared manually in Ads Manager (no programmatic
+ * clear by design). Idempotent — re-applying the same marker is a no-op.
+ */
+export async function setAdsetMarker(params: {
+  client_code: string;
+  adset_id: string;
+  marker_text: string;
+}): Promise<string> {
+  const { data, error } = await dropletRequest("/api/ada/adset-marker", {
+    method: "POST",
+    body: {
+      client_code: params.client_code.toUpperCase(),
+      adset_id: params.adset_id,
+      marker_text: params.marker_text,
+    },
+    timeoutMs: 30_000,
+  });
   if (error) return JSON.stringify({ error });
   return JSON.stringify(data);
 }

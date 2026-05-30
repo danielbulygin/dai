@@ -635,6 +635,102 @@ register({
   },
 });
 
+register({
+  definition: {
+    name: 'qc_copy',
+    description:
+      "Run the client's voice-QC pass (Stella for LA/LA2, Steven for AB/ADBN, Alex for TL — the same *-qc skills, ported server-side) on generated copy BEFORE you show a launch preview at Gate 3. Returns a per-creative verdict (ship/revise/block) with compliance flags (cited rule IDs), voice flags (verbatim client precedents), and suggested `rewrites`. Apply the rewrites by passing them as edits.ad_overrides to launch_ads. ALWAYS run this for LA/LA2/AB/ADBN/TL after preview_ad_launch and before asking the user to confirm — never show raw Opus copy with known-fixable flags. Clients without a QC skill pass through with verdict=ship + a note (expected, not an error). Pass either the generated creatives copy or a batch_id.",
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        client_code: { type: 'string' },
+        creatives: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              asset_id: { type: 'string' },
+              video_id: { type: 'string' },
+              image_hash: { type: 'string' },
+              media_type: { type: 'string', enum: ['video', 'image'] },
+              primary_text: { type: 'string' },
+              headline: { type: 'string' },
+              description: { type: 'string' },
+              hook: { type: 'string' },
+              sku_hint: { type: 'string' },
+              language: { type: 'string' },
+            },
+          },
+        },
+        batch_id: { type: 'string', description: 'Pull copy from a preview instead of passing creatives' },
+      },
+      required: ['client_code'],
+    },
+  },
+  async execute(input) {
+    return adLaunchTools.qcCopy(input as Parameters<typeof adLaunchTools.qcCopy>[0]);
+  },
+});
+
+register({
+  definition: {
+    name: 'verify_launch',
+    description:
+      'Post-launch structural verification — MANDATORY after every launch_ads, never skip. A 200 from launch only means the API call worked; this confirms the adset landed in the locked sandbox campaign, effective_status is CAMPAIGN_PAUSED, the name has no `// null //` artifacts, page+IG match config, each creative has a lander+headline+primary_text, and url_tags carries the TripleWhale tw_adid macro. Returns verdict 🟢 OK / 🟡 WARN / 🔴 FAIL + findings. Pass { batch_id } (preferred) or { adset_id, client_code }. Surface any FAIL to the user — do not try to auto-fix.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        batch_id: { type: 'string' },
+        adset_id: { type: 'string' },
+        client_code: { type: 'string' },
+      },
+    },
+  },
+  async execute(input) {
+    return adLaunchTools.verifyLaunch(input as Parameters<typeof adLaunchTools.verifyLaunch>[0]);
+  },
+});
+
+register({
+  definition: {
+    name: 'poll_analysis',
+    description:
+      'Check whether uploaded videos have finished transcript + visual analysis. Run after upload_to_media_library and BEFORE preview_ad_launch — without analysis, copy generation returns usable=false. Non-blocking by default (timeout_seconds=0, a single snapshot); pass a small timeout_seconds (≤180) to wait briefly for in-flight work. Returns { ready, ready_count, total, by_video_id }. If some videos are not yet terminal, wait and re-poll rather than previewing against a cold cache.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        client_code: { type: 'string' },
+        meta_video_ids: { type: 'array', items: { type: 'string' } },
+        timeout_seconds: { type: 'number', description: '0 = snapshot (default); up to 180 to wait briefly' },
+      },
+      required: ['client_code', 'meta_video_ids'],
+    },
+  },
+  async execute(input) {
+    return adLaunchTools.pollAnalysis(input as Parameters<typeof adLaunchTools.pollAnalysis>[0]);
+  },
+});
+
+register({
+  definition: {
+    name: 'set_adset_marker',
+    description:
+      'Prepend a visible (🔴 <ACTION>) marker to an adset name on Meta so anyone in Ads Manager sees a pending action before flipping it ACTIVE. Use at Gate 4 when a launch used a fallback landing page (marker "SWAP LP"), needs a copy edit, or is pending approval. Cleared manually in Ads Manager — there is no programmatic clear by design. Idempotent.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        client_code: { type: 'string' },
+        adset_id: { type: 'string' },
+        marker_text: { type: 'string', description: 'e.g. SWAP LP, NEEDS COPY EDIT, PENDING APPROVAL' },
+      },
+      required: ['client_code', 'adset_id', 'marker_text'],
+    },
+  },
+  async execute(input) {
+    return adLaunchTools.setAdsetMarker(input as Parameters<typeof adLaunchTools.setAdsetMarker>[0]);
+  },
+});
+
 // ---------------------------------------------------------------------------
 // Slack tools
 // ---------------------------------------------------------------------------

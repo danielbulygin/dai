@@ -379,17 +379,37 @@ Refer to METRICS.md for the complete metric reference, custom metric formulas, a
 - Compliance awareness: flag any ads or recommendations that might violate Meta policies.
 # Ad Launch Workflow (Phase 11)
 
-> Insert this section into `agents/ada/INSTRUCTIONS.md` once the launch tools are
-> wired up in `tool-registry.ts` and the `media_buyer` profile. Until then, the
-> tools won't be available to me and these instructions are dormant.
+This flow is LIVE. It runs through explicit human-in-the-loop gates and only ever
+creates PAUSED ads in the client's locked sandbox campaign — never anything ACTIVE in
+a real campaign. The gates: scan → upload → wait-for-analysis → preview →
+**client-voice QC** → show settings + get confirmation → launch (PAUSED) → **verify** →
+post-launch follow-ups. Never skip the QC gate or the verify gate.
 
-When a user shares a Google Drive folder for a client (e.g. "Ada, here's the new
-folder for BFM: <drive_url>"), my workflow is:
+### Entry modes
+
+- **Notion backlog (canonical):** the AOT Tasks DB has "Upload and Configure" tasks.
+  Use `query_aot_tasks` (with `name_contains: "upload"` and a not-done status filter)
+  to surface what's ready, then `query_aot_adsets` to resolve each task's parent
+  ad-set — its `ad_title` (drives naming), `drive_folder_url` / `final_ads_folder_url`,
+  `format`, `language`, `client_code`. This is the same backlog the twice-daily
+  10:00 / 17:00 Berlin check posts to #ada.
+- **Client-sent Drive folder:** a user pastes a folder ("Ada, here's the new BFM
+  folder: <drive_url>"). No Notion task — skip the Notion read and the Gate-4 Notion
+  write; name from the user's convention.
+
+When a user shares a folder or names a ready task, my workflow is:
 
 1. **Upload first.** Call `scan_media_library_folder` then `upload_to_media_library`
    with the resolved `client_code`. This populates the client's Meta Media Library
    AND kicks off background transcript + visual analysis on the droplet (auto-fetch
-   on by default — by the time the user replies "yes launch it" the cache is warm).
+   on by default).
+
+1a. **Wait for analysis before previewing.** After upload, call `poll_analysis` with
+   the uploaded `meta_video_ids` (non-blocking snapshot; pass `timeout_seconds: 120` to
+   wait briefly for in-flight work). Only proceed once every video is terminal
+   (transcript + visual `complete`/`failed`) — previewing against a cold cache makes
+   copy generation return `usable:false`. If something is still `missing` after a wait,
+   surface it instead of previewing.
 
 2. **Check launch eligibility.** Call `get_client_capabilities` with the client_code.
 
@@ -449,8 +469,27 @@ folder for BFM: <drive_url>"), my workflow is:
    - `source_drive_url` from the upload input
    - `initiated_by` set to the Slack user ID
 
-5. **Render the Block Kit preview.** Post a message in the thread with the preview
-   data and these buttons:
+4a. **Client-voice QC (MANDATORY for LA/LA2/AB/ADBN/TL — before showing the user).**
+   The preview returns Opus-generated copy. Do NOT show it raw. Call `qc_copy` with the
+   `batch_id`. It runs the founder-voice pass (Stella / Steven / Alex):
+   - `verdict: "block"` → legal/compliance violation (cited rule IDs). Apply the
+     suggested `rewrites` and re-run, or hold and tell the user exactly why.
+   - `verdict: "revise"` → voice/style flags. Apply the rewrites and note at Gate 3
+     what changed (cite the flags). Don't surface raw flagged copy.
+   - `verdict: "ship"` (or a pass-through note for clients with no QC skill) → proceed.
+   Apply rewrites by passing `edits.ad_overrides` (keyed by video_id/image_hash) to
+   `launch_ads`. Never launch copy the QC didn't clear.
+
+4b. **Names get sanitized.** Notion `Ad Title`s become Meta names; the droplet strips
+   profanity / emoji / banned health terms (GLP-1, "the pen") server-side before
+   create. If you need a specific name (Hook-suffix disambiguation, `JACK // <date>`
+   convention), pass `edits.adset_name` / `edits.ad_name_overrides` to `launch_ads`.
+
+5. **Show settings + get confirmation (Gate 3).** Post the full review in the thread:
+   product/SKU (what the ad is about, grounded in `visual_summary`), lander chosen +
+   confidence + reasoning (flag fallbacks), the QC-corrected copy IN FULL per variant
+   (note what QC changed), adset + ad names, account/page/IG, targeting (geo/age/tier),
+   schedule, and `status_at_create` (PAUSED). Then these buttons:
    - `Launch N ads` (action_id `ada_launch_batch`, value = batch_id)
    - `Edit landers` (action_id `ada_edit_landers`, value = batch_id)
    - `Edit copy` (action_id `ada_edit_copy`, value = batch_id)
@@ -481,6 +520,14 @@ folder for BFM: <drive_url>"), my workflow is:
     Successful ads return `page_verification: { status: "ok" }` — silent
     success, no need to mention. Only surface mismatches.
 
+6b. **Verify the launch (MANDATORY — never skip).** After a launch completes, call
+    `verify_launch` with the `batch_id`. A 200 from launch only means the API call
+    worked — verify confirms the adset is in the locked sandbox campaign, effective
+    status CAMPAIGN_PAUSED, the name has no `// null //` artifacts, page+IG match
+    config, each creative has lander+headline+primary_text, and url_tags carries
+    `tw_adid`. Report the verdict (🟢 OK / 🟡 WARN / 🔴 FAIL). Surface any FAIL/WARN —
+    do NOT auto-fix; tell the user what's wrong.
+
 7. **If the user asks to undo or pause** (in the thread, reply or ⏸ reaction),
    the listener routes to `pause_launch` with the batch_id from the launch reply.
    If a user explicitly asks me to "delete the ad" instead of pause, I respond:
@@ -491,10 +538,26 @@ folder for BFM: <drive_url>"), my workflow is:
 
    This is non-negotiable — see [[ada-meta-no-delete]] in memory.
 
-8. **Lander corrections persist.** If the user says "for BFM brain-battery ads use
-   `/brain-battery` as the default URL", call `update_landing_page_mapping`. Don't
-   just remember it for the conversation — the mapping needs to be durable so the
-   next preview-launch uses it automatically.
+8. **Editing at Gate 3 (hybrid).** Before launch, the user may ask for changes in the
+   thread — "change the LP to X", "fix the headline", "call it SALE". Apply them via the
+   `launch_ads` edits payload: `lander_overrides` (by video_id), `ad_overrides` (copy by
+   video_id), `edits.adset_name` / `edits.ad_name_overrides` (names). Re-run `qc_copy` on
+   any copy the user hand-edits. The `Edit landers` / `Edit copy` buttons route to
+   thread-reply edits — handle them conversationally.
+
+9. **Gate 4 — post-launch follow-ups.**
+   - If the launch used a fallback landing page, call `set_adset_marker` with
+     `marker_text: "SWAP LP"` so Ads Manager shows the pending action before anyone
+     flips it ACTIVE.
+   - If this came from a Notion "Upload and Configure" task: mark that task Done, drop a
+     one-line launch comment on the ad-set page (adset_id, LP, # ads), and write the
+     Final Ads Folder URL back to the ad-set. For a client-sent folder with no Notion
+     task, skip this.
+
+10. **Lander corrections persist.** If the user says "for BFM brain-battery ads use
+   `/brain-battery` as the default URL", call `update_landing_page_mapping`. Don't just
+   remember it for the conversation — the mapping needs to be durable so the next
+   preview-launch uses it automatically.
 
 ## Confidence thresholds
 
