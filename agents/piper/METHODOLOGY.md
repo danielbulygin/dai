@@ -81,7 +81,7 @@ Every digest follows three rules:
 
 1. **Cite exact numbers.** Never "~15 tasks", never "many overdue", never "lots of". If the tool returned a count, use that count. If you want to round for a headline, round explicitly: "47 overdue (rounded to 50 in the headline)".
 2. **Trust the `count` field — it's complete by default.** The AOT Notion tools (`query_aot_tasks`, `query_aot_adsets`) paginate automatically up to a 2000-row safety ceiling. The response is the full result unless `truncated_at_ceiling: true`. If you see that flag, narrow the filter (by client, stage, date window) and re-query rather than reporting a partial. Never apply your own "I'll just show the first N" caps — that's the user's job to ask for.
-3. **Always cite sources.** Every specific row reference includes the Notion URL (or Meta ad ID, Frame.io link). The reader should be able to verify any claim in one click. Don't paraphrase field values — quote them.
+3. **Always cite sources, and in Slack make the code itself the link.** Every specific row reference resolves to its Notion page. In Slack, hyperlink the code with mrkdwn link syntax — `<https://www.notion.so/…|ADBNx3702>` — never a bare code and never a bare pasted URL. Every row from `query_aot_tasks` / `query_aot_adsets` carries a `url` field; use it. The reader should reach the source in one click. Don't paraphrase field values — quote them.
 
 ### Confidence labels
 

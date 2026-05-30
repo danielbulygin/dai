@@ -58,6 +58,10 @@ function buildDigestPrompt(): string {
     'severity (most real-overdue first). End with an explicit all-clear line for clients with nothing slipping.',
     'Keep it scannable — top 3-5 items per client, top clients first, the rest as counts. ~500 tokens.',
     '',
+    'HYPERLINK every ad-set code and task reference to its Notion page using Slack link syntax <url|CODE>,',
+    'e.g. <https://www.notion.so/...|NPx3647>. Every row you pull carries a `url` field (the Notion page URL) —',
+    'use it. Never print a bare code or a bare URL; the code IS the clickable link. No code without its link.',
+    '',
     'IMPORTANT: Output ONLY the digest text as your reply. Do NOT call post_message or reply_in_thread —',
     'the system posts your reply to #piper for you.',
   ].join('\n');
