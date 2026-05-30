@@ -1,6 +1,6 @@
 id: ada
 display_name: Ada
-model: claude-opus-4-6
+model: claude-opus-4-8
 icon: ":chart_with_upwards_trend:"
 profile: media_buyer
 max_turns: 25

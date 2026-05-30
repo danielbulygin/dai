@@ -1,6 +1,6 @@
 id: otto
 display_name: Otto
-model: claude-opus-4-6
+model: claude-opus-4-8
 icon: ":robot_face:"
 profile: standard
 max_turns: 10

@@ -1,6 +1,6 @@
 id: sage
 display_name: Sage
-model: claude-opus-4-6
+model: claude-opus-4-8
 icon: ":owl:"
 profile: readonly
 max_turns: 15

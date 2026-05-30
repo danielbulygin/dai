@@ -41,7 +41,7 @@ import { ACCOUNT_CODE_ALIASES, normalizeAccountCode } from "../src/utils/account
 // ---------------------------------------------------------------------------
 
 const FILTER_MODEL = "claude-haiku-4-5-20251001"; // Stage 1: cheap snippet extraction
-const EXTRACTION_MODEL = "claude-opus-4-6"; // Stage 2: deep structured extraction
+const EXTRACTION_MODEL = "claude-opus-4-8"; // Stage 2: deep structured extraction
 const MAX_TRANSCRIPT_CHARS = 80_000;
 const REQUEST_DELAY_MS = 2_000;
 const DEFAULT_BATCH_SIZE = 50;

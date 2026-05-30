@@ -1,6 +1,6 @@
 id: piper
 display_name: Piper
-model: claude-opus-4-6
+model: claude-opus-4-8
 icon: ":factory:"
 profile: production_manager
 max_turns: 25

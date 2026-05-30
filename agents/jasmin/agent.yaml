@@ -1,6 +1,6 @@
 id: jasmin
 display_name: Jasmin
-model: claude-opus-4-6
+model: claude-opus-4-8
 icon: ":woman-tipping-hand:"
 profile: assistant
 max_turns: 30

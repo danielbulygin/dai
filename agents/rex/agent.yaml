@@ -1,6 +1,6 @@
 id: rex
 display_name: Rex
-model: claude-opus-4-6
+model: claude-opus-4-8
 icon: ":mag:"
 profile: readonly
 max_turns: 15
