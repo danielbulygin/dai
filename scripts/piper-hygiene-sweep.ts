@@ -15,6 +15,9 @@
  */
 
 import { getSupabase } from '../src/integrations/supabase.js';
+import { getDaiSupabase } from '../src/integrations/dai-supabase.js';
+import { getNotion } from '../src/integrations/notion.js';
+import { randomUUID } from 'node:crypto';
 
 const TERMINAL_AD_SET_STAGES = new Set(['Completed', 'Cancelled', 'Archived']); // NOT 'On Hold'
 const TERMINAL_TASK_STATUSES = new Set(['Done', 'Cancelled', 'Complete', 'Archived Task']);
@@ -55,13 +58,67 @@ function fmt(rows: Array<{ code: string | null; label: string | null; extra?: st
   return lines.join('\n');
 }
 
-async function main(): Promise<void> {
-  if (process.argv.includes('--apply')) {
-    console.error('--apply is not wired yet. This sweep is dry-run only until the Notion writer + piper_actions logging is built and signed off. Aborting.');
-    process.exit(2);
-  }
+const TERMINAL_TASK_STATUS = 'Archived Task';
 
-  console.log(`\nPiper hygiene sweep — DRY RUN — ${today}\n${'='.repeat(60)}`);
+/** Archive one task in Notion (Status → 'Archived Task') and log a reversible write row. */
+async function archiveTask(t: Task, sessionId: string): Promise<'archived' | 'skipped' | 'failed'> {
+  const notion = getNotion();
+  const t0 = Date.now();
+  try {
+    // Live re-check: don't act on stale mirror data.
+    const page = (await notion.pages.retrieve({ page_id: t.notion_id })) as any;
+    const liveStatus: string | null = page.properties?.Status?.status?.name ?? null;
+    if (liveStatus && TERMINAL_TASK_STATUSES.has(liveStatus)) return 'skipped'; // already terminal
+
+    await notion.pages.update({
+      page_id: t.notion_id,
+      properties: { Status: { status: { name: TERMINAL_TASK_STATUS } } },
+    });
+
+    await logWrite({
+      sessionId, targetId: t.notion_id, status: 'success', durationMs: Date.now() - t0,
+      before: { status: liveStatus }, after: { status: TERMINAL_TASK_STATUS },
+      reverse: { action: 'set_task_status', task_id: t.notion_id, status: liveStatus },
+      summary: `archived ${t.ad_set_code ?? ''} ${(t.task_name ?? '').slice(0, 50)}`.trim(),
+      params: { task_id: t.notion_id, category: 'A_cascade_close', ad_set_code: t.ad_set_code },
+    });
+    return 'archived';
+  } catch (err) {
+    await logWrite({
+      sessionId, targetId: t.notion_id, status: 'failed', durationMs: Date.now() - t0,
+      before: null, after: null, reverse: null,
+      summary: `FAILED archive ${t.ad_set_code ?? ''}`, params: { task_id: t.notion_id, category: 'A_cascade_close' },
+      error: (err as Error).message,
+    });
+    return 'failed';
+  }
+}
+
+/** Insert a full write-row into piper_actions (dai Supabase) — the existing logToolCall only does action_type='tool_call'. */
+async function logWrite(o: {
+  sessionId: string; targetId: string; status: 'success' | 'failed'; durationMs: number;
+  before: unknown; after: unknown; reverse: unknown; summary: string; params: Record<string, unknown>; error?: string;
+}): Promise<void> {
+  try {
+    await getDaiSupabase().from('piper_actions').insert({
+      agent_id: 'piper', session_id: o.sessionId, action_type: 'write',
+      tool_name: 'hygiene_sweep_archive_task', initiator: 'terminal',
+      params: o.params, result_summary: o.summary.slice(0, 800),
+      target_system: 'notion', target_id: o.targetId,
+      before_state: o.before, after_state: o.after, reverse_action: o.reverse,
+      status: o.status, duration_ms: o.durationMs, error: o.error?.slice(0, 2000) ?? null,
+    });
+  } catch (err) {
+    console.error('  (warn) piper_actions log failed:', (err as Error).message);
+  }
+}
+
+async function main(): Promise<void> {
+  const apply = process.argv.includes('--apply');
+  const limArg = process.argv.indexOf('--limit');
+  const limit = limArg >= 0 ? parseInt(process.argv[limArg + 1], 10) : Infinity;
+
+  console.log(`\nPiper hygiene sweep — ${apply ? 'APPLY' : 'DRY RUN'} — ${today}\n${'='.repeat(60)}`);
 
   const [adsets, tasks] = await Promise.all([
     fetchAll<AdSet>('aot_adsets_current', 'notion_id,stage,ad_id_code,ad_title,client_code,client_status,ad_delivery_date,notion_last_edited_time,overdue_tasks_count,url', (q) => q.not('is_deleted', 'is', true)),
@@ -130,7 +187,25 @@ async function main(): Promise<void> {
   console.log(`  C shipped-Launch (Meta review):  ${shippedLaunch.length} ad sets`);
   console.log(`  D dead Concept (human review):   ${deadConcept.length} ad sets`);
   console.log(`  On Hold (left alone):            ${onHoldNearTerm.length} tasks`);
-  process.exit(0);
+
+  if (!apply) { console.log(`\n(dry run — nothing written. Re-run with --apply to action category A.)`); process.exit(0); }
+
+  // ---- APPLY: category A only (cascade-close). Reversible via piper_actions.reverse_action. ----
+  const batch = cascadeSafe.slice(0, limit);
+  const sessionId = `hygiene-sweep-${randomUUID()}`;
+  console.log(`\n${'='.repeat(60)}\nAPPLYING category A: archiving ${batch.length} task(s)${limit < cascadeSafe.length ? ` (--limit ${limit} of ${cascadeSafe.length})` : ''}.`);
+  console.log(`session_id=${sessionId} (every write logged to piper_actions with reverse_action)\n`);
+
+  let archived = 0, skipped = 0, failed = 0;
+  for (let i = 0; i < batch.length; i++) {
+    const r = await archiveTask(batch[i], sessionId);
+    if (r === 'archived') archived++; else if (r === 'skipped') skipped++; else failed++;
+    if ((i + 1) % 25 === 0 || i === batch.length - 1) console.log(`  ${i + 1}/${batch.length}  (archived ${archived}, skipped ${skipped}, failed ${failed})`);
+    await new Promise((res) => setTimeout(res, 320)); // Notion rate-limit courtesy (~3 req/s)
+  }
+  console.log(`\nDONE. archived=${archived} skipped(already terminal)=${skipped} failed=${failed}`);
+  console.log(`Undo: piper_actions rows for session_id=${sessionId} carry reverse_action {set_task_status → prior status}.`);
+  process.exit(failed > 0 ? 1 : 0);
 }
 
 main().catch((err: unknown) => {
