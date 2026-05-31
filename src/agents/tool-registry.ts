@@ -1978,6 +1978,14 @@ register({
           type: 'string',
           description: 'Case-insensitive substring of the client name (resolved in-memory after fetch — use for ad-hoc filtering when you do not know the client page ID)',
         },
+        client_code: {
+          type: 'string',
+          description: 'Exact client CODE, e.g. "FPL", "LA", "ADBN", "JVA". Use this when someone references a client by its short code rather than name (e.g. "the FPL ad set"). client_code is the same code embedded in ad_id_code.',
+        },
+        ad_id_code_contains: {
+          type: 'string',
+          description: 'Case-insensitive substring of the ad-set\'s ad_id_code, e.g. "FPLx4099" for one specific ad set, or "FPL" for all of that client\'s. Use this to resolve a reference to a specific ad set by its code.',
+        },
         owner_user_id: {
           type: 'string',
           description: 'Notion user ID (without the user:// prefix) to filter by ad-set owner',
@@ -2020,6 +2028,8 @@ register({
       exclude_dead_ad_sets: input.exclude_dead_ad_sets as boolean | undefined,
       client_relation_id: input.client_relation_id as string | undefined,
       client_name_contains: input.client_name_contains as string | undefined,
+      client_code: input.client_code as string | undefined,
+      ad_id_code_contains: input.ad_id_code_contains as string | undefined,
       owner_user_id: input.owner_user_id as string | undefined,
       format: input.format as string | undefined,
       delivery_on_or_before: input.delivery_on_or_before as string | undefined,

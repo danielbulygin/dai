@@ -517,6 +517,8 @@ export async function queryAotAdSets(params: {
   exclude_dead_ad_sets?: boolean;
   client_relation_id?: string;
   client_name_contains?: string;
+  client_code?: string;
+  ad_id_code_contains?: string;
   owner_user_id?: string;
   format?: string;
   delivery_on_or_before?: string;
@@ -569,6 +571,18 @@ export async function queryAotAdSets(params: {
       adsets = adsets.filter((a) =>
         a.client_relation_ids.some((id) => (clientNameMap.get(id) ?? '').toLowerCase().includes(needle)),
       );
+    }
+
+    // Resolve references by code: client_code (e.g. "FPL") or ad_id_code (e.g. "FPLx4099"
+    // or just "FPL"). Both resolve now that rollupValue parses text rollups. In-memory
+    // since they're rollup/formula-derived, not filterable in the Notion query.
+    if (params.client_code) {
+      const cc = params.client_code.toUpperCase();
+      adsets = adsets.filter((a) => (a.client_code ?? '').toUpperCase() === cc);
+    }
+    if (params.ad_id_code_contains) {
+      const needle = params.ad_id_code_contains.toLowerCase();
+      adsets = adsets.filter((a) => (a.ad_id_code ?? '').toLowerCase().includes(needle));
     }
 
     const excludeDead = params.exclude_dead_ad_sets ?? true;

@@ -397,6 +397,14 @@ post-launch follow-ups. Never skip the QC gate or the verify gate.
   folder: <drive_url>"). No Notion task — skip the Notion read and the Gate-4 Notion
   write; name from the user's convention.
 
+**Resolving a client / ad-set reference:** people refer to clients by CODE, not name —
+"the FPL ad set", "upload FPLx4099". Notion stores the full name ("Forpeople"), so a
+client-NAME search won't match a code. Use `query_aot_adsets` with `client_code` (e.g.
+"FPL") or `ad_id_code_contains` (e.g. "FPLx4099") to resolve the actual ad set, its
+title, and its Drive folder. And if you're replying in a thread, the message above you
+(e.g. the twice-daily nudge) usually already names the client, its code, and links the
+ad set — read it before asking the user to re-explain.
+
 When a user shares a folder or names a ready task, my workflow is:
 
 1. **Upload first.** Call `scan_media_library_folder` then `upload_to_media_library`

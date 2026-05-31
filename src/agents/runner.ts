@@ -570,8 +570,42 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
       content: msg.content,
     }));
 
-  // Append the new user message
-  conversationMessages.push({ role: 'user', content: userMessage });
+  // Thread-context fallback: a fresh session on an existing thread (e.g. a reply to an
+  // out-of-band post like the scheduled Ready-to-Upload nudge, which is posted via a raw
+  // bot client and never stored in Ada's message history) would otherwise start blind.
+  // Pull the live Slack thread so the agent can see what it's replying to. Empty-history
+  // only — normal multi-turn sessions already have their context and are untouched.
+  let threadContextPrefix = '';
+  if (priorMessages.length === 0 && threadTs && channelId) {
+    try {
+      const { getDedicatedBotClient } = await import('../slack/dedicated-bots.js');
+      const replies = await getDedicatedBotClient(effectiveAgentId).conversations.replies({
+        channel: channelId,
+        ts: threadTs,
+        limit: 30,
+      });
+      const msgs = (replies.messages ?? []).filter(
+        (m) => typeof (m as { text?: string }).text === 'string' && (m as { text?: string }).text!.trim().length > 0,
+      );
+      if (msgs.length > 0) {
+        const transcript = msgs
+          .map((m) => {
+            const mm = m as { text?: string; bot_id?: string; user?: string };
+            const who = mm.bot_id ? 'You (earlier, posted by you)' : mm.user ? `<@${mm.user}>` : 'someone';
+            return `${who}: ${mm.text}`;
+          })
+          .join('\n\n');
+        threadContextPrefix =
+          `[Context — the Slack thread you are replying in, for reference. ` +
+          `You may have posted earlier messages here out-of-band (e.g. a scheduled nudge):]\n\n${transcript}\n\n---\n\n`;
+      }
+    } catch (err) {
+      logger.warn({ err, threadTs }, 'thread-context fallback fetch failed (continuing without it)');
+    }
+  }
+
+  // Append the new user message (with thread context prefixed when we recovered it).
+  conversationMessages.push({ role: 'user', content: threadContextPrefix + userMessage });
 
   // Resolve tools for this agent's profile
   const { definitions: toolDefs } = getToolsForProfile(profile);
