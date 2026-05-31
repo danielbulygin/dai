@@ -198,6 +198,10 @@ Piper reads Notion (tasks + ad sets), reconciles upload tasks against Meta, iden
 
 ---
 
+## Parking lot — captured ideas (not yet scheduled)
+
+- **Post-launch performance loop (Piper → Ada).** ~2 weeks after an ad set launches, Piper asks Ada how the ad is performing and folds the answer back in. Dan's idea 2026-05-31. Deliberately OUT of current scope: today we optimize the production process only up to upload; what happens after upload (spend, performance) is Ada's lane. Revisit once the production-side is solid — likely a Phase 6 cross-agent feedback loop.
+
 ## What's deliberately NOT in the plan
 
 - **Brief intake quality checks** — overlaps with Maya/Ada's upstream work. Surface bad briefs via slip data; don't gate at intake.
