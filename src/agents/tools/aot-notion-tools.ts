@@ -125,11 +125,22 @@ function rollupValue(rollup: unknown): string | null {
   const r = rollup as { type?: string; date?: { start?: string }; array?: Array<unknown>; number?: number };
   if (r.type === 'date' && r.date?.start) return r.date.start;
   if (r.type === 'array' && r.array && r.array.length > 0) {
-    const first = r.array[0] as { type?: string; status?: { name?: string }; select?: { name?: string }; formula?: { string?: string; number?: number }; date?: { start?: string } };
+    const first = r.array[0] as { type?: string; status?: { name?: string }; select?: { name?: string }; formula?: { string?: string; number?: number }; date?: { start?: string }; rich_text?: Array<{ plain_text?: string }>; title?: Array<{ plain_text?: string }> };
     if (first.type === 'status' && first.status?.name) return first.status.name;
     if (first.type === 'select' && first.select?.name) return first.select.name;
     if (first.type === 'formula') return first.formula?.string ?? (first.formula?.number != null ? String(first.formula.number) : null);
     if (first.type === 'date' && first.date?.start) return first.date.start;
+    // Text rollups (e.g. Client-Code-Rollup → the client's "Client Code" text field).
+    // Notion returns these as rich_text/title array items; without these branches
+    // every text rollup parsed to null — which made client_code null for ALL ad-sets.
+    if (first.type === 'rich_text' && Array.isArray(first.rich_text)) {
+      const t = first.rich_text.map((x) => x?.plain_text ?? '').join('').trim();
+      if (t) return t;
+    }
+    if (first.type === 'title' && Array.isArray(first.title)) {
+      const t = first.title.map((x) => x?.plain_text ?? '').join('').trim();
+      if (t) return t;
+    }
   }
   if (r.type === 'number' && typeof r.number === 'number') return String(r.number);
   return null;
