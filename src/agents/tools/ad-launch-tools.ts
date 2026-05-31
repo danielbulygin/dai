@@ -104,6 +104,8 @@ export interface ClientCapabilities {
   launch: boolean;
   locked_campaign_name: string | null;
   has_meta_config: boolean;
+  has_voice_qc: boolean;
+  voice_qc_persona: string | null;
 }
 
 // ---------------------------------------------------------------------------

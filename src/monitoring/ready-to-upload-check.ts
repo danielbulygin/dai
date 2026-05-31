@@ -19,10 +19,6 @@ const ADA_CHANNEL = (env as Record<string, string | undefined>).ADA_UPLOAD_CHECK
 const NINA_USER_ID = (env as Record<string, string | undefined>).NINA_SLACK_USER_ID || 'U08LEQVHDRU';
 const DAN_USER_ID = (env as Record<string, string | undefined>).SLACK_OWNER_USER_ID || 'U084AS8QRA7';
 
-// Mirror of launch_qc_voice.CLIENT_QC_MAP keys (server-side). Keep in sync — these are
-// the clients with a founder-voice QC skill. Others get generic compliance QC only.
-const QC_COVERED = new Set(['LA', 'LA2', 'AB', 'ADBN', 'TL']);
-
 interface AotTask {
   task_id: string;
   task_name: string | null;
@@ -104,15 +100,16 @@ export async function buildReadyToUploadMessage(
   // Flag config gaps per client so nobody clicks "start" on a client Ada can't launch.
   // See feedback_flag_missing_client_config.
   const codes = [...new Set([...byClient.values()].map((g) => g.code).filter(Boolean))] as string[];
-  const capByCode = new Map<string, { launch: boolean; hasConfig: boolean }>();
+  const capByCode = new Map<string, { launch: boolean; hasConfig: boolean; hasVoiceQc: boolean }>();
   await Promise.all(
     codes.map(async (code) => {
       try {
         const cap = JSON.parse(await getClientCapabilities({ client_code: code })) as {
           launch?: boolean;
           has_meta_config?: boolean;
+          has_voice_qc?: boolean;
         };
-        capByCode.set(code, { launch: !!cap.launch, hasConfig: !!cap.has_meta_config });
+        capByCode.set(code, { launch: !!cap.launch, hasConfig: !!cap.has_meta_config, hasVoiceQc: !!cap.has_voice_qc });
       } catch {
         /* leave unset → treated as no-config below */
       }
@@ -126,7 +123,7 @@ export async function buildReadyToUploadMessage(
     let flag = '';
     if (!code || !cap || !cap.launch) {
       flag = ' — :warning: *no launch config* — needs `/meta-launch-config` before Ada can launch';
-    } else if (!QC_COVERED.has(code.toUpperCase())) {
+    } else if (!cap.hasVoiceQc) {
       flag = ' — :warning: no client-voice QC skill (generic compliance checks only)';
     }
     sections.push(`*${client}*${code ? ` (${code})` : ''}${flag}`);
