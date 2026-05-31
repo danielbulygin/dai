@@ -225,9 +225,9 @@ Phase 0 ✅ ──→ Phase 1 ──→ Phase 2 ──→ Phase 3 ──→ Phas
 | Phase 1.5 | ✅ | 2026-05-24 | piper_actions audit log + inspect_piper_actions; middleware on every dai tool call |
 | Phase 2 v1 | ✅ tools / ⏸ data | 2026-05-24 | get_cadence_read + get_cadence_read_all shipped. Tools work end-to-end. PARKED on `client_cadence_targets` seeding — needs Vanessa's real contracted numbers. ADBN's smoke-test target was deleted to avoid misleading reads. |
 | Phase 2 v2 | — | — | Gated on (a) Vanessa's cadence data landed, AND (b) ~2 wks snapshot history for forecast/stage-lag/drift/capacity/risk |
-| Phase 3 | 🔧 code / ⏸ Slack reg | 2026-05-30 | Digest engine + `/api/cron/piper-digest` + systemd timer docs shipped & dry-run-verified. Blocked on manual Slack app registration (tokens + #piper) before it can post. |
+| Phase 3 | ✅ | 2026-05-31 | LIVE. Slack app registered (@piper2 / "Piper" in Ads On Tap), #piper (C0B5SA7SZLZ), interactive bot + `/api/cron/piper-digest` running on droplet, `piper-digest.timer` Mon-Fri 09:00 ET. First real digest posted. Always-hyperlink-codes rule shipped. Tasks DB shared with droplet "DAI" integration. Weekly per-client drafts + Block Kit deferred. |
 | Phase 4 | — | — | DM follow-ups |
-| Phase 5 | — | — | Highest-stakes |
+| Phase 5 | preview | 2026-05-31 | First reversible Notion write shipped ahead of schedule: `scripts/piper-hygiene-sweep.ts --apply` archived 215 cascade-close tasks (parent Completed/Cancelled/Archived), logged before/after/reverse_action to piper_actions. Not the full phase — a tightly-scoped one-off. Recurring sweep + undo tool still to build. |
 | Phase 6 | — | — | Polish + learning |
 
 ---
@@ -242,5 +242,5 @@ Phase 0 ✅ ──→ Phase 1 ──→ Phase 2 ──→ Phase 3 ──→ Phas
 
 ---
 
-Last updated: 2026-05-24
+Last updated: 2026-05-31
 Maintained by: Dan + Piper-build sessions
