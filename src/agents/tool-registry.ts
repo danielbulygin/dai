@@ -550,6 +550,11 @@ register({
         },
         mode: { type: 'string', enum: ['new_adset', 'ads_only'] },
         target_adset_id: { type: 'string' },
+        concept: {
+          type: 'string',
+          description:
+            "Ad-set concept/angle name for clients who name ad sets by concept (Sweetspot/SS), e.g. 'Auction-Win-Dirk', 'Is-This-A-Scam', 'Stop-Paying-Retail'. Derive it from the Drive folder / brief title in Rebecka's hyphenated Title-Case style (drop filler like 'The'/'with': folder 'The Auction Win with Dirk' → 'Auction-Win-Dirk'). The server appends the asset id automatically, rendering e.g. 'Auction-Win-Dirk // STSPx3938'. WINS over Notion-title naming, so ONLY pass it for Sweetspot — never for clients whose ad sets are named from a Notion ad-set DB (BFM, SLB, TL, etc.).",
+        },
         brief_notion_id: { type: 'string' },
         source_drive_url: { type: 'string' },
         initiated_by: { type: 'string', description: 'Slack user ID who triggered this' },

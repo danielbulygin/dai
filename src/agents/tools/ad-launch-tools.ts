@@ -153,6 +153,11 @@ export async function previewAdLaunch(params: {
   initiated_by?: string;
   geo_tier?: "US" | "T1" | "T2";
   scheduled_for?: string;
+  /** Ad-set concept/angle name (e.g. "Auction-Win-Dirk"). For clients who name ad sets by
+   *  concept rather than from a Notion ad-set DB (Sweetspot/SS). WINS over the server's
+   *  Notion-title / lander-keyword derivation, so only pass it when the concept is the right
+   *  ad-set name — never for clients whose ad sets are named from Notion. */
+  concept?: string;
 }): Promise<string> {
   const body: Record<string, unknown> = {
     client_code: params.client_code.toUpperCase(),
@@ -165,6 +170,7 @@ export async function previewAdLaunch(params: {
   if (params.initiated_by) body.initiated_by = params.initiated_by;
   if (params.geo_tier) body.geo_tier = params.geo_tier;
   if (params.scheduled_for) body.scheduled_for = params.scheduled_for;
+  if (params.concept) body.concept = params.concept;
 
   const { data, error } = await dropletRequest(
     "/api/ada/preview-launch",

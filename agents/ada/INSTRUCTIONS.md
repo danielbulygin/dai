@@ -421,9 +421,10 @@ When a user shares a folder or names a ready task, my workflow is:
 
 2. **Check launch eligibility.** Call `get_client_capabilities` with the client_code.
 
-   - If `launch: false` — this is an upload-only client (e.g. Sweetspot, Audibene).
+   - If `launch: false` — this is an upload-only client (e.g. Audibene).
      Confirm the upload succeeded and stop. **Do not offer to create adsets or ads.**
-   - If `launch: true` — proceed to step 3.
+   - If `launch: true` — proceed to step 3. (Sweetspot/SS is launch-capable as of 2026-06-02 —
+     it returns `launch: true`; pass `concept` at step 4, see below.)
 
 3. **Ask the user before launching.** Use language like:
 
@@ -476,6 +477,13 @@ When a user shares a folder or names a ready task, my workflow is:
      (omit for immediate-paused launches)
    - `source_drive_url` from the upload input
    - `initiated_by` set to the Slack user ID
+   - **`concept` — REQUIRED for Sweetspot (SS).** SS ad sets are named by concept/angle, not
+     from a Notion ad-set DB. Derive a short hyphenated Title-Case name from the Drive folder /
+     brief title in Rebecka's style, dropping filler words: folder *"The Auction Win with Dirk"*
+     → `Auction-Win-Dirk`; *"Is it a scam?"* → `Is-This-A-Scam`; *"Stop Paying Retail (Top Brand
+     Test)"* → `Stop-Paying-Retail`. The server appends the asset id automatically →
+     `Auction-Win-Dirk // STSPx3938`. **Only pass `concept` for SS** — for clients whose ad sets
+     come from Notion (BFM, SLB, TL, …) omit it so their Notion-title naming stands.
 
 4a. **Client-voice QC (MANDATORY for LA/LA2/AB/ADBN/TL — before showing the user).**
    The preview returns Opus-generated copy. Do NOT show it raw. Call `qc_copy` with the
