@@ -159,18 +159,19 @@ Piper reads Notion (tasks + ad sets), reconciles upload tasks against Meta, iden
 
 ---
 
-## Phase 5 — Write capabilities (closing the loop)
+## Phase 5 — Write capabilities (closing the loop) 🟡 STARTED 2026-06-02
 
 **Goal:** Piper closes the loop, reversibly.
 
 **Key builds:**
 
-- Notion write tools: `update_aot_task(task_id, fields)` (status, due_date, assignee), `create_aot_task(ad_set_id, name, ...)` (when stage transitions imply downstream work)
-- Confirmation gates by default — every write asks before executing (unless the user has explicitly authorized recurring writes for that pattern)
-- `before_state` + `reverse_action` captured to `piper_actions` for every write (already wired from Phase 1.5)
-- The upload-reconciliation "stale bucket" becomes one-click close
-- Stage-transition automation (auto-create QC task when editing marks complete, etc.) — initially behind a feature flag per client
-- `undo_last_action(action_id)` tool for human-triggered rollback using the `reverse_action` jsonb
+- ✅ **First write shipped 2026-06-02 (commit 084a82f):** `update_aot_task_status(task_id, new_status, reason)` — the `status` slice of `update_aot_task`. Whitelist only (Done/Complete/Cancelled/Archived Task). `before_state` + `reverse_action` logged to `piper_actions` via new `logWrite()`. Confirmation discipline lives in INSTRUCTIONS "Scoped write-back" (LLM-side, not a hard gate yet). Also shipped alongside: Slack-read reconciliation (`search_slack_messages`/`read_slack_channel`) so the "what shipped" picture is grounded in Slack, not just Notion.
+- 🔜 Remaining `update_aot_task` fields: `due_date`, `assignee`; `create_aot_task(ad_set_id, name, ...)` (when stage transitions imply downstream work)
+- 🔜 Confirmation gates by default — every write asks before executing (today it's INSTRUCTIONS-enforced, not a code gate)
+- ✅ `before_state` + `reverse_action` captured to `piper_actions` for every write (wired from Phase 1.5; `logWrite` helper added)
+- 🔜 The upload-reconciliation "stale bucket" becomes one-click close
+- 🔜 Stage-transition automation (auto-create QC task when editing marks complete, etc.) — initially behind a feature flag per client
+- 🔜 `undo_last_action(action_id)` tool for human-triggered rollback using the `reverse_action` jsonb ← **natural next build** (the reverse_action data is already being captured)
 
 **Dependencies:** Phase 1.5 (every write must be logged), Phase 4 (Slack confirmation surface).
 **Effort:** ~2 sessions. Highest-stakes phase — careful guardrails non-negotiable.
