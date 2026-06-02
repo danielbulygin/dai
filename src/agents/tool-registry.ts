@@ -20,7 +20,7 @@ import * as adLaunchTools from './tools/ad-launch-tools.js';
 import * as reportTools from '../reports/index.js';
 import * as methodologySanitizer from '../client-agents/methodology-sanitizer.js';
 import { logger } from '../utils/logger.js';
-import { logToolCall, fetchRecentActions } from './action-log.js';
+import { logToolCall, logWrite, fetchRecentActions } from './action-log.js';
 import * as cadenceTools from './tools/cadence-tools.js';
 import * as cadenceReadTools from './tools/cadence-read-tools.js';
 import { getSupabase } from '../integrations/supabase.js';
@@ -2239,6 +2239,52 @@ register({
       group_by: input.group_by as aotNotionTools.AdSetGroupBy | undefined,
       limit: input.limit as number | undefined,
     });
+  },
+});
+
+register({
+  definition: {
+    name: 'update_aot_task_status',
+    description:
+      "Set a single AOT task's Status in Notion. SCOPED WRITE — only the terminal/cleanup statuses are allowed: 'Done', 'Complete', 'Cancelled', 'Archived Task'. Every write is logged to piper_actions with a reverse_action so it can be undone. " +
+      'RULES: (1) Only call this when a human in the channel has explicitly asked you to (e.g. "close that task", "mark NPx3647 done", "archive those zombies") — never write speculatively or as part of a digest. (2) State exactly what you are about to change BEFORE calling, and report the before→after + how to undo AFTER. (3) Do not touch tasks on live/On-Hold ad sets unless the user is explicit — On Hold means paused, not dead. Use the task_id (Notion page id) returned by query_aot_tasks.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        task_id: {
+          type: 'string',
+          description: 'The task page id (the `task_id` field from query_aot_tasks). A notion.so URL or dashed id also works.',
+        },
+        new_status: {
+          type: 'string',
+          description: "New status. Must be one of: 'Done', 'Complete', 'Cancelled', 'Archived Task'.",
+        },
+        reason: {
+          type: 'string',
+          description: 'Short human-readable reason for the change (logged for audit).',
+        },
+      },
+      required: ['task_id', 'new_status', 'reason'],
+    },
+  },
+  async execute(input, context) {
+    const result = await aotNotionTools.updateAotTaskStatus({
+      task_id: input.task_id as string,
+      new_status: input.new_status as string,
+    });
+    if (result.ok && result.before !== result.after) {
+      logWrite({
+        context,
+        toolName: 'update_aot_task_status',
+        targetSystem: 'notion',
+        targetId: result.task_id ?? (input.task_id as string),
+        before: { Status: result.before },
+        after: { Status: result.after },
+        reverse: result.reverse,
+        summary: `${result.task_name ?? result.task_id}: Status ${result.before} → ${result.after} (${input.reason as string})`,
+      });
+    }
+    return JSON.stringify(result);
   },
 });
 

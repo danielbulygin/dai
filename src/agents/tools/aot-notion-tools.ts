@@ -991,3 +991,78 @@ export async function countAotAdSets(params: {
     return JSON.stringify({ error: msg });
   }
 }
+
+// ---------------------------------------------------------------------------
+// Scoped write-back (Phase 5) — single-task status updates, reversible.
+// ---------------------------------------------------------------------------
+
+/**
+ * Statuses Piper is permitted to SET on a task. Deliberately narrow: these are
+ * the terminal/cleanup transitions that are safe and reversible. Re-opening,
+ * reassigning, or changing dates stay out of Piper's hands.
+ */
+export const ALLOWED_TASK_STATUS_WRITES = ['Done', 'Complete', 'Cancelled', 'Archived Task'] as const;
+
+/** Accept a bare 32-hex id, a dashed id, or a notion.so URL. */
+function normalizePageId(idOrUrl: string): string {
+  const m = idOrUrl.match(/([0-9a-f]{32})/i);
+  return m?.[1] ?? idOrUrl.replace(/-/g, '');
+}
+
+export interface UpdateTaskStatusResult {
+  ok: boolean;
+  task_id?: string;
+  task_name?: string;
+  before?: string | null;
+  after?: string;
+  reverse?: { set_task_status: string | null };
+  error?: string;
+}
+
+/**
+ * Set a single AOT task's Status. Returns the before/after and a reverse action
+ * so the caller can log it reversibly to piper_actions. Does NOT log itself —
+ * the registry execute wrapper owns logging (it has ToolContext).
+ */
+export async function updateAotTaskStatus(params: {
+  task_id: string;
+  new_status: string;
+}): Promise<UpdateTaskStatusResult> {
+  const notion = getNotion();
+  const pageId = normalizePageId(params.task_id);
+
+  if (!(ALLOWED_TASK_STATUS_WRITES as readonly string[]).includes(params.new_status)) {
+    return {
+      ok: false,
+      error: `Status "${params.new_status}" is not writable by Piper. Allowed: ${ALLOWED_TASK_STATUS_WRITES.join(', ')}.`,
+    };
+  }
+
+  try {
+    const page = (await notion.pages.retrieve({ page_id: pageId })) as PageObjectResponse;
+    const props = page.properties as Record<string, unknown>;
+    const before = (props['Status'] as { status?: { name: string } } | undefined)?.status?.name ?? null;
+    const nameProp = props['Task name '] as { title?: Array<{ plain_text?: string }> } | undefined;
+    const taskName = (nameProp?.title ?? []).map((t) => t.plain_text ?? '').join('').trim();
+
+    if (before !== params.new_status) {
+      await notion.pages.update({
+        page_id: pageId,
+        properties: { Status: { status: { name: params.new_status } } },
+      });
+    }
+
+    return {
+      ok: true,
+      task_id: pageId,
+      task_name: taskName,
+      before,
+      after: params.new_status,
+      reverse: { set_task_status: before },
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ error: msg, task_id: pageId }, 'updateAotTaskStatus failed');
+    return { ok: false, error: msg };
+  }
+}

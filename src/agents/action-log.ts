@@ -68,6 +68,53 @@ async function writeToolCallRow(input: ToolCallLogInput): Promise<void> {
   if (error) throw new Error(error.message);
 }
 
+export interface WriteLogInput {
+  context: ToolContext;
+  toolName: string;
+  targetSystem: 'notion' | 'meta' | 'slack' | 'frameio' | 'supabase' | 'drive';
+  targetId: string;
+  before: unknown;
+  after: unknown;
+  reverse: unknown;
+  summary: string;
+  status?: 'success' | 'failed' | 'partial';
+}
+
+/**
+ * Log a state-changing write (action_type='write') with the before/after and a
+ * machine-readable reverse_action, so every Piper mutation is auditable AND
+ * undoable. Mirrors the piper-hygiene-sweep pattern. Fire-and-forget.
+ */
+export function logWrite(input: WriteLogInput): void {
+  void writeWriteRow(input).catch((err) => {
+    logger.warn(
+      { toolName: input.toolName, err: (err as Error).message },
+      'piper_actions write-log failed (non-fatal)',
+    );
+  });
+}
+
+async function writeWriteRow(input: WriteLogInput): Promise<void> {
+  const supabase = getDaiSupabase();
+  const { error } = await supabase.from('piper_actions').insert({
+    agent_id: input.context.agentId,
+    session_id: input.context.threadTs ?? null,
+    channel_id: input.context.channelId ?? null,
+    user_id: input.context.userId ?? null,
+    initiator: input.context.userId ?? null,
+    action_type: 'write',
+    tool_name: input.toolName,
+    target_system: input.targetSystem,
+    target_id: input.targetId,
+    before_state: input.before as object,
+    after_state: input.after as object,
+    reverse_action: input.reverse as object,
+    result_summary: input.summary.slice(0, MAX_RESULT_SUMMARY_CHARS),
+    status: input.status ?? 'success',
+  });
+  if (error) throw new Error(error.message);
+}
+
 export interface RecentActionsFilter {
   hoursBack?: number;
   agentId?: string;
