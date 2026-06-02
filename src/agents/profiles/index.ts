@@ -56,6 +56,7 @@ export const toolProfiles = {
     'remember_cadence_target', 'get_cadence_targets', 'inspect_data_quality',
     'get_cadence_read', 'get_cadence_read_all',
     'search_meetings', 'get_meeting_summary', 'get_meeting_transcript', 'list_recent_meetings',
+    'search_slack_messages', 'read_slack_channel',
     'post_message', 'reply_in_thread',
   ],
 } as const;

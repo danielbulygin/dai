@@ -428,3 +428,113 @@ export async function replyInThread(params: {
     return { ok: false };
   }
 }
+
+export interface SlackSearchMatch {
+  channel: string;
+  channel_id: string;
+  user: string;
+  text: string;
+  ts: string;
+  permalink?: string;
+}
+
+/**
+ * Search messages across every channel the user token can see — the broad
+ * "scan the Slack channels" capability Piper needs to detect ad-set deliveries
+ * that were announced in client channels but never reflected in Notion.
+ *
+ * Uses the USER token (search.messages is not available to bot tokens). Supports
+ * Slack search modifiers in the query: `in:#channel`, `from:@user`,
+ * `after:YYYY-MM-DD`, `"exact phrase"`, etc.
+ */
+export async function searchSlackMessages(params: {
+  query: string;
+  count?: number;
+}): Promise<{ ok: boolean; matches?: SlackSearchMatch[]; total?: number; error?: string }> {
+  const userClient = getUserClient();
+  if (!userClient) {
+    logger.error("SLACK_USER_TOKEN not configured — cannot search messages");
+    return { ok: false, error: "SLACK_USER_TOKEN not configured" };
+  }
+
+  try {
+    const result = await userClient.search.messages({
+      query: params.query,
+      count: params.count ?? 20,
+      sort: "timestamp",
+      sort_dir: "desc",
+    });
+
+    const matches: SlackSearchMatch[] = (result.messages?.matches ?? []).map((m) => ({
+      channel: (m.channel as { name?: string } | undefined)?.name ?? "",
+      channel_id: (m.channel as { id?: string } | undefined)?.id ?? "",
+      user: m.username ?? m.user ?? "unknown",
+      text: m.text ?? "",
+      ts: m.ts ?? "",
+      permalink: m.permalink,
+    }));
+
+    return { ok: true, matches, total: result.messages?.total ?? matches.length };
+  } catch (error) {
+    logger.error({ error, query: params.query }, "Failed to search Slack messages");
+    return { ok: false, error: (error as Error).message };
+  }
+}
+
+/**
+ * Read recent messages from a specific channel (by ID, or by #name which we
+ * resolve). Prefers the user token for broad visibility, falls back to the bot
+ * token for channels the bot is a member of.
+ */
+export async function readSlackChannel(params: {
+  channel: string;
+  limit?: number;
+  oldest?: string;
+}): Promise<{ ok: boolean; channel_id?: string; messages?: Array<{ user: string; text: string; ts: string }>; error?: string }> {
+  const userClient = getUserClient();
+  const client = userClient ?? slack;
+
+  try {
+    let channelId = params.channel.trim();
+    // Resolve a #name (or bare name) to a channel ID if needed.
+    if (!/^[CGD][A-Z0-9]{6,}$/.test(channelId)) {
+      const wanted = channelId.replace(/^#/, "").toLowerCase();
+      let cursor: string | undefined;
+      let resolved: string | undefined;
+      do {
+        const list = await client.conversations.list({
+          types: "public_channel,private_channel",
+          limit: 200,
+          cursor,
+          exclude_archived: true,
+        });
+        for (const ch of list.channels ?? []) {
+          if ((ch.name ?? "").toLowerCase() === wanted) {
+            resolved = ch.id;
+            break;
+          }
+        }
+        cursor = resolved ? undefined : list.response_metadata?.next_cursor || undefined;
+      } while (cursor && !resolved);
+      if (!resolved) return { ok: false, error: `Channel not found: ${params.channel}` };
+      channelId = resolved;
+    }
+
+    const result = await client.conversations.history({
+      channel: channelId,
+      limit: params.limit ?? 30,
+      oldest: params.oldest,
+    });
+
+    const messages = (result.messages ?? []).map((m) => ({
+      user: m.user ?? (m as { username?: string }).username ?? "unknown",
+      text: m.text ?? "",
+      ts: m.ts ?? "",
+    }));
+
+    return { ok: true, channel_id: channelId, messages };
+  } catch (error) {
+    logger.error({ error, channel: params.channel }, "Failed to read Slack channel");
+    return { ok: false, error: (error as Error).message };
+  }
+}

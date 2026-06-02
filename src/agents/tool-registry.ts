@@ -809,6 +809,69 @@ register({
 
 register({
   definition: {
+    name: 'search_slack_messages',
+    description:
+      'Search messages across every Slack channel the workspace can see. Use this to find ground-truth events that may never have been logged in Notion — e.g. ad-set deliveries announced in a client channel ("delivered", "sent to client", "we shipped X"), client approvals, or go-live confirmations. Supports Slack search modifiers in the query: in:#channel, from:@user, after:YYYY-MM-DD, "exact phrase". This is how you reconcile "what actually shipped" against the Notion task state.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Search query. May include Slack modifiers, e.g. `Laori delivered after:2026-05-25` or `"sent to client" in:#internal-brainfm`.',
+        },
+        count: {
+          type: 'number',
+          description: 'Max results to return (default 20).',
+        },
+      },
+      required: ['query'],
+    },
+  },
+  async execute(input) {
+    const result = await slackTools.searchSlackMessages({
+      query: input.query as string,
+      count: input.count as number | undefined,
+    });
+    return JSON.stringify(result);
+  },
+});
+
+register({
+  definition: {
+    name: 'read_slack_channel',
+    description:
+      'Read recent messages from a specific Slack channel (by channel ID, or by #name which is resolved). Use after search_slack_messages to get the surrounding context of a delivery/approval message, or to scan a known client channel directly.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        channel: {
+          type: 'string',
+          description: 'Channel ID (e.g. C0B5SA7SZLZ) or #name (e.g. #internal-brainfm).',
+        },
+        limit: {
+          type: 'number',
+          description: 'Number of recent messages to return (default 30).',
+        },
+        oldest: {
+          type: 'string',
+          description: 'Only messages at/after this Slack ts (optional).',
+        },
+      },
+      required: ['channel'],
+    },
+  },
+  async execute(input) {
+    const result = await slackTools.readSlackChannel({
+      channel: input.channel as string,
+      limit: input.limit as number | undefined,
+      oldest: input.oldest as string | undefined,
+    });
+    return JSON.stringify(result);
+  },
+});
+
+register({
+  definition: {
     name: 'send_as_daniel',
     description:
       'Send a Slack message as Daniel (using his user token). This posts from Daniel\'s account, not the bot. IMPORTANT: Only use when Daniel explicitly asks you to send a message on his behalf. Always confirm the exact message content with Daniel before sending.',
