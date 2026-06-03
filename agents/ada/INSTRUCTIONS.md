@@ -123,14 +123,23 @@ Upload ad creatives from Google Drive directly to the Meta Business Media Librar
 When someone shares a Google Drive folder link:
 
 1. **Scan first**: Call `scan_media_library_folder({ drive_url })` to preview files
-2. **Post scan summary** in the thread:
+2. **Scope to the finished ads**: The scan flattens every subfolder into one list (each
+   file carries its `folder_path`). If the response has `final_ads_candidates` — a
+   subfolder like "Final Ads" / "FINALS" that contains media — the shared folder is a
+   raw production folder and the candidate holds the real deliverables. Re-scan using
+   the candidate's `url` and use THAT url for the upload. Do NOT ask which files are
+   the real ads — the subfolder answers it. Say in the thread that you scoped to
+   `<folder_path>` (N files) and ignored the raw material above it. Only ask when there
+   are multiple conflicting candidates or the candidate looks wrong (e.g. empty, or
+   fewer files than the ad set expects).
+3. **Post scan summary** in the thread:
    - How many files found (videos vs images)
    - Which files need renaming (missing ad ID prefix)
    - Detected client and target Business Manager
-3. **Handle unknown client**: If `detected_client` is null, ask which client this is for. Do NOT proceed without a client code.
-4. **Proceed immediately**: Do NOT ask for confirmation. The user wants autonomous execution. Post a brief "Starting rename + upload..." message, then call the upload tool right away.
-5. **Upload**: Call `upload_to_media_library({ drive_url, client_code })` to rename + upload
-6. **Post results** in the thread: per-file status (video_id / image_hash), any errors
+4. **Handle unknown client**: If `detected_client` is null, ask which client this is for. Do NOT proceed without a client code.
+5. **Proceed immediately**: Do NOT ask for confirmation. The user wants autonomous execution. Post a brief "Starting rename + upload..." message, then call the upload tool right away.
+6. **Upload**: Call `upload_to_media_library({ drive_url, client_code })` to rename + upload — pointed at the scoped (final-ads) folder url when one was found, since upload also recurses every subfolder it's given.
+7. **Post results** in the thread: per-file status (video_id / image_hash), any errors
 
 ### File Naming Convention
 
@@ -411,6 +420,15 @@ When a user shares a folder or names a ready task, my workflow is:
    with the resolved `client_code`. This populates the client's Meta Media Library
    AND kicks off background transcript + visual analysis on the droplet (auto-fetch
    on by default).
+
+   **Scope to the finished ads before uploading.** Ad sets often link their raw
+   *production* folder, with the finished cuts in a "Final Ads"-style subfolder. The
+   scan flattens the whole tree (per-file `folder_path`), so raw b-roll and finals
+   arrive in one list — and root + final copies of the same cut look like duplicates.
+   If the scan returns `final_ads_candidates`, re-scan that candidate's `url` and run
+   the upload against it; don't stop to ask which of the flattened files are the real
+   ads. Walk one hop further before asking — only escalate to the user when candidates
+   genuinely conflict.
 
 1a. **Wait for analysis before previewing.** After upload, call `poll_analysis` with
    the uploaded `meta_video_ids` (non-blocking snapshot; pass `timeout_seconds: 120` to
