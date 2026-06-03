@@ -42,8 +42,9 @@ export const MONDAY_PREP_CLIENTS: Array<{ code: string; name: string }> = [
 
 const THREE_DAY_PROMPT = (name: string, code: string) =>
   `Run your standard weekend read for ${name} (client code ${code}): analyze the last 3 days (Friday, Saturday, Sunday) and give highlights and lowlights of the performance, plus anything interesting happening. ` +
-  `This is the Monday-morning draft Nina turns into her client update, so keep it TIGHT and client-translatable: a 2-3 line summary vs the client's target KPI, then 3-4 highlight bullets and 2-3 lowlight bullets, numbers first. ` +
-  `No greetings, no sign-off, no questions back. If the account had no meaningful spend in the window, say so in one line instead of padding.`;
+  `This is the Monday-morning draft Nina turns into her client update, so keep it TIGHT and client-translatable, in EXACTLY this structure (the deliverable must start with the literal line "*Summary*"):\n` +
+  `*Summary*\n2-3 lines vs the client's target KPI.\n*✨ Highlights*\n3-4 bullets, numbers first.\n*📉 Lowlights*\n2-3 bullets, numbers first.\n` +
+  `No greetings, no sign-off, no questions back. If the account had no meaningful spend in the window, say so in the Summary instead of padding.`;
 
 const AGENDA_BLOCK_PROMPT = (name: string, code: string) =>
   `Produce the Tuesday-meeting agenda block for ${name} (client code ${code}): analyze the last 7 days including the funnel, and output EXACTLY this structure (it goes verbatim into the Notion agenda):\n` +
@@ -59,14 +60,19 @@ interface JobResult {
   error?: string;
 }
 
-async function runClientAnalysis(prompt: string, code: string): Promise<string> {
+async function runClientAnalysis(prompt: string, code: string, marker: string): Promise<string> {
   const result = await runAgent({
     agentId: 'ada',
     userMessage: prompt,
     userId: 'system',
     channelId: `internal-monday-prep-${code.toLowerCase()}`,
   });
-  return result.response?.trim() ?? '';
+  const full = result.response?.trim() ?? '';
+  // The runner concatenates EVERY turn's text, so the deliverable is preceded by
+  // working narration ("I'll pull the data...", "Computing..."). Slice from the
+  // last occurrence of the template's opening marker; fall back to the full text.
+  const idx = full.lastIndexOf(marker);
+  return idx > 0 ? full.slice(idx).trim() : full;
 }
 
 /** 08:00 Mon — per-client 3-day drafts into #ada for Nina. `only` filters client codes (testing). */
@@ -79,7 +85,7 @@ export async function runMondayThreeDayDrafts(only?: string[]): Promise<JobResul
 
   for (const c of roster) {
     try {
-      const analysis = await runClientAnalysis(THREE_DAY_PROMPT(c.name, c.code), c.code);
+      const analysis = await runClientAnalysis(THREE_DAY_PROMPT(c.name, c.code), c.code, '*Summary*');
       if (!analysis) throw new Error('empty analysis');
       await client.chat.postMessage({
         channel: ADA_CHANNEL,
@@ -108,7 +114,7 @@ export async function runMondayAgendaBlocks(only?: string[]): Promise<JobResult[
 
   for (const c of roster) {
     try {
-      const block = await runClientAnalysis(AGENDA_BLOCK_PROMPT(c.name, c.code), c.code);
+      const block = await runClientAnalysis(AGENDA_BLOCK_PROMPT(c.name, c.code), c.code, '*Current Performance*');
       if (!block) throw new Error('empty agenda block');
       await client.chat.postMessage({
         channel: AGENT_OFFICE_CHANNEL_ID,
