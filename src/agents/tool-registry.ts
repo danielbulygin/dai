@@ -2319,8 +2319,8 @@ register({
   definition: {
     name: 'update_aot_task_status',
     description:
-      "Set a single AOT task's Status in Notion. SCOPED WRITE — only the terminal/cleanup statuses are allowed: 'Done', 'Complete', 'Cancelled', 'Archived Task'. Every write is logged to piper_actions with a reverse_action so it can be undone. " +
-      'RULES: (1) Only call this when a human in the channel has explicitly asked you to (e.g. "close that task", "mark NPx3647 done", "archive those zombies") — never write speculatively or as part of a digest. (2) State exactly what you are about to change BEFORE calling, and report the before→after + how to undo AFTER. (3) Do not touch tasks on live/On-Hold ad sets unless the user is explicit — On Hold means paused, not dead. Use the task_id (Notion page id) returned by query_aot_tasks.',
+      "Set a single AOT task's Status in Notion. SCOPED WRITE — any real status on the Tasks DB is allowed: 'Not Started', 'Blocked', 'In Progress', 'Done', 'Cancelled', 'Archived Task'. Every write is logged to piper_actions with a reverse_action so it can be undone. " +
+      'RULES: (1) Only call this when a human in the channel has explicitly asked you to (e.g. "close that task", "mark NPx3647 done", "unblock those two and set them In Progress") — never write speculatively or as part of a digest. (2) State exactly what you are about to change BEFORE calling, and report the before→after + how to undo AFTER. (3) Do not touch tasks on live/On-Hold ad sets unless the user is explicit — On Hold means paused, not dead. (4) Re-opening (Done → In Progress etc.) is allowed but deserves extra care: confirm the task really is back in play. Use the task_id (Notion page id) returned by query_aot_tasks.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -2330,7 +2330,7 @@ register({
         },
         new_status: {
           type: 'string',
-          description: "New status. Must be one of: 'Done', 'Complete', 'Cancelled', 'Archived Task'.",
+          description: "New status. Must be one of: 'Not Started', 'Blocked', 'In Progress', 'Done', 'Cancelled', 'Archived Task'.",
         },
         reason: {
           type: 'string',
@@ -2355,6 +2355,52 @@ register({
         after: { Status: result.after },
         reverse: result.reverse,
         summary: `${result.task_name ?? result.task_id}: Status ${result.before} → ${result.after} (${input.reason as string})`,
+      });
+    }
+    return JSON.stringify(result);
+  },
+});
+
+register({
+  definition: {
+    name: 'update_aot_task_due_date',
+    description:
+      "Set a single AOT task's 'Task Due Date' in Notion. SCOPED WRITE — same discipline as update_aot_task_status: every write is logged to piper_actions with a reverse_action so it can be undone. " +
+      'RULES: (1) Only call this when a human in the channel has explicitly asked you to move a date (e.g. "push BFMx3948 to today", "set the due date to Friday") — never write speculatively or as part of a digest. (2) State exactly what you are about to change BEFORE calling, and report the before→after + how to undo AFTER. (3) Date must be YYYY-MM-DD. Use the task_id (Notion page id) returned by query_aot_tasks.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        task_id: {
+          type: 'string',
+          description: 'The task page id (the `task_id` field from query_aot_tasks). A notion.so URL or dashed id also works.',
+        },
+        new_due_date: {
+          type: 'string',
+          description: 'New due date in YYYY-MM-DD format.',
+        },
+        reason: {
+          type: 'string',
+          description: 'Short human-readable reason for the change (logged for audit).',
+        },
+      },
+      required: ['task_id', 'new_due_date', 'reason'],
+    },
+  },
+  async execute(input, context) {
+    const result = await aotNotionTools.updateAotTaskDueDate({
+      task_id: input.task_id as string,
+      new_due_date: input.new_due_date as string,
+    });
+    if (result.ok && result.before !== result.after) {
+      logWrite({
+        context,
+        toolName: 'update_aot_task_due_date',
+        targetSystem: 'notion',
+        targetId: result.task_id ?? (input.task_id as string),
+        before: { 'Task Due Date': result.before },
+        after: { 'Task Due Date': result.after },
+        reverse: result.reverse,
+        summary: `${result.task_name ?? result.task_id}: Task Due Date ${result.before ?? '(none)'} → ${result.after} (${input.reason as string})`,
       });
     }
     return JSON.stringify(result);

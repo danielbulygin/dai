@@ -993,15 +993,24 @@ export async function countAotAdSets(params: {
 }
 
 // ---------------------------------------------------------------------------
-// Scoped write-back (Phase 5) — single-task status updates, reversible.
+// Scoped write-back (Phase 5) — single-task status + due-date updates, reversible.
 // ---------------------------------------------------------------------------
 
 /**
- * Statuses Piper is permitted to SET on a task. Deliberately narrow: these are
- * the terminal/cleanup transitions that are safe and reversible. Re-opening,
- * reassigning, or changing dates stay out of Piper's hands.
+ * Statuses Piper is permitted to SET on a task. Expanded 2026-06-04 (was
+ * terminal-only) to the full set of real options on the Tasks DB Status
+ * property, so Piper can also un-block / re-open on explicit request.
+ * Reassigning stays out of Piper's hands. NOTE: 'Complete' was removed —
+ * it was never a valid option on this DB (Notion rejects unknown status names).
  */
-export const ALLOWED_TASK_STATUS_WRITES = ['Done', 'Complete', 'Cancelled', 'Archived Task'] as const;
+export const ALLOWED_TASK_STATUS_WRITES = [
+  'Not Started',
+  'Blocked',
+  'In Progress',
+  'Done',
+  'Cancelled',
+  'Archived Task',
+] as const;
 
 /** Accept a bare 32-hex id, a dashed id, or a notion.so URL. */
 function normalizePageId(idOrUrl: string): string {
@@ -1063,6 +1072,66 @@ export async function updateAotTaskStatus(params: {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.error({ error: msg, task_id: pageId }, 'updateAotTaskStatus failed');
+    return { ok: false, error: msg };
+  }
+}
+
+export interface UpdateTaskDueDateResult {
+  ok: boolean;
+  task_id?: string;
+  task_name?: string;
+  before?: string | null;
+  after?: string;
+  reverse?: { set_task_due_date: string | null };
+  error?: string;
+}
+
+/**
+ * Set a single AOT task's `Task Due Date`. Same contract as updateAotTaskStatus:
+ * returns before/after and a reverse action; the registry execute wrapper owns
+ * the piper_actions logging. Date must be YYYY-MM-DD (the property is date-only
+ * in practice — no task carries a time component).
+ */
+export async function updateAotTaskDueDate(params: {
+  task_id: string;
+  new_due_date: string;
+}): Promise<UpdateTaskDueDateResult> {
+  const notion = getNotion();
+  const pageId = normalizePageId(params.task_id);
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(params.new_due_date)) {
+    return {
+      ok: false,
+      error: `Due date "${params.new_due_date}" is not valid. Use YYYY-MM-DD.`,
+    };
+  }
+
+  try {
+    const page = (await notion.pages.retrieve({ page_id: pageId })) as PageObjectResponse;
+    const props = page.properties as Record<string, unknown>;
+    const before =
+      (props['Task Due Date'] as { date?: { start: string } | null } | undefined)?.date?.start ?? null;
+    const nameProp = props['Task name '] as { title?: Array<{ plain_text?: string }> } | undefined;
+    const taskName = (nameProp?.title ?? []).map((t) => t.plain_text ?? '').join('').trim();
+
+    if (before !== params.new_due_date) {
+      await notion.pages.update({
+        page_id: pageId,
+        properties: { 'Task Due Date': { date: { start: params.new_due_date } } },
+      });
+    }
+
+    return {
+      ok: true,
+      task_id: pageId,
+      task_name: taskName,
+      before,
+      after: params.new_due_date,
+      reverse: { set_task_due_date: before },
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ error: msg, task_id: pageId }, 'updateAotTaskDueDate failed');
     return { ok: false, error: msg };
   }
 }
