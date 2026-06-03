@@ -14,6 +14,7 @@ import { env } from '../env.js';
 import { logger } from '../utils/logger.js';
 import { queryAotTasks, queryAotAdSets, getClientNameMap } from '../agents/tools/aot-notion-tools.js';
 import { getClientCapabilities } from '../agents/tools/ad-launch-tools.js';
+import { getSupabase } from '../integrations/supabase.js';
 
 const ADA_CHANNEL = (env as Record<string, string | undefined>).ADA_UPLOAD_CHECK_CHANNEL_ID || 'C0AHX94CBF0';
 const NINA_USER_ID = (env as Record<string, string | undefined>).NINA_SLACK_USER_ID || 'U08LEQVHDRU';
@@ -42,6 +43,58 @@ interface Entry {
   url: string | null;
   due: string | null;
   format: string | null;
+}
+
+// Row written by the hourly droplet pre-upload worker (scheduler-ada_preupload,
+// pma/tools/creative-uploader/preupload_worker.py). It pre-warms Media Library
+// upload + AssemblyAI/Gemini analysis for every backlog ad set so the gated
+// launch flow starts hot.
+interface PreuploadStatus {
+  asset_id: string;
+  files_total: number;
+  analysis_complete: boolean;
+  analysis_summary: {
+    videos?: number;
+    images?: number;
+    transcripts_done?: number;
+    visuals_done?: number;
+  } | null;
+  flags: Array<{ type: string; detail?: string; file?: string }>;
+}
+
+async function getPreuploadStatuses(codes: string[]): Promise<Map<string, PreuploadStatus>> {
+  if (codes.length === 0) return new Map();
+  try {
+    const { data, error } = await getSupabase()
+      .from('ada_preupload_status')
+      .select('asset_id, files_total, analysis_complete, analysis_summary, flags')
+      .in('asset_id', codes);
+    if (error) throw error;
+    return new Map(((data ?? []) as PreuploadStatus[]).map((r) => [r.asset_id, r]));
+  } catch (err) {
+    logger.warn({ err }, 'ready-to-upload: pre-upload status fetch failed; omitting badges');
+    return new Map(); // fail-soft: backlog message still posts, just unbadged
+  }
+}
+
+function preuploadBadge(s: PreuploadStatus | undefined): string {
+  if (!s) return '';
+  const flagTypes = [...new Set((s.flags ?? []).map((f) => f.type))];
+  if (flagTypes.length > 0) {
+    return ` — :warning: pre-upload blocked: ${flagTypes.join(', ')}`;
+  }
+  if (s.analysis_complete) {
+    const a = s.analysis_summary ?? {};
+    const parts = [
+      a.videos ? `${a.videos} video${a.videos === 1 ? '' : 's'}` : null,
+      a.images ? `${a.images} static${a.images === 1 ? '' : 's'}` : null,
+    ].filter(Boolean);
+    return ` — :white_check_mark: pre-warmed (${parts.join(' + ') || `${s.files_total} files`} uploaded + analyzed)`;
+  }
+  if (s.files_total > 0) {
+    return ' — :hourglass_flowing_sand: uploaded, analysis running';
+  }
+  return '';
 }
 
 /** Build the grouped backlog message (exported for dry-run + manual-trigger reuse). Null if empty. */
@@ -116,6 +169,13 @@ export async function buildReadyToUploadMessage(
     }),
   );
 
+  // Pre-upload worker state → per-entry badge (✅ pre-warmed / ⏳ analyzing /
+  // ⚠️ blocked). Fail-soft: an empty map just means no badges.
+  const entryCodes = [...byClient.values()].flatMap((g) =>
+    g.entries.map((e) => e.code).filter((c): c is string => !!c),
+  );
+  const preupload = await getPreuploadStatuses([...new Set(entryCodes)]);
+
   const sections: string[] = [];
   for (const client of [...byClient.keys()].sort()) {
     const { code, entries } = byClient.get(client)!;
@@ -131,7 +191,8 @@ export async function buildReadyToUploadMessage(
       const label = e.code ? `${e.title} (${e.code})` : e.title;
       const linked = e.url ? `<${e.url}|${label}>` : label; // Slack mrkdwn hyperlink to the Notion page
       const meta = [e.format, e.due ? `due ${e.due}` : null].filter(Boolean).join(' · ');
-      sections.push(`  • ${linked}${meta ? ` — _${meta}_` : ''}`);
+      const badge = preuploadBadge(e.code ? preupload.get(e.code) : undefined);
+      sections.push(`  • ${linked}${meta ? ` — _${meta}_` : ''}${badge}`);
     }
   }
 
