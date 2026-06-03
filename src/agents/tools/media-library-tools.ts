@@ -156,3 +156,56 @@ export async function uploadToMediaLibrary(params: {
 
   return JSON.stringify(data);
 }
+
+/**
+ * Pre-upload worker state for ad codes (hourly droplet job scheduler-ada_preupload).
+ *
+ * The worker pre-warms Media Library upload + AssemblyAI/Gemini analysis for
+ * every Ready-to-Upload backlog ad set. When `pre_warmed` is true, Ada's gated
+ * launch flow can skip the analysis wait entirely: the upload re-call is a fast
+ * all-skipped_title no-op that returns the cached video ids, and
+ * media_library_assets already holds transcript + visual_summary.
+ */
+export async function checkPreuploadStatus(params: {
+  asset_ids: string[];
+}): Promise<string> {
+  const { getSupabase } = await import("../../integrations/supabase.js");
+  try {
+    const supabase = getSupabase();
+    const { data: statuses, error } = await supabase
+      .from("ada_preupload_status")
+      .select(
+        "asset_id, client_code, folder_url, files_total, uploaded, failed, flags, analysis_complete, analysis_summary, last_run_at, last_uploaded_at",
+      )
+      .in("asset_id", params.asset_ids);
+    if (error) throw error;
+
+    const { data: assets, error: assetsError } = await supabase
+      .from("media_library_assets")
+      .select(
+        "asset_id, normalized_name, media_type, meta_video_id, meta_image_hash, transcript_status, visual_status",
+      )
+      .in("asset_id", params.asset_ids);
+    if (assetsError) throw assetsError;
+
+    const byCode = params.asset_ids.map((code) => {
+      const s = (statuses ?? []).find((r) => r.asset_id === code);
+      const rows = (assets ?? []).filter((r) => r.asset_id === code);
+      return {
+        asset_id: code,
+        seen_by_worker: !!s,
+        pre_warmed: !!s && s.analysis_complete && (s.flags ?? []).length === 0,
+        flags: s?.flags ?? [],
+        folder_url: s?.folder_url ?? null,
+        analysis_summary: s?.analysis_summary ?? null,
+        last_run_at: s?.last_run_at ?? null,
+        media_assets: rows,
+      };
+    });
+    return JSON.stringify({ results: byCode });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ error: msg }, "checkPreuploadStatus failed");
+    return JSON.stringify({ error: `pre-upload status lookup failed: ${msg}` });
+  }
+}

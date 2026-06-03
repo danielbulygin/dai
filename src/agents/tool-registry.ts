@@ -502,6 +502,30 @@ register({
   },
 });
 
+register({
+  definition: {
+    name: 'check_preupload_status',
+    description:
+      'Check whether the hourly background pre-upload worker has already uploaded + analyzed an ad set\'s final ads (Media Library upload, AssemblyAI transcript, Gemini visual analysis all done in the background). Call this FIRST when starting an upload/launch run for an ad code (e.g. "FPLx4099"). If pre_warmed=true: the slow work is done — still run scan + upload (they finish in seconds because every file dedups to skipped_title and returns its cached video_id) but SKIP the poll_analysis wait and go straight to preview. If flags are present (e.g. ss_name_invalid, ambiguous_subfolders, asset_id_conflict), surface them to the user before proceeding — the background worker was blocked for a reason a human needs to resolve. folder_url is the finals folder the worker resolved (useful when the Notion Final Ads Folder property is empty). media_assets lists the cached Meta ids + per-asset analysis state.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        asset_ids: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Ad codes to check, e.g. ["FPLx4099", "LAx3870"]',
+        },
+      },
+      required: ['asset_ids'],
+    },
+  },
+  async execute(input) {
+    return mediaLibraryTools.checkPreuploadStatus({
+      asset_ids: input.asset_ids as string[],
+    });
+  },
+});
+
 // ---------------------------------------------------------------------------
 // Ad Launch tools (Phase 11)
 // ---------------------------------------------------------------------------

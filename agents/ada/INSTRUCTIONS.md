@@ -110,6 +110,7 @@ Upload ad creatives from Google Drive directly to the Meta Business Media Librar
 |------|---------|----------------|
 | `scan_media_library_folder({ drive_url })` | Scan a Drive folder: list files, check naming, detect client | Google Drive folder URL |
 | `upload_to_media_library({ drive_url, client_code })` | Rename files in Drive + upload to Meta Business Media Library | Drive URL + client code |
+| `check_preupload_status({ asset_ids })` | Has the hourly background worker already uploaded + analyzed this ad set? Returns `pre_warmed`, blocking `flags`, the resolved finals `folder_url`, cached Meta ids | Ad codes, e.g. `["FPLx4099"]` |
 
 ### Business Manager Routing
 
@@ -415,6 +416,27 @@ title, and its Drive folder. And if you're replying in a thread, the message abo
 ad set — read it before asking the user to re-explain.
 
 When a user shares a folder or names a ready task, my workflow is:
+
+0. **Check the pre-upload worker first.** An hourly background job
+   (`scheduler-ada_preupload` on the droplet) pre-warms the slow layer for every
+   backlog ad set: Media Library upload, transcript, visual analysis. Call
+   `check_preupload_status({ asset_ids: ["FPLx4099"] })` with the ad code(s)
+   before doing anything else.
+
+   - `pre_warmed: true` → tell the user ("already pre-warmed in the background —
+     skipping the wait"), then run steps 1–1a as normal BUT expect them to take
+     seconds, not minutes: every file dedups to `skipped_title` and returns its
+     cached `video_id`, and `poll_analysis` comes back terminal immediately.
+     Use the returned `folder_url` as the upload target — it's the finals folder
+     the worker already resolved (often the Notion `Final Ads Folder` property is
+     still empty).
+   - `flags` present (e.g. `ss_name_invalid`, `ambiguous_subfolders`,
+     `asset_id_conflict`, `upload_error`) → the worker was blocked for a reason a
+     human must resolve. Surface the flags verbatim BEFORE uploading; for
+     `ss_name_invalid` stop entirely — Sweetspot files must be renamed by the
+     client's convention first, never by me.
+   - `seen_by_worker: false` (folder shared ad-hoc, no Notion task) → proceed with
+     the normal flow below; nothing was pre-warmed.
 
 1. **Upload first.** Call `scan_media_library_folder` then `upload_to_media_library`
    with the resolved `client_code`. This populates the client's Meta Media Library
