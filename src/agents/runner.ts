@@ -17,6 +17,7 @@ import type { Session } from '../memory/sessions.js';
 import type { QuickContext } from '../memory/search.js';
 import type { ChatMessage } from '../memory/messages.js';
 import { buildClientOverlay } from '../client-agents/prompt-builder.js';
+import { buildAgentDirectorySection } from './agent-directory.js';
 import type { ToolProfile } from './profiles/index.js';
 
 let client: Anthropic | null = null;
@@ -520,6 +521,17 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
 
   // Jasmin: inject preference context and fetch more learnings
   const extras = agent.extras ? [...agent.extras] : [];
+
+  // Agent directory + live Slack context — so agents can emit REAL <@U...> mentions
+  // (plain-text "@Ace" triggers nothing — 2026-06-03 demo) and never post to a
+  // placeholder channel ID (Ada tried `slack_post` with a made-up channel that day).
+  extras.push({ name: 'agent-directory', content: buildAgentDirectorySection(agent.config.display_name) });
+  if (channelId && !channelId.startsWith('internal-')) {
+    extras.push({
+      name: 'slack-context',
+      content: `## Live Slack Context\nYou are responding in channel \`${channelId}\`${threadTs ? `, thread \`${threadTs}\`` : ''}. When a tool needs a channel ID for THIS conversation, use these literal values — never invent or guess a channel ID.`,
+    });
+  }
   if (agent.config.id === 'jasmin' && !clientScope) {
     const prefContext = await buildJasminPreferenceContext();
     if (prefContext) {

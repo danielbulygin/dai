@@ -25,6 +25,34 @@ function cronAuthed(c: { req: { header: (k: string) => string | undefined } }): 
  * ?dry_run=1 → generate but don't post; returns the digest text in the response
  * (handy for `curl` testing before the timer goes live).
  */
+/**
+ * POST /api/cron/monday-prep?job=drafts|blocks&only=TL,LA
+ *
+ * Manual trigger for the Monday meeting-prep pipeline (also runs on the in-process
+ * scheduler Mon 08:00/09:30 Berlin — this endpoint exists for testing and re-runs).
+ * `job=drafts` → 3-day Fri–Sun drafts to #ada; `job=blocks` → 7-day agenda blocks
+ * to #agent-office handed to Ace. `only` limits to specific client codes.
+ */
+cronRouter.post('/cron/monday-prep', async (c) => {
+  if (!env.CRON_SECRET) return c.json({ error: 'CRON_SECRET not configured' }, 503);
+  if (!cronAuthed(c)) return c.json({ error: 'Unauthorized' }, 401);
+
+  const job = c.req.query('job');
+  const only = c.req.query('only')?.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
+  if (job !== 'drafts' && job !== 'blocks') {
+    return c.json({ error: 'job must be "drafts" or "blocks"' }, 400);
+  }
+
+  try {
+    const { runMondayThreeDayDrafts, runMondayAgendaBlocks } = await import('../../monitoring/monday-prep.js');
+    const results = job === 'drafts' ? await runMondayThreeDayDrafts(only) : await runMondayAgendaBlocks(only);
+    return c.json({ status: 'done', job, results });
+  } catch (err) {
+    logger.error({ err, job }, 'monday-prep cron failed');
+    return c.json({ error: (err as Error).message }, 500);
+  }
+});
+
 cronRouter.post('/cron/piper-digest', async (c) => {
   if (!env.CRON_SECRET) {
     return c.json({ error: 'CRON_SECRET not configured' }, 503);

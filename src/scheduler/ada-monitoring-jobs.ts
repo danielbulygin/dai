@@ -25,4 +25,17 @@ export function registerAdaMonitoringJobs(): void {
     const { runReadyToUploadCheck } = await import('../monitoring/ready-to-upload-check.js');
     await runReadyToUploadCheck('evening');
   });
+
+  // Monday meeting-prep pipeline (Ada → Ace). 08:00: per-client Fri–Sun
+  // highlights/lowlights drafts in #ada for Nina's client updates. 09:30 (after
+  // Ace's agenda sweep): per-client 7-day agenda blocks in #agent-office, handed
+  // to Ace via real @mention for surgical merge into the Client Meetings pages.
+  registerJob('ada-monday-three-day-drafts', '0 8 * * 1', 'Europe/Berlin', async () => {
+    const { runMondayThreeDayDrafts } = await import('../monitoring/monday-prep.js');
+    await runMondayThreeDayDrafts();
+  });
+  registerJob('ada-monday-agenda-blocks', '30 9 * * 1', 'Europe/Berlin', async () => {
+    const { runMondayAgendaBlocks } = await import('../monitoring/monday-prep.js');
+    await runMondayAgendaBlocks();
+  });
 }

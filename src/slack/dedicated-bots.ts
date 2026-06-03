@@ -16,6 +16,7 @@ import type { RunOptions } from '../agents/runner.js';
 import { getAgent } from '../agents/registry.js';
 import { getClientAgentByChannel } from '../client-agents/config.js';
 import { findThreadOwner } from '../memory/sessions.js';
+import { AGENT_OFFICE_CHANNEL_ID } from '../agents/agent-directory.js';
 import { agentQueue } from '../orchestrator/queue.js';
 import { createStreamResponder } from './stream-responder.js';
 import { registerReactionListener } from './listeners/reactions.js';
@@ -109,10 +110,58 @@ function isFirstDelivery(agentId: string, channel: string, ts: string): boolean 
  * True when a Slack event/message was authored by a bot (any bot, including
  * our own agents). Agents must never auto-trigger on each other's messages —
  * Ada and Piper mention-looped on 2026-06-03 when their intros tagged each
- * other. Deliberate agent-to-agent calls go through ask_agent instead.
+ * other. Deliberate agent-to-agent calls go through ask_agent instead —
+ * EXCEPT in #agent-office, where direct bot @mentions are allowed under a
+ * hop budget (see botMentionAllowed).
  */
 function isBotAuthored(ev: Record<string, unknown>): boolean {
   return Boolean(ev.bot_id || ev.bot_profile || ev.subtype === 'bot_message');
+}
+
+/**
+ * Hop-budgeted bot-to-bot triggering, scoped to #agent-office.
+ *
+ * A bot-authored @mention may trigger an agent ONLY when fewer than
+ * MAX_AGENT_HOPS bot messages have been posted in the thread since the last
+ * human message. The budget resets whenever a human speaks, so the worst case
+ * is a short bounded exchange — recursion is structurally impossible
+ * (the 2026-06-03 Ada↔Piper loop cannot recur).
+ */
+const MAX_AGENT_HOPS = 4;
+
+async function botMentionAllowed(
+  client: WebClient,
+  channel: string,
+  threadTs: string | undefined,
+  triggerTs: string,
+): Promise<boolean> {
+  if (channel !== AGENT_OFFICE_CHANNEL_ID) return false;
+  if (!threadTs) return true; // top-level bot post mentioning the agent: first hop
+  try {
+    const replies = await client.conversations.replies({
+      channel,
+      ts: threadTs,
+      limit: 50,
+    });
+    const messages = (replies.messages ?? []) as Array<Record<string, unknown>>;
+    let botRun = 0;
+    for (const m of messages) {
+      if ((m.ts as string) === triggerTs) continue; // don't count the trigger itself twice
+      if (isBotAuthored(m)) botRun += 1;
+      else botRun = 0; // human message resets the budget
+    }
+    const allowed = botRun < MAX_AGENT_HOPS;
+    if (!allowed) {
+      logger.info(
+        { channel, threadTs, botRun },
+        'Bot-to-bot hop budget exhausted — staying silent until a human speaks',
+      );
+    }
+    return allowed;
+  } catch (err) {
+    logger.warn({ err, channel, threadTs }, 'hop-budget check failed — declining bot mention');
+    return false;
+  }
 }
 
 /** Parse comma-separated user IDs from ADA_DM_ALLOWED_USERS env var */
@@ -179,8 +228,13 @@ function registerDedicatedBotListeners(app: App, agentId: string): void {
     const { text, channel, thread_ts, ts } = event;
     const user = event.user ?? 'unknown';
 
-    // Bot-authored mentions must not trigger agents (Ada↔Piper loop guard).
-    if (isBotAuthored(event as unknown as Record<string, unknown>)) return;
+    // Bot-authored mentions don't trigger agents (Ada↔Piper loop guard) —
+    // except in #agent-office under the hop budget.
+    const botAuthored = isBotAuthored(event as unknown as Record<string, unknown>);
+    if (botAuthored) {
+      const allowed = await botMentionAllowed(client as unknown as WebClient, channel, thread_ts, ts);
+      if (!allowed) return;
+    }
     if (!isFirstDelivery(agentId, channel, ts)) return;
 
     const authResult = await client.auth.test();
@@ -195,7 +249,7 @@ function registerDedicatedBotListeners(app: App, agentId: string): void {
       channel,
       messageTs: ts,
       threadTs: thread_ts,
-      source: 'mention',
+      source: botAuthored ? 'agent-mention' : 'mention',
     });
   });
 
@@ -291,6 +345,40 @@ async function handleDedicatedBotMessage(opts: {
     { channel, user: userId, agentId, source, text, clientScope: clientScope?.clientCode },
     `${displayName} ${source} received`,
   );
+
+  // Agent-to-agent runs (bot-authored mention in #agent-office) post the final
+  // answer as ONE fresh message instead of streaming. Streaming finishes as a
+  // message EDIT (`message_changed`), which other agents' listeners ignore —
+  // the handoff would be invisible to the next agent in the chain (2026-06-03
+  // demo: Ace never saw Ada's finished block). Empty response = post nothing.
+  if (source === 'agent-mention') {
+    try {
+      const result = await agentQueue.enqueue(channel, () =>
+        runAgent({
+          agentId,
+          userMessage: text,
+          userId,
+          channelId: channel,
+          threadTs: threadTs ?? messageTs,
+          clientScope,
+        }),
+      );
+      const finalText = result.response?.trim();
+      if (finalText && !/^NO_?ACTION$/i.test(finalText)) {
+        await client.chat.postMessage({
+          channel,
+          thread_ts: threadTs ?? messageTs,
+          text: finalText,
+        });
+      } else {
+        logger.info({ agentId, channel }, `${displayName} agent-mention run produced no actionable reply — staying silent`);
+      }
+      trackThread(agentId, threadTs ?? messageTs);
+    } catch (err) {
+      logger.error({ err, channel, user: userId, agentId }, `${displayName} agent-mention run failed`);
+    }
+    return;
+  }
 
   const responder = createStreamResponder({
     client,
