@@ -13,6 +13,12 @@ export function registerMentionListener(app: App): void {
     const user = event.user ?? 'unknown';
     const threadTs = thread_ts ?? ts;
 
+    // Bot-authored mentions must not trigger agents — agents tagging each
+    // other mention-loop otherwise (Ada↔Piper, 2026-06-03). Deliberate
+    // agent-to-agent calls go through ask_agent.
+    const ev = event as unknown as Record<string, unknown>;
+    if (ev.bot_id || ev.bot_profile || ev.subtype === 'bot_message') return;
+
     // Get bot user ID for stripping @mention
     const authResult = await client.auth.test();
     const botUserId = authResult.user_id as string;

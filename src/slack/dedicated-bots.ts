@@ -86,6 +86,35 @@ function stripMention(text: string, botUserId: string): string {
   return text.replace(new RegExp(`<@${botUserId}>`, 'g'), '').trim();
 }
 
+// One Slack message can reach an agent through BOTH the app_mention and
+// thread-reply listeners (and Slack occasionally redelivers events), which
+// ran the agent 2-3x per message. Key by agent+channel+ts to run once.
+const seenEvents = new Map<string, number>();
+const SEEN_EVENT_TTL_MS = 10 * 60_000;
+
+function isFirstDelivery(agentId: string, channel: string, ts: string): boolean {
+  const key = `${agentId}:${channel}:${ts}`;
+  const now = Date.now();
+  if (seenEvents.size > 500) {
+    for (const [k, t] of seenEvents) {
+      if (now - t > SEEN_EVENT_TTL_MS) seenEvents.delete(k);
+    }
+  }
+  if (seenEvents.has(key)) return false;
+  seenEvents.set(key, now);
+  return true;
+}
+
+/**
+ * True when a Slack event/message was authored by a bot (any bot, including
+ * our own agents). Agents must never auto-trigger on each other's messages —
+ * Ada and Piper mention-looped on 2026-06-03 when their intros tagged each
+ * other. Deliberate agent-to-agent calls go through ask_agent instead.
+ */
+function isBotAuthored(ev: Record<string, unknown>): boolean {
+  return Boolean(ev.bot_id || ev.bot_profile || ev.subtype === 'bot_message');
+}
+
 /** Parse comma-separated user IDs from ADA_DM_ALLOWED_USERS env var */
 function getAdaDmAllowedUsers(): Set<string> | null {
   const raw = env.ADA_DM_ALLOWED_USERS;
@@ -150,6 +179,10 @@ function registerDedicatedBotListeners(app: App, agentId: string): void {
     const { text, channel, thread_ts, ts } = event;
     const user = event.user ?? 'unknown';
 
+    // Bot-authored mentions must not trigger agents (Ada↔Piper loop guard).
+    if (isBotAuthored(event as unknown as Record<string, unknown>)) return;
+    if (!isFirstDelivery(agentId, channel, ts)) return;
+
     const authResult = await client.auth.test();
     const botUserId = authResult.user_id as string;
     const cleanedText = stripMention(text, botUserId);
@@ -203,6 +236,9 @@ function registerDedicatedBotListeners(app: App, agentId: string): void {
     const messageTs = msg.ts as string | undefined;
 
     if (!userId || !messageTs) return;
+    // A message that @mentions this bot in a tracked thread also fires the
+    // app_mention listener — run the agent once, not twice.
+    if (!isFirstDelivery(agentId, msg.channel as string, messageTs)) return;
 
     await handleDedicatedBotMessage({
       client,
