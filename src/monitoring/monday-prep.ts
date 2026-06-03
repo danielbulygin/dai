@@ -40,11 +40,23 @@ export const MONDAY_PREP_CLIENTS: Array<{ code: string; name: string }> = [
   { code: 'PL', name: 'Press London' },
 ];
 
+/**
+ * Per-client additions appended to BOTH Monday prompts. Keyed by client code.
+ * LA: the client tracks Triple Whale net profit in the weekly report, so every
+ * Monday block must carry it (get_triplewhale_summary, window matched to the read).
+ */
+const CLIENT_PROMPT_EXTRAS: Record<string, string> = {
+  LA:
+    ` Laori also reports blended profitability from Triple Whale: call get_triplewhale_summary with startDate/endDate matching this exact analysis window and add ONE line at the end of the first section: ` +
+    `"Net profit (Triple Whale): €X (prev €Y)" using totalNetProfit current/previous. If net profit is negative or POAS is below 1, append a Lowlight bullet naming the disconnect vs Meta ROAS.`,
+};
+
 const THREE_DAY_PROMPT = (name: string, code: string) =>
   `Run your standard weekend read for ${name} (client code ${code}): analyze the last 3 days (Friday, Saturday, Sunday) and give highlights and lowlights of the performance, plus anything interesting happening. ` +
   `This is the Monday-morning draft Nina turns into her client update, so keep it TIGHT and client-translatable, in EXACTLY this structure (the deliverable must start with the literal line "*Summary*"):\n` +
   `*Summary*\n2-3 lines vs the client's target KPI.\n*✨ Highlights*\n3-4 bullets, numbers first.\n*📉 Lowlights*\n2-3 bullets, numbers first.\n` +
-  `No greetings, no sign-off, no questions back. If the account had no meaningful spend in the window, say so in the Summary instead of padding.`;
+  `No greetings, no sign-off, no questions back. If the account had no meaningful spend in the window, say so in the Summary instead of padding.` +
+  (CLIENT_PROMPT_EXTRAS[code] ?? '');
 
 const AGENDA_BLOCK_PROMPT = (name: string, code: string) =>
   `Produce the Tuesday-meeting agenda block for ${name} (client code ${code}): analyze the last 7 days including the funnel, and output EXACTLY this structure (it goes verbatim into the Notion agenda):\n` +
@@ -52,7 +64,8 @@ const AGENDA_BLOCK_PROMPT = (name: string, code: string) =>
   `*✨ Highlights*\n3-4 campaign-level bullets, numbers first.\n` +
   `*📉 Lowlights*\n2-3 bullets, numbers first.\n` +
   `*Funnel note*\n1 line if anything is leaking; otherwise "No funnel anomalies."\n` +
-  `No greetings, no sign-off, no narrative outside the structure.`;
+  `No greetings, no sign-off, no narrative outside the structure.` +
+  (CLIENT_PROMPT_EXTRAS[code] ?? '');
 
 interface JobResult {
   client: string;

@@ -88,6 +88,19 @@ You have direct access to live client data. USE THESE TOOLS — ground every ana
 | `get_weather_daily({ countryCode?, days?, startDate?, endDate? })` | **Daily weather** — mean/max/min °C, cloud cover %, sunshine hours, precipitation mm, max wind. DE only today (Open-Meteo, pop-weighted top 10 cities). Use for weather-sensitive clients like Laori (non-alcoholic drinks). Pair with daily spend/ROAS from `get_campaign_performance` for correlation analysis. | Defaults: countryCode `DE`, days `90` |
 | `generate_weekly_report({ clientCode })` | Generate full weekly performance report | Client code |
 
+## Triple Whale Blended Profitability
+
+| Tool | Purpose | Key Parameters |
+|------|---------|----------------|
+| `get_triplewhale_summary({ clientCode, days?, startDate?, endDate?, metricIds? })` | **Net Profit, Gross Profit, blended ad spend/ROAS/CPA, POAS, revenue, COGS** from Triple Whale — the blended business-truth layer above Meta ROAS. Mapped clients: **LA (Laori)**, **PL (Press London)**. | Default: last 7 full days ending yesterday. Pass `startDate`/`endDate` for exact windows (e.g. Fri–Sun weekend reads). Each metric returns `current` + `previous` window for free deltas. |
+
+**How to read it:**
+- `totalNetProfit` = Order Revenue − Returns − Expenses (COGS, Shipping, Handling, Payment Gateways, Taxes, Custom Expenses) − Blended Ad Spend. This is bottom-line profit after EVERYTHING the client has configured in TW.
+- `poas` = Gross Profit / Total Ad Spend. POAS < 1 means ad spend exceeds gross profit — the account is buying revenue at a loss even if ROAS looks fine.
+- TW numbers are blended (all channels + Shopify), so they will NOT match Meta-attributed ROAS — that's the point. Use Meta data for in-platform optimization, TW for "is the business actually making money".
+
+**LAORI RULE — always include net profit:** Whenever you discuss, summarize, or report Laori (LA) performance — ad-hoc questions, weekly reports, Monday weekend reads, agenda blocks — pull `get_triplewhale_summary` for the matching window and state **Net Profit (Triple Whale)** alongside ROAS/spend. The client explicitly tracks last-7-days net profit in the weekly report. If net profit is negative or POAS < 1 while Meta ROAS looks healthy, flag the disconnect — it usually means discounting, custom expenses, or COGS are eating the margin.
+
 **CRITICAL — how to use `get_domo_funnel` correctly:**
 - **The same creative lives in multiple campaigns with different ad_ids** (Bid cap, Cost cap, Open CBO, Best Performing). To get the full picture for a creative, you must aggregate across ALL its ad_ids.
 - **Use `adName` to search by creative name** — e.g. `adName: "SENSATION-IMAGE-4x5-ADBNx3431v1"`. This does a case-insensitive partial match on ad_name and finds all instances across campaigns. Do NOT search by ACT code — ACT codes are shared across many different creatives in the same account.

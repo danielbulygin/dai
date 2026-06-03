@@ -17,6 +17,7 @@ import * as creativeTools from './tools/creative-tools.js';
 import * as metaApiTools from './tools/meta-api-tools.js';
 import * as mediaLibraryTools from './tools/media-library-tools.js';
 import * as adLaunchTools from './tools/ad-launch-tools.js';
+import * as triplewhaleTools from './tools/triplewhale-tools.js';
 import * as reportTools from '../reports/index.js';
 import * as methodologySanitizer from '../client-agents/methodology-sanitizer.js';
 import { logger } from '../utils/logger.js';
@@ -1455,6 +1456,54 @@ register({
       creativeId: input.creativeId as string | undefined,
       adId: input.adId as string | undefined,
       onlyFatigued: input.onlyFatigued as boolean | undefined,
+    });
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Triple Whale blended profitability (e-com truth source Meta doesn't have)
+// ---------------------------------------------------------------------------
+
+register({
+  definition: {
+    name: 'get_triplewhale_summary',
+    description:
+      'Get blended profitability metrics from Triple Whale for an e-commerce client: NET PROFIT (totalNetProfit = Order Revenue - Returns - all Expenses - Blended Ad Spend), Gross Profit, Order Revenue, COGS, Custom Expenses, Blended Ad Spend/ROAS/CPA, POAS, per-channel spend (FB/Google). This is the business-truth layer above Meta ROAS — TW blends Shopify orders, all ad channels and the client\'s cost inputs. Currently mapped: LA (Laori), PL (Press London). For Laori, net profit is the number the client reports on weekly — ALWAYS include it when discussing Laori performance. Each metric returns `current` and `previous` (the preceding window of equal length) so period-over-period deltas need no second call. Default window: last 7 full days ending yesterday (today is partial in TW). Pass startDate/endDate for exact windows (e.g. Fri-Sun weekend reads). Pass extra TW metricIds via metricIds if you need something beyond the default profitability set.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        clientCode: {
+          type: 'string',
+          description: 'Client code (e.g. "LA" for Laori, "PL" for Press London)',
+        },
+        days: {
+          type: 'number',
+          description: 'Window length in days, ending yesterday. Default 7. Ignored if startDate/endDate provided.',
+        },
+        startDate: {
+          type: 'string',
+          description: 'Optional ISO date (YYYY-MM-DD) for the start of the window.',
+        },
+        endDate: {
+          type: 'string',
+          description: 'Optional ISO date (YYYY-MM-DD) for the end of the window (inclusive). Defaults to yesterday.',
+        },
+        metricIds: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional additional Triple Whale metricIds to include beyond the default profitability set (e.g. "shopifyAov", "totalRefunds", "tiktok_complete_payment_roas").',
+        },
+      },
+      required: ['clientCode'],
+    },
+  },
+  async execute(input) {
+    return await triplewhaleTools.getTriplewhaleSummary({
+      clientCode: input.clientCode as string,
+      days: input.days as number | undefined,
+      startDate: input.startDate as string | undefined,
+      endDate: input.endDate as string | undefined,
+      metricIds: input.metricIds as string[] | undefined,
     });
   },
 });
@@ -3578,6 +3627,7 @@ const SCOPED_BMAD_TOOLS = new Set([
   'get_ad_summary', 'get_ad_performance', 'get_breakdowns',
   'get_creative_details', 'get_alerts', 'get_learnings',
   'get_domo_funnel',
+  'get_triplewhale_summary',
   'query_meta_insights',
   'query_meta_creatives',
 ]);

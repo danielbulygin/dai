@@ -45,6 +45,7 @@ const envSchema = z.object({
   ADA_DM_ALLOWED_USERS: z.string().optional(),
   STUDIO_API_KEY: z.string().optional(),
   META_ACCESS_TOKEN: z.string().optional(),
+  TRIPLEWHALE_API_KEY: z.string().optional(),
   DROPLET_URL: z.string().default('http://139.59.144.194:8080'),
   DROPLET_API_KEY: z.string().optional(),
   NOTION_WEBHOOK_SECRET: z.string().optional(),
