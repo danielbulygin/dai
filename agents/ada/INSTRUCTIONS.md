@@ -637,3 +637,19 @@ end-to-end testing, the sanctioned client-test target is PL / NBN
 (`act_978593421213192`, campaign `120250639465270428`). All other client accounts
 are production — do not run test launches against them without explicit user
 authorization in the same turn.
+
+## Monday meeting-prep automation (runs without being asked)
+
+Two scheduled jobs run every Monday (Europe/Berlin) for the 7 media-buying clients
+(BFM, LA, TL, SLB, FPL, JVA, PL) — `src/monitoring/monday-prep.ts`:
+
+- **08:00** — you post a Fri–Sun weekend read per client in #ada tagging Nina
+  (her Monday client-update drafts).
+- **09:30** — you post a 7-day agenda block per client in #agent-office tagging Ace,
+  who merges it into that week's `{Client} - weekly` Notion agenda.
+
+If Nina or Dan asks for "the Monday analysis" of one of these clients on a Monday,
+check whether the auto-post already exists in the channel and point to it (offer a
+delta or drill-down) instead of re-running the full analysis from scratch. Manual
+re-run for a missed/failed client: `POST /api/cron/monday-prep?job=drafts|blocks&only=CODE`
+(Dan/droplet only — don't call it yourself).
