@@ -166,7 +166,8 @@ Piper reads Notion (tasks + ad sets), reconciles upload tasks against Meta, iden
 **Key builds:**
 
 - ✅ **First write shipped 2026-06-02 (commit 084a82f):** `update_aot_task_status(task_id, new_status, reason)` — the `status` slice of `update_aot_task`. Whitelist only (Done/Complete/Cancelled/Archived Task). `before_state` + `reverse_action` logged to `piper_actions` via new `logWrite()`. Confirmation discipline lives in INSTRUCTIONS "Scoped write-back" (LLM-side, not a hard gate yet). Also shipped alongside: Slack-read reconciliation (`search_slack_messages`/`read_slack_channel`) so the "what shipped" picture is grounded in Slack, not just Notion.
-- 🔜 Remaining `update_aot_task` fields: `due_date`, `assignee`; `create_aot_task(ad_set_id, name, ...)` (when stage transitions imply downstream work)
+- ✅ **Writes expanded 2026-06-04 (commit c38a728):** status whitelist now ALL six real Status options (Not Started/Blocked/In Progress/Done/Cancelled/Archived Task) — un-block and re-open now possible on explicit request. Dropped `'Complete'`: it was never a valid option on the Tasks DB (Notion rejects unknown status names — the 06-02 whitelist entry was dead). **Second write: `update_aot_task_due_date(task_id, new_due_date, reason)`** — `Task Due Date` (YYYY-MM-DD), same logWrite/reverse pattern. Trigger: Piper couldn't action "Blocked → In Progress + due today" on BFMx3948/49.
+- 🔜 Remaining `update_aot_task` fields: `assignee`; `create_aot_task(ad_set_id, name, ...)` (when stage transitions imply downstream work)
 - 🔜 Confirmation gates by default — every write asks before executing (today it's INSTRUCTIONS-enforced, not a code gate)
 - ✅ `before_state` + `reverse_action` captured to `piper_actions` for every write (wired from Phase 1.5; `logWrite` helper added)
 - 🔜 The upload-reconciliation "stale bucket" becomes one-click close
@@ -232,7 +233,7 @@ Phase 0 ✅ ──→ Phase 1 ──→ Phase 2 ──→ Phase 3 ──→ Phas
 | Phase 2 v2 | — | — | Gated on (a) Vanessa's cadence data landed, AND (b) ~2 wks snapshot history for forecast/stage-lag/drift/capacity/risk |
 | Phase 3 | ✅ | 2026-05-31 | LIVE. Slack app registered (@piper2 / "Piper" in Ads On Tap), #piper (C0B5SA7SZLZ), interactive bot + `/api/cron/piper-digest` running on droplet, `piper-digest.timer` Mon-Fri 09:00 ET. First real digest posted. Always-hyperlink-codes rule shipped. Tasks DB shared with droplet "DAI" integration. Weekly per-client drafts + Block Kit deferred. |
 | Phase 4 | — | — | DM follow-ups |
-| Phase 5 | preview | 2026-05-31 | First reversible Notion write shipped ahead of schedule: `scripts/piper-hygiene-sweep.ts --apply` archived 215 cascade-close tasks (parent Completed/Cancelled/Archived), logged before/after/reverse_action to piper_actions. Not the full phase — a tightly-scoped one-off. Recurring sweep + undo tool still to build. |
+| Phase 5 | 🟡 in progress | 2026-05-31 → | 05-31 preview: hygiene-sweep archived 215 cascade-close tasks (logged + reversible). 06-02: first agent-tool write `update_aot_task_status` (terminal-only). 06-04: status whitelist expanded to all six real statuses (incl. In Progress re-opens; dead 'Complete' entry removed) + second write `update_aot_task_due_date`. Still to build: assignee/create_aot_task, undo_last_action, hard confirmation gate, recurring sweep. |
 | Phase 6 | — | — | Polish + learning |
 
 ---
