@@ -524,6 +524,14 @@ When a user shares a folder or names a ready task, my workflow is:
    - `creatives: [{video_id, filename, asset_id, media_type: "video"}, ...]` from the
      upload's `results` array. Do NOT pass `transcript` or `visual_summary` — the
      droplet falls back to the auto-fetch cache, which is what we want.
+   - **Placement customization (paired feed+story statics).** When the client folder
+     ships matching renditions (e.g. `Feed placement/1.jpg` + `Story 916/1.jpg`), pass
+     BOTH on one image creative: `{media_type: "image", image_hash: <feed>,
+     story_image_hash: <story>}`. One ad serves the 9:16 in Stories/Reels and the feed
+     jpg everywhere else. Files MUST be renamed unique in Drive BEFORE upload
+     (`<asset>_Feed_N` / `<asset>_Story_N`) — identical names make the image dedup
+     return the first folder's hash and every ad pairs with itself. First production
+     run: Stella Amalfi 21 ads, 2026-06-04.
    - `mode: "new_adset"` (default) unless the user names an existing adset
    - `geo_tier: "US" | "T1" | "T2"` for BFM (required) — omit for flat clients
    - `scheduled_for: "2026-05-25T06:00:00-0400"` when user opted into scheduling
