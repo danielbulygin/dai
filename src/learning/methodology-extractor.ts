@@ -15,7 +15,7 @@ import { getDaiSupabase } from "../integrations/dai-supabase.js";
 import { normalizeAccountCode } from "../utils/account-codes.js";
 
 const FILTER_MODEL = "claude-haiku-4-5-20251001";
-const EXTRACTION_MODEL = "claude-opus-4-6";
+const EXTRACTION_MODEL = "claude-opus-4-8";
 const MAX_TRANSCRIPT_CHARS = 80_000;
 
 // ---------------------------------------------------------------------------

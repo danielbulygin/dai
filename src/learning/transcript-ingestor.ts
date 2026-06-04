@@ -9,7 +9,7 @@ import { matchMeetingPattern } from './meeting-patterns.js';
 import { extractMethodologyInsights } from './methodology-extractor.js';
 import { sendInsightsForApproval } from './insight-approval.js';
 
-const EXTRACTION_MODEL = 'claude-sonnet-4-20250514';
+const EXTRACTION_MODEL = 'claude-sonnet-4-6';
 const ADA_AGENT_ID = 'ada';
 
 let client: Anthropic | null = null;

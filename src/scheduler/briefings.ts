@@ -7,7 +7,7 @@ import { getDedicatedBotClient } from '../slack/dedicated-bots.js';
 import { logger } from '../utils/logger.js';
 import { registerJob } from './index.js';
 
-const BRIEFING_MODEL = 'claude-sonnet-4-20250514';
+const BRIEFING_MODEL = 'claude-sonnet-4-6';
 
 let anthropicClient: Anthropic | null = null;
 

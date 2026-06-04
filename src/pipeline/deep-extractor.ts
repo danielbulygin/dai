@@ -17,7 +17,7 @@ import type { MethodologyInsight } from '../learning/methodology-extractor.js';
 import type { MeetingClassification } from './classifier.js';
 import type { UniversalExtraction } from './extractor.js';
 
-const DEEP_MODEL = 'claude-opus-4-6';
+const DEEP_MODEL = 'claude-opus-4-8';
 
 let _client: Anthropic | null = null;
 

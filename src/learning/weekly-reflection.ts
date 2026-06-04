@@ -8,7 +8,7 @@ import { getFeedbackForSession } from '../memory/feedback.js';
 import { postMessage } from '../agents/tools/slack-tools.js';
 import { getDaiSupabase } from '../integrations/dai-supabase.js';
 
-const REFLECTION_MODEL = 'claude-opus-4-6';
+const REFLECTION_MODEL = 'claude-opus-4-8';
 const ADA_AGENT_ID = 'ada';
 
 let client: Anthropic | null = null;

@@ -5,7 +5,7 @@ import type { CondensedReport, ReportResult } from './types.js';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-const REPORT_MODEL = 'claude-opus-4-6';
+const REPORT_MODEL = 'claude-opus-4-8';
 
 let anthropicClient: Anthropic | null = null;
 

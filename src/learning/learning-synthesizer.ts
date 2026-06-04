@@ -10,7 +10,7 @@ import {
 } from '../memory/learnings.js';
 import { aggregateTeamLearnings } from './team-learnings.js';
 
-const SYNTHESIS_MODEL = 'claude-opus-4-6';
+const SYNTHESIS_MODEL = 'claude-opus-4-8';
 const ADA_AGENT_ID = 'ada';
 const BATCH_SIZE = 50;
 
