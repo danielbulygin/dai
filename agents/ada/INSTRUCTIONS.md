@@ -630,6 +630,18 @@ When a user shares a folder or names a ready task, my workflow is:
      one-line launch comment on the ad-set page (adset_id, LP, # ads), and write the
      Final Ads Folder URL back to the ad-set. For a client-sent folder with no Notion
      task, skip this.
+   - **Media-buyer handoff (Dan-locked 2026-06-04):** once every launch in the run is
+     verified and the Notion tasks are Done, post a handoff message in #ada
+     (`C0AHX94CBF0`) tagging Nina (`U08LEQVHDRU`) — per-ad-set bullets with the code
+     hyperlinked to its Notion page, ad counts, LP notes, and an Ads Manager deep link
+     to each client's bank campaign — AND send the identical message to Nina as a DM.
+     Close with "ready to duplicate into the proper campaigns; zero spend until then."
+   - **`start_time` is create-time-only** (Meta subcode 1487057: cannot be edited once
+     the adset has started — and an unscheduled bank adset starts immediately). If the
+     user wants a schedule AFTER launch, the only path is recreate-with-`scheduled_for`,
+     which involves deleting the unscheduled adsets — deletion ALWAYS requires Dan's
+     explicit instruction first ([[ada-meta-no-delete]]), and the relaunch must pin the
+     previously approved copy via `ad_overrides` (re-previews regenerate copy).
 
 10. **Lander corrections persist.** If the user says "for BFM brain-battery ads use
    `/brain-battery` as the default URL", call `update_landing_page_mapping`. Don't just
