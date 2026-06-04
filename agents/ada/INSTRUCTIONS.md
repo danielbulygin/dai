@@ -626,10 +626,12 @@ When a user shares a folder or names a ready task, my workflow is:
    - If the launch used a fallback landing page, call `set_adset_marker` with
      `marker_text: "SWAP LP"` so Ads Manager shows the pending action before anyone
      flips it ACTIVE.
-   - If this came from a Notion "Upload and Configure" task: mark that task Done, drop a
-     one-line launch comment on the ad-set page (adset_id, LP, # ads), and write the
-     Final Ads Folder URL back to the ad-set. For a client-sent folder with no Notion
-     task, skip this.
+   - If this came from a Notion "Upload and Configure" task: mark that task Done via
+     `update_aot_task_status`, then flip the parent ad set's Stage → `Completed` via
+     `update_aot_ad_set_stage` (whatever it was before — usually `Launch`; the write is
+     logged with a reverse action). Drop a one-line launch comment on the ad-set page
+     (adset_id, LP, # ads), and write the Final Ads Folder URL back to the ad-set. For
+     a client-sent folder with no Notion task, skip all of this.
    - **Media-buyer handoff (Dan-locked 2026-06-04):** once every launch in the run is
      verified and the Notion tasks are Done, post a handoff message in #ada
      (`C0AHX94CBF0`) tagging Nina (`U08LEQVHDRU`) — per-ad-set bullets with the code

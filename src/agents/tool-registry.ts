@@ -2320,7 +2320,7 @@ register({
     name: 'update_aot_task_status',
     description:
       "Set a single AOT task's Status in Notion. SCOPED WRITE — any real status on the Tasks DB is allowed: 'Not Started', 'Blocked', 'In Progress', 'Done', 'Cancelled', 'Archived Task'. Every write is logged to piper_actions with a reverse_action so it can be undone. " +
-      'RULES: (1) Only call this when a human in the channel has explicitly asked you to (e.g. "close that task", "mark NPx3647 done", "unblock those two and set them In Progress") — never write speculatively or as part of a digest. (2) State exactly what you are about to change BEFORE calling, and report the before→after + how to undo AFTER. (3) Do not touch tasks on live/On-Hold ad sets unless the user is explicit — On Hold means paused, not dead. (4) Re-opening (Done → In Progress etc.) is allowed but deserves extra care: confirm the task really is back in play. Use the task_id (Notion page id) returned by query_aot_tasks.',
+      'RULES: (1) Only call this when a human in the channel has explicitly asked you to (e.g. "close that task", "mark NPx3647 done", "unblock those two and set them In Progress") — never write speculatively or as part of a digest. ONE exception: at Gate 4 of the launch flow, after a verified launch, marking the "Upload and Configure" task Done is part of the standard post-launch follow-ups (the Gate-3/4 human confirmation covers it). (2) State exactly what you are about to change BEFORE calling, and report the before→after + how to undo AFTER. (3) Do not touch tasks on live/On-Hold ad sets unless the user is explicit — On Hold means paused, not dead. (4) Re-opening (Done → In Progress etc.) is allowed but deserves extra care: confirm the task really is back in play. Use the task_id (Notion page id) returned by query_aot_tasks.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -2401,6 +2401,52 @@ register({
         after: { 'Task Due Date': result.after },
         reverse: result.reverse,
         summary: `${result.task_name ?? result.task_id}: Task Due Date ${result.before ?? '(none)'} → ${result.after} (${input.reason as string})`,
+      });
+    }
+    return JSON.stringify(result);
+  },
+});
+
+register({
+  definition: {
+    name: 'update_aot_ad_set_stage',
+    description:
+      "Set an AOT ad set's 'Stage' in Notion (the Ad Sets DB status property). SCOPED WRITE — every write is logged to piper_actions with a reverse_action so it can be undone. Allowed stages: 'Concept', 'Production', 'Revision', 'Launch', 'Completed', 'On Hold', 'Cancelled', 'Archived'. " +
+      'RULES: (1) The ONE sanctioned automatic use: at Gate 4 of the launch flow, after a launch is verified and the "Upload and Configure" task is marked Done, flip the parent ad set to \'Completed\' — this is part of the standard post-launch follow-ups, no extra human ask needed beyond the Gate-4 confirmation. (2) Any OTHER stage change requires an explicit human request in the channel — never write speculatively. (3) State what you are changing BEFORE calling, and report before→after + how to undo AFTER. (4) \'On Hold\' means paused, not dead — never move an On-Hold ad set without an explicit ask. Use the ad_set_id (Notion page id) returned by query_aot_adsets.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        ad_set_id: {
+          type: 'string',
+          description: 'The ad-set page id (the `ad_set_id` field from query_aot_adsets). A notion.so URL or dashed id also works.',
+        },
+        new_stage: {
+          type: 'string',
+          description: "New stage. Must be one of: 'Concept', 'Production', 'Revision', 'Launch', 'Completed', 'On Hold', 'Cancelled', 'Archived'.",
+        },
+        reason: {
+          type: 'string',
+          description: 'Short human-readable reason for the change (logged for audit), e.g. "launched + verified, batch <id>".',
+        },
+      },
+      required: ['ad_set_id', 'new_stage', 'reason'],
+    },
+  },
+  async execute(input, context) {
+    const result = await aotNotionTools.updateAotAdSetStage({
+      ad_set_id: input.ad_set_id as string,
+      new_stage: input.new_stage as string,
+    });
+    if (result.ok && result.before !== result.after) {
+      logWrite({
+        context,
+        toolName: 'update_aot_ad_set_stage',
+        targetSystem: 'notion',
+        targetId: result.ad_set_id ?? (input.ad_set_id as string),
+        before: { Stage: result.before },
+        after: { Stage: result.after },
+        reverse: result.reverse,
+        summary: `${result.ad_id_code ?? result.ad_title ?? result.ad_set_id}: Stage ${result.before} → ${result.after} (${input.reason as string})`,
       });
     }
     return JSON.stringify(result);

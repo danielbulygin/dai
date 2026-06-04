@@ -1135,3 +1135,84 @@ export async function updateAotTaskDueDate(params: {
     return { ok: false, error: msg };
   }
 }
+
+/**
+ * Stages writable on the Ad Sets DB `Stage` status property. The full set of
+ * real options (To-do: Concept; In progress: Production, Revision, Launch;
+ * Complete: Completed, On Hold, Cancelled, Archived) — all included so a
+ * reverse action can always restore the before-value, same rationale as
+ * ALLOWED_TASK_STATUS_WRITES. The tool description gates when writes happen.
+ */
+export const ALLOWED_AD_SET_STAGE_WRITES = [
+  'Concept',
+  'Production',
+  'Revision',
+  'Launch',
+  'Completed',
+  'On Hold',
+  'Cancelled',
+  'Archived',
+] as const;
+
+export interface UpdateAdSetStageResult {
+  ok: boolean;
+  ad_set_id?: string;
+  ad_title?: string;
+  ad_id_code?: string | null;
+  before?: string | null;
+  after?: string;
+  reverse?: { set_ad_set_stage: string | null };
+  error?: string;
+}
+
+/**
+ * Set a single AOT ad set's `Stage`. Same contract as updateAotTaskStatus:
+ * returns before/after and a reverse action; the registry execute wrapper owns
+ * the piper_actions logging. Primary use: Ada flipping an ad set to
+ * 'Completed' at Gate 4 after a verified launch.
+ */
+export async function updateAotAdSetStage(params: {
+  ad_set_id: string;
+  new_stage: string;
+}): Promise<UpdateAdSetStageResult> {
+  const notion = getNotion();
+  const pageId = normalizePageId(params.ad_set_id);
+
+  if (!(ALLOWED_AD_SET_STAGE_WRITES as readonly string[]).includes(params.new_stage)) {
+    return {
+      ok: false,
+      error: `Stage "${params.new_stage}" is not a real option on the Ad Sets DB. Allowed: ${ALLOWED_AD_SET_STAGE_WRITES.join(', ')}.`,
+    };
+  }
+
+  try {
+    const page = (await notion.pages.retrieve({ page_id: pageId })) as PageObjectResponse;
+    const props = page.properties as Record<string, unknown>;
+    const before = (props['Stage'] as { status?: { name: string } } | undefined)?.status?.name ?? null;
+    const titleProp = props['Ad Title'] as { title?: Array<{ plain_text?: string }> } | undefined;
+    const adTitle = (titleProp?.title ?? []).map((t) => t.plain_text ?? '').join('').trim();
+    const adIdCode =
+      (props['Ad ID'] as { formula?: { type: string; string?: string } } | undefined)?.formula?.string ?? null;
+
+    if (before !== params.new_stage) {
+      await notion.pages.update({
+        page_id: pageId,
+        properties: { Stage: { status: { name: params.new_stage } } },
+      });
+    }
+
+    return {
+      ok: true,
+      ad_set_id: pageId,
+      ad_title: adTitle,
+      ad_id_code: adIdCode,
+      before,
+      after: params.new_stage,
+      reverse: { set_ad_set_stage: before },
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ error: msg, ad_set_id: pageId }, 'updateAotAdSetStage failed');
+    return { ok: false, error: msg };
+  }
+}
