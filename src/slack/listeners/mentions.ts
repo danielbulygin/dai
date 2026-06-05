@@ -6,6 +6,7 @@ import { getAgent, getDefaultAgent } from '../../agents/registry.js';
 import { agentQueue } from '../../orchestrator/queue.js';
 import { createStreamResponder } from '../stream-responder.js';
 import { findThreadOwner } from '../../memory/sessions.js';
+import { tryDeterministicLaunchApproval } from '../launch-approval.js';
 
 export function registerMentionListener(app: App): void {
   app.event('app_mention', async ({ event, client }) => {
@@ -47,6 +48,25 @@ export function registerMentionListener(app: App): void {
       { channel, user, agentId, text: route.cleanedText },
       'Received app_mention',
     );
+
+    // Deterministic launch-approval routing — see slack/launch-approval.ts and
+    // the matching block in messages.ts (2026-06-05 incident hardening).
+    if (thread_ts) {
+      const handled = await tryDeterministicLaunchApproval({
+        text: route.cleanedText,
+        channelId: channel,
+        threadTs,
+        agentId,
+        userId: user,
+        postReply: async (replyText) => {
+          await client.chat.postMessage({ channel, thread_ts: threadTs, text: replyText });
+        },
+      }).catch((err) => {
+        logger.error({ err }, 'Deterministic launch approval failed — falling back to agent');
+        return false;
+      });
+      if (handled) return;
+    }
 
     // Set up the streaming responder
     const responder = createStreamResponder({

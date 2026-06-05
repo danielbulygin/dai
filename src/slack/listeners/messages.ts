@@ -8,6 +8,7 @@ import { createStreamResponder } from '../stream-responder.js';
 import { findThreadOwner } from '../../memory/sessions.js';
 import { isInsightThread } from '../../learning/insight-approval.js';
 import { transcribeAudioFiles } from '../voice.js';
+import { tryDeterministicLaunchApproval } from '../launch-approval.js';
 
 export function registerMessageListener(app: App): void {
   app.message(async ({ message, client }) => {
@@ -73,6 +74,31 @@ export function registerMessageListener(app: App): void {
       { channel: msg.channel as string, user: userId, agentId, channelType, text: cleanedText },
       channelType === 'im' ? 'Received DM' : 'Received channel message',
     );
+
+    // Deterministic launch-approval routing: a typed approval in a thread with
+    // pending launch batches executes launchAds directly (same path as the
+    // [Launch] button) — the model never gets a chance to fabricate the result.
+    // See slack/launch-approval.ts + the 2026-06-05 incident.
+    if (threadTs) {
+      const handled = await tryDeterministicLaunchApproval({
+        text: cleanedText,
+        channelId: msg.channel as string,
+        threadTs,
+        agentId,
+        userId,
+        postReply: async (replyText) => {
+          await client.chat.postMessage({
+            channel: msg.channel as string,
+            thread_ts: threadTs,
+            text: replyText,
+          });
+        },
+      }).catch((err) => {
+        logger.error({ err }, 'Deterministic launch approval failed — falling back to agent');
+        return false;
+      });
+      if (handled) return;
+    }
 
     // Set up the streaming responder
     const responder = createStreamResponder({
