@@ -13,3 +13,10 @@ export {
   type SecurityCheckResult,
   checkToolSafety,
 } from "./security.js";
+
+export {
+  type ExecutedToolCall,
+  type LaunchClaimGuardResult,
+  detectLaunchClaim,
+  runLaunchClaimGuard,
+} from "./launch-claim-guard.js";

@@ -19,6 +19,8 @@ import type { ChatMessage } from '../memory/messages.js';
 import { buildClientOverlay } from '../client-agents/prompt-builder.js';
 import { buildAgentDirectorySection } from './agent-directory.js';
 import type { ToolProfile } from './profiles/index.js';
+import { runLaunchClaimGuard } from './hooks/launch-claim-guard.js';
+import type { ExecutedToolCall } from './hooks/launch-claim-guard.js';
 
 let client: Anthropic | null = null;
 
@@ -269,8 +271,11 @@ async function runWithTools(
   onText?: (text: string) => void,
   onTurnReset?: () => void,
   onToolUse?: (toolName: string) => void,
-): Promise<{ responseText: string; turns: number; usage: TokenUsage }> {
+): Promise<{ responseText: string; turns: number; usage: TokenUsage; executedTools: ExecutedToolCall[] }> {
   const messages: Anthropic.MessageParam[] = [...initialMessages];
+  // Every tool call executed this run, for post-response claim guards
+  // (launch-claim-guard cross-checks "launched ✅" replies against these).
+  const executedTools: ExecutedToolCall[] = [];
   let totalInput = 0;
   let totalOutput = 0;
   let totalCacheRead = 0;
@@ -369,6 +374,7 @@ async function runWithTools(
         responseText: fullResponseText.trim() || turnText,
         turns: turn + 1,
         usage: { input: totalInput, output: totalOutput, cacheRead: totalCacheRead, cacheCreation: totalCacheCreation },
+        executedTools,
       };
     }
 
@@ -396,6 +402,7 @@ async function runWithTools(
           block.input as Record<string, unknown>,
           toolContext,
         );
+        executedTools.push({ name: block.name, isError });
 
         // Dynamic truncation: per-tool limit shrinks as context fills
         const perToolLimit = getToolResultLimit();
@@ -465,6 +472,7 @@ async function runWithTools(
     responseText: fullResponseText.trim() || lastTurnText || 'I ran out of processing turns. Please try a more specific question.',
     turns: maxTurns,
     usage: { input: totalInput, output: totalOutput, cacheRead: totalCacheRead, cacheCreation: totalCacheCreation },
+    executedTools,
   };
 }
 
@@ -638,7 +646,7 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
 
   try {
 
-    let result: { responseText: string; turns: number; usage: TokenUsage };
+    let result: { responseText: string; turns: number; usage: TokenUsage; executedTools?: ExecutedToolCall[] };
 
     if (toolDefs.length === 0) {
       // No tools registered for this profile — use simple streaming path
@@ -674,6 +682,24 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
         onTurnReset,
         options.onToolUse,
       );
+    }
+
+    // Post-response QC: a reply that CLAIMS a completed launch must be backed by a
+    // real launch/verify tool call (or a recently-launched batch in the DB). Appends
+    // a loud UNCONFIRMED banner otherwise — see hooks/launch-claim-guard.ts and the
+    // 2026-06-05 Sweetspot fabricated-launch incident.
+    try {
+      const guard = await runLaunchClaimGuard({
+        responseText: result.responseText,
+        executedTools: result.executedTools ?? [],
+        agentId: effectiveAgentId,
+        sessionId: session.id,
+      });
+      if (guard.flagged && guard.warning) {
+        result.responseText += guard.warning;
+      }
+    } catch (guardErr) {
+      logger.warn({ err: guardErr }, 'launch-claim-guard failed (continuing without it)');
     }
 
     // Persist the user message and assistant response (text only)
