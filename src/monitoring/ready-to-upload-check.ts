@@ -15,10 +15,11 @@ import { logger } from '../utils/logger.js';
 import { queryAotTasks, queryAotAdSets, getClientNameMap } from '../agents/tools/aot-notion-tools.js';
 import { getClientCapabilities } from '../agents/tools/ad-launch-tools.js';
 import { getSupabase } from '../integrations/supabase.js';
+import { getStalePendingBatches, formatStaleBatchSection } from '../agents/launch-state.js';
 
-const ADA_CHANNEL = (env as Record<string, string | undefined>).ADA_UPLOAD_CHECK_CHANNEL_ID || 'C0AHX94CBF0';
-const NINA_USER_ID = (env as Record<string, string | undefined>).NINA_SLACK_USER_ID || 'U08LEQVHDRU';
-const DAN_USER_ID = (env as Record<string, string | undefined>).SLACK_OWNER_USER_ID || 'U084AS8QRA7';
+const ADA_CHANNEL = (env as unknown as Record<string, string | undefined>).ADA_UPLOAD_CHECK_CHANNEL_ID || 'C0AHX94CBF0';
+const NINA_USER_ID = (env as unknown as Record<string, string | undefined>).NINA_SLACK_USER_ID || 'U08LEQVHDRU';
+const DAN_USER_ID = (env as unknown as Record<string, string | undefined>).SLACK_OWNER_USER_ID || 'U084AS8QRA7';
 
 interface AotTask {
   task_id: string;
@@ -207,20 +208,34 @@ export async function buildReadyToUploadMessage(
 }
 
 export async function runReadyToUploadCheck(trigger: 'morning' | 'evening'): Promise<void> {
-  let built: { message: string; count: number } | null;
+  let built: { message: string; count: number } | null = null;
   try {
     built = await buildReadyToUploadMessage(trigger);
   } catch (err) {
     logger.error({ err, trigger }, 'ready-to-upload check: query failed');
-    return;
+    // fall through — the stale-pending backstop below should still post
   }
-  if (!built) {
+
+  // Stale-pending launch batches (fail-soft, posts even when the upload backlog is empty)
+  let staleSection: string | null = null;
+  try {
+    staleSection = formatStaleBatchSection(await getStalePendingBatches(), Date.now());
+  } catch (err) {
+    logger.warn({ err }, 'ready-to-upload check: stale-pending sweep failed');
+  }
+
+  if (!built && !staleSection) {
     logger.info({ trigger }, 'ready-to-upload check: backlog empty — not posting');
     return;
   }
+
+  const text = [built?.message, staleSection].filter(Boolean).join('\n\n');
   try {
-    await getDedicatedBotClient('ada').chat.postMessage({ channel: ADA_CHANNEL, text: built.message });
-    logger.info({ trigger, count: built.count }, 'ready-to-upload check posted to #ada');
+    await getDedicatedBotClient('ada').chat.postMessage({ channel: ADA_CHANNEL, text });
+    logger.info(
+      { trigger, count: built?.count ?? 0, staleBatches: staleSection ? true : false },
+      'ready-to-upload check posted to #ada',
+    );
   } catch (err) {
     logger.error({ err, channel: ADA_CHANNEL }, 'ready-to-upload check: Slack post failed');
   }

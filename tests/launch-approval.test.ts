@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { matchApproval } from '../src/slack/launch-approval.js';
-import { extractBatchIds, buildLaunchStateSection, type BatchState } from '../src/agents/launch-state.js';
+import { extractBatchIds, buildLaunchStateSection, formatStaleBatchSection, type BatchState } from '../src/agents/launch-state.js';
 
 describe('launch-approval matcher', () => {
   describe('approves unambiguous launch commands', () => {
@@ -104,5 +104,32 @@ describe('launch-state prompt section', () => {
     expect(section).toContain('`0ee234fc-4171-4b36-a5b3-203a5dcd5abf` (SS, new_adset): **pending**');
     expect(section).toContain('**launched** — adset `120245854481540241`, 6 ads, launched_at 2026-06-05T14:50:00Z');
     expect(section).toContain('it has NOT been launched');
+  });
+});
+
+describe('stale-pending digest section', () => {
+  const base = {
+    client_code: 'SS',
+    status: 'pending',
+    mode: 'new_adset',
+    adset_id: null,
+    ad_ids: [],
+    launched_at: null,
+  };
+  it('renders age and batch prefixes', () => {
+    const now = new Date('2026-06-06T14:00:00Z').getTime();
+    const section = formatStaleBatchSection(
+      [
+        { ...base, batch_id: '0ee234fc-4171-4b36-a5b3-203a5dcd5abf', created_at: '2026-06-05T14:00:00Z' },
+        { ...base, batch_id: '4adea00c-9947-4aed-ac9f-5ff91eda9f7e', created_at: '2026-06-04T14:00:00Z' },
+      ],
+      now,
+    );
+    expect(section).toContain('2 launch previews stuck in `pending` >24h');
+    expect(section).toContain('`0ee234fc` (SS, new_adset) — previewed 24h ago, never launched');
+    expect(section).toContain('`4adea00c` (SS, new_adset) — previewed 48h ago, never launched');
+  });
+  it('returns null when nothing is stale', () => {
+    expect(formatStaleBatchSection([], Date.now())).toBeNull();
   });
 });

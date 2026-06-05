@@ -87,6 +87,65 @@ export function buildLaunchStateSection(states: BatchState[]): string {
   ].join("\n");
 }
 
+/**
+ * Batches stuck in `pending` — previewed but never launched. The backstop for
+ * approved-then-dropped launches (2026-06-05: two SS batches sat pending while
+ * the conversation said "launched"). Window-bounded: ignores ancient previews
+ * (cancelled previews also stay `pending` by design — see launch-actions.ts).
+ */
+export async function getStalePendingBatches(opts?: {
+  olderThanHours?: number;
+  withinDays?: number;
+}): Promise<BatchState[]> {
+  const olderThanHours = opts?.olderThanHours ?? 24;
+  const withinDays = opts?.withinDays ?? 7;
+  try {
+    const now = Date.now();
+    const newerThan = new Date(now - withinDays * 24 * 3600_000).toISOString();
+    const olderThan = new Date(now - olderThanHours * 3600_000).toISOString();
+    const { data, error } = await getSupabase()
+      .from("launch_batches")
+      .select("batch_id,client_code,status,mode,adset_id,ad_ids,created_at,launched_at")
+      .eq("status", "pending")
+      // AOT = the half-hourly health check; it creates a never-launched preview
+      // every 30 min by design (~300 rows/week of pure noise). Caught in the
+      // 2026-06-05 dry-run QC of this sweep.
+      .neq("client_code", "AOT")
+      .gte("created_at", newerThan)
+      .lte("created_at", olderThan)
+      .order("created_at", { ascending: true });
+    if (error) {
+      logger.warn({ error }, "launch-state: stale-pending query errored");
+      return [];
+    }
+    return (data ?? []) as BatchState[];
+  } catch (err) {
+    logger.warn({ err }, "launch-state: stale-pending query failed");
+    return [];
+  }
+}
+
+/**
+ * Render the stale-pending digest section. Pure — used by the twice-daily
+ * Ready-to-Upload check; lives here (not in monitoring/) so tests can import
+ * it without dragging in the env-validated Slack stack.
+ */
+export function formatStaleBatchSection(stale: BatchState[], nowMs: number): string | null {
+  if (stale.length === 0) return null;
+  const MAX_SHOWN = 10;
+  const lines = stale.slice(0, MAX_SHOWN).map((b) => {
+    const ageH = Math.round((nowMs - new Date(b.created_at).getTime()) / 3600_000);
+    return `  • \`${b.batch_id.slice(0, 8)}\` (${b.client_code}, ${b.mode}) — previewed ${ageH}h ago, never launched`;
+  });
+  if (stale.length > MAX_SHOWN) {
+    lines.push(`  • _…and ${stale.length - MAX_SHOWN} more_`);
+  }
+  return (
+    `:hourglass_flowing_sand: *${stale.length} launch preview${stale.length === 1 ? "" : "s"} stuck in \`pending\` >24h* — ` +
+    `previewed but never executed. Launch, or ignore if deliberately cancelled:\n${lines.join("\n")}`
+  );
+}
+
 /** Convenience: batches from the texts that are still pending, in mention order. */
 export async function getPendingBatchesFromTexts(texts: string[]): Promise<BatchState[]> {
   const ids = extractBatchIds(texts);
