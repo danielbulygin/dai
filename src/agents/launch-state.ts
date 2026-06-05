@@ -61,6 +61,32 @@ export async function getBatchStates(batchIds: string[]): Promise<BatchState[]> 
   }
 }
 
+/**
+ * Render a system-prompt section with the LIVE DB state of the given batches.
+ * Injected into launch threads so the model always has ground truth — even when
+ * session context was truncated (the 2026-06-05 fabrication happened on a turn
+ * with ~7.6K chars of history and no real state to consult).
+ */
+export function buildLaunchStateSection(states: BatchState[]): string {
+  const lines = states.map((s) => {
+    const extra = [
+      s.adset_id ? `adset \`${s.adset_id}\`` : null,
+      s.ad_ids && s.ad_ids.length > 0 ? `${s.ad_ids.length} ads` : null,
+      s.launched_at ? `launched_at ${s.launched_at}` : null,
+    ].filter(Boolean).join(", ");
+    return `- \`${s.batch_id}\` (${s.client_code}, ${s.mode}): **${s.status}**${extra ? ` — ${extra}` : ""}`;
+  });
+  return [
+    "## Launch batches in this thread — LIVE DATABASE STATE (authoritative)",
+    ...lines,
+    "",
+    "This is the ground truth as of right now, read directly from `launch_batches`.",
+    "If a batch shows **pending**, it has NOT been launched — no matter what the",
+    "conversation above suggests. Never report a launch as done unless the batch is",
+    "**launched** here or you have a `launch_ads` tool result from THIS turn.",
+  ].join("\n");
+}
+
 /** Convenience: batches from the texts that are still pending, in mention order. */
 export async function getPendingBatchesFromTexts(texts: string[]): Promise<BatchState[]> {
   const ids = extractBatchIds(texts);

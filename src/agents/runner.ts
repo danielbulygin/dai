@@ -21,6 +21,7 @@ import { buildAgentDirectorySection } from './agent-directory.js';
 import type { ToolProfile } from './profiles/index.js';
 import { runLaunchClaimGuard } from './hooks/launch-claim-guard.js';
 import type { ExecutedToolCall } from './hooks/launch-claim-guard.js';
+import { extractBatchIds, getBatchStates, buildLaunchStateSection } from './launch-state.js';
 
 let client: Anthropic | null = null;
 
@@ -567,6 +568,35 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
     });
   }
 
+  // Load prior conversation history from this session (last 20 messages).
+  // Loaded BEFORE the system prompt is built so launch-state injection below
+  // can scan it for batch references.
+  const priorMessages = await getMessages(session.id, 20);
+
+  // Launch-state ground truth: if this thread references launch batches, inject
+  // their LIVE launch_batches status into the system prompt. Even a context-
+  // starved turn then knows what is pending vs launched — the model can no
+  // longer pattern-complete a launch from stale conversation text. See
+  // launch-state.ts and the 2026-06-05 fabricated-launch incident.
+  try {
+    const batchIds = extractBatchIds([
+      ...priorMessages.map((m: ChatMessage) => m.content),
+      userMessage,
+    ]);
+    if (batchIds.length > 0) {
+      const states = await getBatchStates(batchIds);
+      if (states.length > 0) {
+        extras.push({ name: 'launch-state', content: buildLaunchStateSection(states) });
+        logger.info(
+          { sessionId: session.id, batches: states.map((s) => `${s.batch_id.slice(0, 8)}:${s.status}`) },
+          'Injected launch-state ground truth into prompt',
+        );
+      }
+    }
+  } catch (err) {
+    logger.warn({ err }, 'launch-state injection failed (continuing without it)');
+  }
+
   const systemPrompt = buildSystemPrompt(
     agent.persona,
     agent.instructions,
@@ -581,9 +611,6 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
       logger.warn({ err }, 'Failed to increment applied_count for learnings'),
     );
   }
-
-  // Load prior conversation history from this session (last 20 messages)
-  const priorMessages = await getMessages(session.id, 20);
   const conversationMessages: Anthropic.MessageParam[] =
     priorMessages.map((msg: ChatMessage) => ({
       role: msg.role as 'user' | 'assistant',

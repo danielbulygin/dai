@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { matchApproval } from '../src/slack/launch-approval.js';
-import { extractBatchIds } from '../src/agents/launch-state.js';
+import { extractBatchIds, buildLaunchStateSection, type BatchState } from '../src/agents/launch-state.js';
 
 describe('launch-approval matcher', () => {
   describe('approves unambiguous launch commands', () => {
@@ -72,5 +72,37 @@ describe('launch-state batch extraction', () => {
 
   it('returns empty for text without UUIDs', () => {
     expect(extractBatchIds(['launch both', 'no ids here'])).toEqual([]);
+  });
+});
+
+describe('launch-state prompt section', () => {
+  it('renders pending and launched batches with the authoritative warning', () => {
+    const states: BatchState[] = [
+      {
+        batch_id: '0ee234fc-4171-4b36-a5b3-203a5dcd5abf',
+        client_code: 'SS',
+        status: 'pending',
+        mode: 'new_adset',
+        adset_id: null,
+        ad_ids: [],
+        created_at: '2026-06-05T14:09:00Z',
+        launched_at: null,
+      },
+      {
+        batch_id: '4adea00c-9947-4aed-ac9f-5ff91eda9f7e',
+        client_code: 'SS',
+        status: 'launched',
+        mode: 'new_adset',
+        adset_id: '120245854481540241',
+        ad_ids: ['1', '2', '3', '4', '5', '6'],
+        created_at: '2026-06-05T14:09:00Z',
+        launched_at: '2026-06-05T14:50:00Z',
+      },
+    ];
+    const section = buildLaunchStateSection(states);
+    expect(section).toContain('LIVE DATABASE STATE');
+    expect(section).toContain('`0ee234fc-4171-4b36-a5b3-203a5dcd5abf` (SS, new_adset): **pending**');
+    expect(section).toContain('**launched** — adset `120245854481540241`, 6 ads, launched_at 2026-06-05T14:50:00Z');
+    expect(section).toContain('it has NOT been launched');
   });
 });
