@@ -1,6 +1,10 @@
-// piper_actions audit log writer — every tool call goes through here.
-// Per Piper EVOLUTION.md Phase 1.5. Fire-and-forget by design: logging is
-// best-effort and must never block or fail a tool execution.
+// Universal dai-agent audit log writer — EVERY agent's tool calls go through
+// here (Ada, Piper, Maya, client-scoped agents — see the agent_id column), not
+// just Piper's. The underlying table keeps its legacy name `piper_actions`
+// (born in Piper EVOLUTION.md Phase 1.5); query it via the `agent_actions`
+// view (migration 20260605160000) so "did agent X actually do Y?" is one
+// SELECT. Fire-and-forget by design: logging is best-effort and must never
+// block or fail a tool execution.
 
 import { getDaiSupabase } from '../integrations/dai-supabase.js';
 import { logger } from '../utils/logger.js';
