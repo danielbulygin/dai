@@ -678,6 +678,36 @@ export async function getClientNameMap(pageIds: string[]): Promise<Map<string, s
   return clientNameCache;
 }
 
+/**
+ * Fetch specific AOT ad sets by Notion page id and return them keyed by page id.
+ *
+ * Scale-proof alternative to `queryAotAdSets({ limit })` for the case where you
+ * already know exactly which ad sets you need (e.g. resolving the parents of a
+ * small task backlog). The capped global query silently drops the ad sets you
+ * care about once the DB grows past the cap — at 2396 ad sets a 1000-row
+ * `delivery_date_asc` fetch excluded the entire upload backlog and broke the
+ * ready-to-upload digest's client resolution (2026-06-05). Retrieving each
+ * parent directly is immune to DB size. Fail-soft: a page that 404s/throws is
+ * just omitted from the map.
+ */
+export async function getAotAdSetsByIds(pageIds: string[]): Promise<Map<string, ExtractedAdSet>> {
+  const unique = Array.from(new Set(pageIds.filter(Boolean)));
+  const out = new Map<string, ExtractedAdSet>();
+  if (unique.length === 0) return out;
+  const notion = getNotion();
+  await Promise.all(
+    unique.map(async (id) => {
+      try {
+        const page = (await notion.pages.retrieve({ page_id: id })) as PageObjectResponse;
+        out.set(page.id, extractAdSet(page));
+      } catch (err) {
+        logger.warn({ pageId: id, err: (err as Error).message }, 'getAotAdSetsByIds: ad set retrieve failed');
+      }
+    }),
+  );
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Count tools — sidestep the 60K char per-tool runtime cap
 // ---------------------------------------------------------------------------

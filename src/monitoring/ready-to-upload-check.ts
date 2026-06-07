@@ -12,7 +12,7 @@
 import { getDedicatedBotClient } from '../slack/dedicated-bots.js';
 import { env } from '../env.js';
 import { logger } from '../utils/logger.js';
-import { queryAotTasks, queryAotAdSets, getClientNameMap } from '../agents/tools/aot-notion-tools.js';
+import { queryAotTasks, getAotAdSetsByIds, getClientNameMap } from '../agents/tools/aot-notion-tools.js';
 import { getClientCapabilities } from '../agents/tools/ad-launch-tools.js';
 import { getSupabase } from '../integrations/supabase.js';
 import { getStalePendingBatches, formatStaleBatchSection } from '../agents/launch-state.js';
@@ -29,6 +29,7 @@ interface AotTask {
   format: string | null;
   ad_set_id: string | null;
   ad_set_relation_ids: string[];
+  client_relation_ids: string[];
 }
 interface AotAdSet {
   ad_set_id: string;
@@ -110,22 +111,41 @@ export async function buildReadyToUploadMessage(
   const tasks = (tasksParsed.tasks ?? []).filter((t) => t.status !== 'Blocked');
   if (tasks.length === 0) return null;
 
-  // Resolve parent ad sets (best-effort — fall back to task name if unavailable).
+  // Resolve parent ad sets by id (scale-proof). We fetch ONLY the backlog's
+  // parents, not a globally-capped/oldest-sorted slice — `queryAotAdSets({ limit })`
+  // silently drops the backlog once the Ad Sets DB grows past the cap, which broke
+  // client resolution on 2026-06-05 (2396 ad sets vs a 1000-row delivery_date_asc
+  // fetch → every task fell back to "(unknown client)" with no title/code/link).
+  // Note: task.ad_set_id is the human ad-id code (rollup), NOT a page id — only
+  // ad_set_relation_ids are page ids, so we join on those.
   const adsetById = new Map<string, AotAdSet>();
   try {
-    const rawAdsets = await queryAotAdSets({ limit: 1000 });
-    const adsetsParsed = JSON.parse(rawAdsets) as { adsets?: AotAdSet[] };
-    for (const a of adsetsParsed.adsets ?? []) adsetById.set(a.ad_set_id, a);
+    const parentIds = [...new Set(tasks.flatMap((t) => t.ad_set_relation_ids).filter(Boolean))];
+    const resolved = await getAotAdSetsByIds(parentIds);
+    for (const [id, a] of resolved) {
+      adsetById.set(id, {
+        ad_set_id: a.ad_set_id,
+        url: a.url,
+        ad_title: a.ad_title,
+        ad_id_code: a.ad_id_code,
+        client_code: a.client_code,
+        client_relation_ids: a.client_relation_ids,
+      });
+    }
   } catch (err) {
-    logger.warn({ err }, 'ready-to-upload: ad-set resolve failed; falling back to task names');
+    logger.warn({ err }, 'ready-to-upload: ad-set resolve failed; falling back to task client + names');
   }
   const adsetFor = (t: AotTask): AotAdSet | undefined =>
-    (t.ad_set_id ? adsetById.get(t.ad_set_id) : undefined) ??
     t.ad_set_relation_ids.map((id) => adsetById.get(id)).find(Boolean);
 
   // Resolve client relation IDs → readable names ("Forpeople") for grouping.
+  // Gather from BOTH the task's own Client relation (always present) and the
+  // resolved ad set — so grouping survives even if an ad-set retrieve fails.
   const clientRelIds = new Set<string>();
-  for (const t of tasks) for (const id of adsetFor(t)?.client_relation_ids ?? []) clientRelIds.add(id);
+  for (const t of tasks) {
+    for (const id of t.client_relation_ids ?? []) clientRelIds.add(id);
+    for (const id of adsetFor(t)?.client_relation_ids ?? []) clientRelIds.add(id);
+  }
   let nameMap = new Map<string, string>();
   try {
     nameMap = await getClientNameMap([...clientRelIds]);
@@ -137,6 +157,7 @@ export async function buildReadyToUploadMessage(
   for (const t of tasks) {
     const a = adsetFor(t);
     const client =
+      t.client_relation_ids.map((id) => nameMap.get(id)).find(Boolean) ??
       a?.client_relation_ids.map((id) => nameMap.get(id)).find(Boolean) ??
       a?.client_code ??
       '(unknown client)';
