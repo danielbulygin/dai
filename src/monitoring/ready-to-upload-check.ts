@@ -169,7 +169,13 @@ export async function buildReadyToUploadMessage(
       format: t.format ?? null,
     };
     if (!byClient.has(client)) byClient.set(client, { code: a?.client_code ?? null, entries: [] });
-    byClient.get(client)!.entries.push(entry);
+    const grp = byClient.get(client)!;
+    // The launch-config flag keys off `code`. Don't let it depend on iteration
+    // order: if the first task's ad set didn't resolve a code but a later one
+    // does, adopt it — otherwise a launchable client can be mis-flagged as
+    // "no launch config" when only its first entry's retrieve came back thin.
+    if (!grp.code && a?.client_code) grp.code = a.client_code;
+    grp.entries.push(entry);
   }
 
   // Flag config gaps per client so nobody clicks "start" on a client Ada can't launch.

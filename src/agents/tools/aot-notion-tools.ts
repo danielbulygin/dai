@@ -701,16 +701,23 @@ export async function getAotAdSetsByIds(pageIds: string[]): Promise<Map<string, 
   const out = new Map<string, ExtractedAdSet>();
   if (unique.length === 0) return out;
   const notion = getNotion();
-  await Promise.all(
-    unique.map(async (id) => {
-      try {
-        const page = (await notion.pages.retrieve({ page_id: id })) as PageObjectResponse;
-        out.set(page.id, extractAdSet(page));
-      } catch (err) {
-        logger.warn({ pageId: id, err: (err as Error).message }, 'getAotAdSetsByIds: ad set retrieve failed');
-      }
-    }),
-  );
+  // Bound fan-out: this scales with backlog size (a shoot can drop many ad sets
+  // at once), unlike getClientNameMap/getUserNameMap which are bounded by the
+  // small client/team set. Unbounded Promise.all over a big backlog would risk
+  // Notion 429s — chunk it.
+  const CONCURRENCY = 8;
+  for (let i = 0; i < unique.length; i += CONCURRENCY) {
+    await Promise.all(
+      unique.slice(i, i + CONCURRENCY).map(async (id) => {
+        try {
+          const page = (await notion.pages.retrieve({ page_id: id })) as PageObjectResponse;
+          out.set(page.id, extractAdSet(page));
+        } catch (err) {
+          logger.warn({ pageId: id, err: (err as Error).message }, 'getAotAdSetsByIds: ad set retrieve failed');
+        }
+      }),
+    );
+  }
   return out;
 }
 
