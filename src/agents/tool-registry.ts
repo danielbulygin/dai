@@ -2021,7 +2021,7 @@ register({
   definition: {
     name: 'query_aot_tasks',
     description:
-      'Query the AOT production-pipeline Tasks Notion database. Each task is linked to an Ad Set and a Client. Returns task name, status, stage, due date, ad set info, assignee display names (assignee_names) alongside their Notion user IDs, priority, impact severity, overdue flag, and the live Delay Alert formula text. Default returns active tasks (not Done/Cancelled) and excludes tasks on dead ad sets (Completed/Cancelled/On Hold), sorted by due date ascending. **Default freshness window is 90 days** on last_edited_time — tasks nobody has touched in 3+ months are treated as zombies and filtered out. This is what the team usually cares about (recent actionable work). For forensic audits of old data, explicitly pass `freshness_window_days: 0`. **Pagination is automatic**: the tool fetches every matching page up to a 2000-row safety ceiling, so results are complete by default. The response includes `truncated_at_ceiling: true` ONLY if the ceiling was hit — in that case, narrow the filter and re-query. Always cite assignees by their assignee_names, not the user IDs.',
+      'Query the AOT production-pipeline Tasks Notion database. Each task is linked to an Ad Set and a Client. Returns task name, status, stage, due date, ad set info, assignee display names (assignee_names) alongside their Notion user IDs, priority, impact severity, overdue flag, and the live Delay Alert formula text. Default returns active tasks (not Done/Cancelled) and excludes tasks on dead ad sets (Completed/Cancelled/On Hold), sorted by due date ascending. **Default freshness window is 90 days** on last_edited_time — tasks nobody has touched in 3+ months are treated as zombies and filtered out. This is what the team usually cares about (recent actionable work). For forensic audits of old data, explicitly pass `freshness_window_days: 0`. **Pagination is automatic**: the tool fetches every matching page up to a 5000-row safety ceiling, so results are complete by default. The response includes `truncated_at_ceiling: true` ONLY if the ceiling was hit — in that case, narrow the filter and re-query. Always cite assignees by their assignee_names, not the user IDs.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -2072,7 +2072,7 @@ register({
         },
         limit: {
           type: 'number',
-          description: 'Optional cap on total tasks returned. Default and max = 2000 (the safety ceiling). Pagination is automatic, so leaving this unset returns ALL matching tasks. Set a lower value only if you explicitly want a sample (e.g. "first 10 by due date").',
+          description: 'Optional cap on total tasks returned. Default and max = 5000 (the safety ceiling). Pagination is automatic, so leaving this unset returns ALL matching tasks. Set a lower value only if you explicitly want a sample (e.g. "first 10 by due date").',
         },
       },
     },
@@ -2099,7 +2099,7 @@ register({
   definition: {
     name: 'query_aot_adsets',
     description:
-      'Query the AOT production-pipeline Ad Sets Notion database. An ad set is the unit of work that travels through stages (Concept → Brief → Production → Editing → QC → Media Buying → Done). Returns ad_id_code (e.g. ADBNx3475), ad_title, stage, format, ad_delivery_date, client_code + client_status, owner_names (resolved from Notion user IDs), the currently-active task name (active_task) and its assignee (task_assignee_name), task_progress (0-1), overdue_tasks_count, task_count, brief_relation_ids, drive_folder_url, final_ads_folder_url, frameio_url, and health_check. Default excludes ad sets in dead stages (Completed/Cancelled/On Hold). **Default freshness window is 90 days** on last_edited_time — ad sets nobody has touched in 3+ months are treated as zombies and filtered out. For forensic audits of old data, explicitly pass `freshness_window_days: 0`. Use this for cadence reads ("what is each client producing this week"), capacity gaps ("what is in concept vs production"), and overdue-ad-set surfacing. Use query_aot_tasks when you need the per-task detail underneath. **Pagination is automatic**: the tool fetches every matching page up to a 2000-row safety ceiling, so results are complete by default. The response includes `truncated_at_ceiling: true` ONLY if the ceiling was hit — in that case, narrow the filter and re-query. Always cite owners by owner_names, not user IDs.',
+      'Query the AOT production-pipeline Ad Sets Notion database. An ad set is the unit of work that travels through stages (Concept → Brief → Production → Editing → QC → Media Buying → Done). Returns ad_id_code (e.g. ADBNx3475), ad_title, stage, format, ad_delivery_date, client_code + client_status, owner_names (resolved from Notion user IDs), the currently-active task name (active_task) and its assignee (task_assignee_name), task_progress (0-1), overdue_tasks_count, task_count, brief_relation_ids, drive_folder_url, final_ads_folder_url, frameio_url, and health_check. Default excludes ad sets in dead stages (Completed/Cancelled/On Hold). **Default freshness window is 90 days** on last_edited_time — ad sets nobody has touched in 3+ months are treated as zombies and filtered out. For forensic audits of old data, explicitly pass `freshness_window_days: 0`. Use this for cadence reads ("what is each client producing this week"), capacity gaps ("what is in concept vs production"), and overdue-ad-set surfacing. Use query_aot_tasks when you need the per-task detail underneath. **Pagination is automatic**: the tool fetches every matching page up to a 5000-row safety ceiling, so results are complete by default. The response includes `truncated_at_ceiling: true` ONLY if the ceiling was hit — in that case, narrow the filter and re-query. Always cite owners by owner_names, not user IDs.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -2158,7 +2158,7 @@ register({
         },
         limit: {
           type: 'number',
-          description: 'Optional cap on total ad sets returned. Default and max = 2000 (the safety ceiling). Pagination is automatic, so leaving this unset returns ALL matching ad sets. Set a lower value only if you explicitly want a sample.',
+          description: 'Optional cap on total ad sets returned. Default and max = 5000 (the safety ceiling). Pagination is automatic, so leaving this unset returns ALL matching ad sets. Set a lower value only if you explicitly want a sample.',
         },
       },
     },
@@ -2228,7 +2228,7 @@ register({
         },
         limit: {
           type: 'number',
-          description: 'Cap on rows scanned. Default and max = 2000. Lower this only for sampling.',
+          description: 'Cap on rows scanned. Default and max = 5000. Lower this only for sampling.',
         },
       },
     },
@@ -2292,7 +2292,7 @@ register({
         },
         limit: {
           type: 'number',
-          description: 'Cap on rows scanned. Default and max = 2000. Lower this only for sampling.',
+          description: 'Cap on rows scanned. Default and max = 5000. Lower this only for sampling.',
         },
       },
     },

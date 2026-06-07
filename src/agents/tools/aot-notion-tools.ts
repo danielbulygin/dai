@@ -77,7 +77,13 @@ const DEAD_AD_SET_STAGES = new Set(['Completed', 'Cancelled', 'On Hold', 'Archiv
 // processing tens of thousands of rows. If the ceiling is hit, the response
 // surfaces `truncated_at_ceiling: true` so Piper can flag the gap explicitly.
 const NOTION_PAGE_SIZE = 100;
-const DEFAULT_MAX_ROWS = 2000;
+// Raised 2000 → 5000 on 2026-06-07: the AOT Ad Sets DB is at 2396 and active
+// Tasks at ~2720, so the old ceiling silently truncated broad scans/counts.
+// 5000 covers active+recent work with headroom; a full all-history scan (Tasks
+// DB ~11.6k) still truncates — for EXACT totals use the Supabase mirror
+// (aot_tasks_current / aot_adsets_current), not a paginated Notion scan.
+// Worst-case latency: 5000 rows = up to 50 sequential 100-row Notion calls.
+const DEFAULT_MAX_ROWS = 5000;
 
 async function fetchAllAotPages(args: {
   dataSourceId: string;
