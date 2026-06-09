@@ -2,7 +2,7 @@
 
 # Brain.fm — Operating Context & Methodology
 
-*Knowledge base for Brain.fm advertising assistant — Last updated: June 2025*
+*Knowledge base for Brain.fm advertising assistant — Last updated: 2026-06-10*
 
 ## Communication Style — STRICT, ALWAYS FOLLOW
 
@@ -124,6 +124,20 @@ The account runs a lean structure with two main CBO campaigns, both optimizing f
 ---
 
 ## 5. Methodology & Operating Rules
+
+### Current Account Treatment — agreed on the 2026-06-09 growth call (Adam, Kevin, Jack / Nina, Dan, Vanessa, Franzi)
+
+These supersede earlier treatment notes where they conflict:
+
+- **Budget reallocation:** shift budget FROM Tier-1 TO the US and Tier-2 campaigns, keyed to trial→paid payment rates (not just trial CPA). Treat allocations as flexible — revisit as payment-rate data lands.
+- **Bid caps:** raise bid caps on Tier-2 and Spanish campaigns (Mexico/Argentina raises pending payment-rate confirmation).
+- **Spanish expansion:** split Spanish campaigns by CPM tier — US+Spain (Tier-1) separate from Latin America (Tier-2) — so CPM differences don't skew CBO budget allocation. Phased rollout alongside English global campaigns; Adam finalizes the country list via Slack.
+- **TikTok test:** search-type campaign targeting ADHD/productivity keywords at $150/day (Nina).
+- **Creative evaluation:** three-status framework (replaces binary keep/kill voting); prioritize ads with LOWER CPAs when ranking what to scale/iterate.
+- **CBO guardrails:** remove minimum-spend guardrails after an ad's test period — let creatives compete on merit in CBO.
+- **Audience:** BFM converts disproportionately among WOMEN on Meta (Meta is the trusted demographic source; Google demographics unreliable). Lean into female-creator ads and ADHD-awareness angles; explore parenting/focus-struggle messaging.
+- **Product emphasis:** "focus" mode carries ~85% of user engagement — creative should emphasize it.
+- **Promotions:** summer / back-to-school promos lead with PERSONALIZATION, not discounts (same rule for lifecycle email).
 
 ### Core Principles (Applied to Brain.fm)
 
