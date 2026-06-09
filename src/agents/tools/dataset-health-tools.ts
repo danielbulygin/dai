@@ -85,11 +85,14 @@ export async function auditDatasetHealth(params: { clientCode: string }): Promis
     const supabase = getSupabase();
     const { data: client, error } = await supabase
       .from('clients')
-      .select('code, name, ad_account_id, conversion_goal')
+      .select('code, name, ad_account_id')
       .ilike('code', clientCode)
       .single();
-    if (error || !client?.ad_account_id) {
-      return JSON.stringify({ error: `Client '${params.clientCode}' not found or has no ad_account_id` });
+    if (error) {
+      return JSON.stringify({ error: `Client lookup failed for '${params.clientCode}': ${error.message}` });
+    }
+    if (!client?.ad_account_id) {
+      return JSON.stringify({ error: `Client '${params.clientCode}' has no ad_account_id configured` });
     }
     const token = tokenFor(clientCode);
     if (!token) return JSON.stringify({ error: 'No Meta access token configured for this client' });
