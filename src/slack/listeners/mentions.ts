@@ -20,6 +20,25 @@ export function registerMentionListener(app: App): void {
     const ev = event as unknown as Record<string, unknown>;
     if (ev.bot_id || ev.bot_profile || ev.subtype === 'bot_message') return;
 
+    // Guaranteed closure: anything that throws BEFORE the stream responder
+    // exists (auth.test, routing, launch-approval lookup) used to die silently
+    // — the user saw nothing at all. Always post SOMETHING.
+    try {
+      await handleMention();
+    } catch (err) {
+      logger.error({ err, channel, user }, 'Mention handler failed before responder setup');
+      try {
+        await client.chat.postMessage({
+          channel,
+          thread_ts: threadTs,
+          text: ':x: Something went wrong before I could start on that — please try again.',
+        });
+      } catch {
+        // Slack itself unreachable — nothing more we can do.
+      }
+    }
+
+    async function handleMention(): Promise<void> {
     // Get bot user ID for stripping @mention
     const authResult = await client.auth.test();
     const botUserId = authResult.user_id as string;
@@ -77,6 +96,12 @@ export function registerMentionListener(app: App): void {
       agentName,
     });
 
+    // If another task is running in this channel, say so — a silent queue
+    // wait reads as a hang (the team re-asks or gives up).
+    if (agentQueue.isChannelBusy(channel)) {
+      responder.setStatus('is queued behind another task in this channel — starting as soon as it finishes...');
+    }
+
     // Run the agent through the queue
     try {
       const result = await agentQueue.enqueue(channel, () =>
@@ -95,6 +120,7 @@ export function registerMentionListener(app: App): void {
     } catch (err) {
       logger.error({ err, channel, user }, 'Agent run failed');
       await responder.onError(err);
+    }
     }
   });
 }

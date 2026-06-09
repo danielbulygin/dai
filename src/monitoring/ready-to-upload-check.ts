@@ -16,6 +16,7 @@ import { queryAotTasks, getAotAdSetsByIds, getClientNameMap } from '../agents/to
 import { getClientCapabilities } from '../agents/tools/ad-launch-tools.js';
 import { getSupabase } from '../integrations/supabase.js';
 import { getStalePendingBatches, formatStaleBatchSection } from '../agents/launch-state.js';
+import { getAgentState, setAgentState } from '../memory/agent-state.js';
 
 const ADA_CHANNEL = (env as unknown as Record<string, string | undefined>).ADA_UPLOAD_CHECK_CHANNEL_ID || 'C0AHX94CBF0';
 const NINA_USER_ID = (env as unknown as Record<string, string | undefined>).NINA_SLACK_USER_ID || 'U08LEQVHDRU';
@@ -79,11 +80,47 @@ async function getPreuploadStatuses(codes: string[]): Promise<Map<string, Preupl
   }
 }
 
+// ---------------------------------------------------------------------------
+// Digest state — the digest diffs against its own last post so it reports
+// deltas instead of re-listing the same backlog verbatim twice a day.
+// (JVAx3864 was re-listed 20+ times over 3 weeks; SLBx4068's upload_error
+// repeated for 7 days with no detail and no escalation.)
+// ---------------------------------------------------------------------------
+
+const DIGEST_STATE_KEY = 'ready_to_upload_digest';
+const ESCALATE_AFTER_DAYS = 7;
+
+interface DigestItemState {
+  first_seen: string; // ISO date
+  flag_sig: string;
+  escalated: boolean;
+}
+interface DigestState {
+  items: Record<string, DigestItemState>;
+  last_signature: string;
+  last_posted_at: string;
+}
+
+function daysSince(iso: string): number {
+  return Math.floor((Date.now() - new Date(iso).getTime()) / 86_400_000);
+}
+
+function flagSignature(s: PreuploadStatus | undefined): string {
+  if (!s) return '';
+  const types = [...new Set((s.flags ?? []).map((f) => f.type))].sort();
+  return `${types.join(',')}|${s.analysis_complete ? 'ok' : 'pending'}`;
+}
+
 function preuploadBadge(s: PreuploadStatus | undefined): string {
   if (!s) return '';
-  const flagTypes = [...new Set((s.flags ?? []).map((f) => f.type))];
-  if (flagTypes.length > 0) {
-    return ` — :warning: pre-upload blocked: ${flagTypes.join(', ')}`;
+  const flags = s.flags ?? [];
+  if (flags.length > 0) {
+    // Show the actual error detail, not just the flag type — "upload_error"
+    // alone gives the reader nothing to act on.
+    const first = flags[0]!;
+    const detail = [first.file, first.detail].filter(Boolean).join(': ');
+    const flagTypes = [...new Set(flags.map((f) => f.type))];
+    return ` — :warning: pre-upload blocked: ${flagTypes.join(', ')}${detail ? ` (${detail.slice(0, 120)})` : ''}`;
   }
   if (s.analysis_complete) {
     const a = s.analysis_summary ?? {};
@@ -204,6 +241,35 @@ export async function buildReadyToUploadMessage(
   );
   const preupload = await getPreuploadStatuses([...new Set(entryCodes)]);
 
+  // ------ digest state: diff against what we said last time --------------
+  const prior = (await getAgentState<DigestState>(DIGEST_STATE_KEY)) ?? {
+    items: {},
+    last_signature: '',
+    last_posted_at: '',
+  };
+  const today = new Date().toISOString().slice(0, 10);
+  const nextItems: Record<string, DigestItemState> = {};
+  const newKeys = new Set<string>();
+  const escalations: string[] = [];
+
+  const entryKey = (client: string, e: Entry): string => e.code ?? `${client}:${e.title}`;
+
+  for (const [client, grp] of byClient) {
+    for (const e of grp.entries) {
+      const key = entryKey(client, e);
+      const sig = flagSignature(e.code ? preupload.get(e.code) : undefined);
+      const prev = prior.items[key];
+      if (!prev) newKeys.add(key);
+      nextItems[key] = {
+        first_seen: prev?.first_seen ?? today,
+        flag_sig: sig,
+        escalated: prev?.escalated ?? false,
+      };
+    }
+  }
+
+  const resolvedKeys = Object.keys(prior.items).filter((k) => !(k in nextItems));
+
   const sections: string[] = [];
   for (const client of [...byClient.keys()].sort()) {
     const { code, entries } = byClient.get(client)!;
@@ -216,22 +282,82 @@ export async function buildReadyToUploadMessage(
     }
     sections.push(`*${client}*${code ? ` (${code})` : ''}${flag}`);
     for (const e of entries) {
+      const key = entryKey(client, e);
+      const state = nextItems[key]!;
+      const age = daysSince(state.first_seen);
       const label = e.code ? `${e.title} (${e.code})` : e.title;
       const linked = e.url ? `<${e.url}|${label}>` : label; // Slack mrkdwn hyperlink to the Notion page
       const meta = [e.format, e.due ? `due ${e.due}` : null].filter(Boolean).join(' · ');
       const badge = preuploadBadge(e.code ? preupload.get(e.code) : undefined);
-      sections.push(`  • ${linked}${meta ? ` — _${meta}_` : ''}${badge}`);
+      const newBadge = newKeys.has(key) ? ' :new:' : '';
+      const ageNote = !newKeys.has(key) && age >= 3 ? ` — _listed ${age}d_` : '';
+      sections.push(`  • ${linked}${meta ? ` — _${meta}_` : ''}${badge}${newBadge}${ageNote}`);
+
+      // One-time escalation for long-stuck items: after this they keep their
+      // age note but never re-escalate.
+      if (age >= ESCALATE_AFTER_DAYS && !state.escalated) {
+        state.escalated = true;
+        escalations.push(
+          `• ${linked} has been on this list for *${age} days*` +
+            (state.flag_sig.startsWith('|') || state.flag_sig === ''
+              ? ' with no blocker recorded — if it is actually waiting on something (e.g. a question, a client decision), set its Notion task to Blocked so it drops off this digest.'
+              : ` — blocker: ${state.flag_sig.split('|')[0]}. It will not resolve itself; someone needs to act or Block the task.`),
+        );
+      }
     }
   }
 
+  // ------ unchanged? post a one-liner instead of the full list ------------
+  const signature = Object.entries(nextItems)
+    .map(([k, v]) => `${k}=${v.flag_sig}`)
+    .sort()
+    .join(';');
+  const unchanged =
+    signature === prior.last_signature && resolvedKeys.length === 0 && escalations.length === 0;
+
+  await setAgentState(DIGEST_STATE_KEY, {
+    items: nextItems,
+    last_signature: signature,
+    last_posted_at: new Date().toISOString(),
+  } satisfies DigestState);
+
+  if (unchanged) {
+    const oldest = Math.max(...Object.values(nextItems).map((i) => daysSince(i.first_seen)), 0);
+    return {
+      message:
+        `Ready-to-upload backlog unchanged since the last check: *${tasks.length} item${tasks.length === 1 ? '' : 's'}*` +
+        `${oldest >= 3 ? ` (oldest listed ${oldest}d)` : ''}. Nothing new to act on — full list in the previous digest.`,
+      count: tasks.length,
+    };
+  }
+
+  // Ping people only when there's something genuinely new to act on —
+  // unchanged-and-aging backlogs don't deserve a notification.
+  const shouldPing = newKeys.size > 0 || escalations.length > 0;
+  const delta = [
+    newKeys.size > 0 ? `${newKeys.size} new` : null,
+    resolvedKeys.length > 0 ? `${resolvedKeys.length} cleared since last check` : null,
+  ]
+    .filter(Boolean)
+    .join(', ');
   const header =
-    `<@${DAN_USER_ID}> <@${NINA_USER_ID}> — *${tasks.length} ad set${tasks.length === 1 ? '' : 's'} ready to upload* ` +
-    `(${trigger} check)`;
+    `${shouldPing ? `<@${DAN_USER_ID}> <@${NINA_USER_ID}> — ` : ''}` +
+    `*${tasks.length} ad set${tasks.length === 1 ? '' : 's'} ready to upload* ` +
+    `(${trigger} check${delta ? ` — ${delta}` : ''})`;
+  const escalationSection =
+    escalations.length > 0 ? `\n\n:alarm_clock: *Needs a human decision*\n${escalations.join('\n')}` : '';
+  const resolvedSection =
+    resolvedKeys.length > 0
+      ? `\n\n:white_check_mark: Cleared since last check: ${resolvedKeys.map((k) => k.split(':').pop()).join(', ')}`
+      : '';
   const footer =
     `\n\nReply in this thread to start one and I'll walk the gates — ` +
     `scan → upload → analysis → QC → preview → confirm → launch (paused) → verify. ` +
     `E.g. _"Ada, run the upload for <ad set>"_.`;
-  return { message: `${header}\n\n${sections.join('\n')}${footer}`, count: tasks.length };
+  return {
+    message: `${header}\n\n${sections.join('\n')}${escalationSection}${resolvedSection}${footer}`,
+    count: tasks.length,
+  };
 }
 
 export async function runReadyToUploadCheck(trigger: 'morning' | 'evening'): Promise<void> {

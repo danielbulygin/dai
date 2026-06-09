@@ -30,6 +30,10 @@ export function registerMessageListener(app: App): void {
     const files = msg.files as Array<Record<string, unknown>> | undefined;
 
     if (!userId || !messageTs) return;
+    // Narrowed aliases — control-flow narrowing doesn't carry into the
+    // hoisted handleMessage() declaration below.
+    const safeUserId: string = userId;
+    const safeMessageTs: string = messageTs;
 
     // Transcribe voice notes if present
     const transcript = await transcribeAudioFiles(files, client);
@@ -38,6 +42,30 @@ export function registerMessageListener(app: App): void {
     }
 
     if (!text) return;
+    const messageText = text;
+
+    // Guaranteed closure: anything that throws BEFORE the stream responder
+    // exists used to die silently — the user saw nothing at all.
+    try {
+      await handleMessage();
+    } catch (err) {
+      logger.error({ err, channel: msg.channel as string, user: userId }, 'Message handler failed before responder setup');
+      try {
+        await client.chat.postMessage({
+          channel: msg.channel as string,
+          thread_ts: threadTs ?? messageTs,
+          text: ':x: Something went wrong before I could start on that — please try again.',
+        });
+      } catch {
+        // Slack itself unreachable — nothing more we can do.
+      }
+    }
+    return;
+
+    async function handleMessage(): Promise<void> {
+    const text = messageText;
+    const userId = safeUserId;
+    const messageTs = safeMessageTs;
 
     // Skip insight approval threads — handled by insight-actions.ts
     if (threadTs) {
@@ -109,6 +137,12 @@ export function registerMessageListener(app: App): void {
       agentName,
     });
 
+    // If another task is running in this channel, say so — a silent queue
+    // wait reads as a hang (the team re-asks or gives up).
+    if (agentQueue.isChannelBusy(msg.channel as string)) {
+      responder.setStatus('is queued behind another task in this channel — starting as soon as it finishes...');
+    }
+
     try {
       const result = await agentQueue.enqueue(msg.channel as string, () =>
         runAgent({
@@ -126,6 +160,7 @@ export function registerMessageListener(app: App): void {
     } catch (err) {
       logger.error({ err, channel: msg.channel as string, user: userId }, 'Agent run failed');
       await responder.onError(err);
+    }
     }
   });
 }

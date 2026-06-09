@@ -52,6 +52,11 @@ export class AgentQueue {
     return this.active;
   }
 
+  /** Whether this channel already has an active task (new work will queue behind it). */
+  isChannelBusy(channelId: string): boolean {
+    return this.activeChannels.has(channelId);
+  }
+
   /**
    * Pull entries from the pending queue and execute them while we are
    * below the concurrency limit.

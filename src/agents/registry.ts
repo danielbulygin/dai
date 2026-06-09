@@ -38,6 +38,10 @@ const AgentConfigSchema = z.object({
   max_turns: z.number().int().positive(),
   channels: z.array(z.string()),
   sub_agents: z.array(z.string()),
+  /** Shared skills from agents/_skills/<name>.skill.md to inject into the system prompt. */
+  skills: z.array(z.string()).default([]),
+  /** Knowledge dirs from agents/_knowledge/<dir>/*.md to inject into the system prompt. */
+  knowledge: z.array(z.string()).default([]),
 });
 
 // ---------------------------------------------------------------------------
@@ -123,6 +127,28 @@ export function loadAgentRegistry(): Map<string, AgentDefinition> {
     const persona = readMarkdown(join(agentDir, 'PERSONA.md'));
     const instructions = readMarkdown(join(agentDir, 'INSTRUCTIONS.md'));
     const extras = loadExtras(agentDir);
+
+    // Shared skills + knowledge declared in agent.yaml. INSTRUCTIONS.md may
+    // reference these by name — without this they were never injected at all.
+    for (const skillName of config.skills) {
+      try {
+        const content = readMarkdown(join(AGENTS_DIR, '_skills', `${skillName}.skill.md`));
+        if (content) extras.push({ name: `skill:${skillName}`, content });
+      } catch {
+        console.warn(`[registry] agent ${entry.id}: skill "${skillName}" not found in agents/_skills/`);
+      }
+    }
+    for (const dir of config.knowledge) {
+      try {
+        const knowledgeDir = join(AGENTS_DIR, '_knowledge', dir);
+        for (const file of readdirSync(knowledgeDir).filter((f) => f.endsWith('.md')).sort()) {
+          const content = readMarkdown(join(knowledgeDir, file));
+          if (content) extras.push({ name: `knowledge:${dir}/${file}`, content });
+        }
+      } catch {
+        console.warn(`[registry] agent ${entry.id}: knowledge dir "${dir}" not found in agents/_knowledge/`);
+      }
+    }
 
     map.set(entry.id, { config, manifest: entry, persona, instructions, extras });
   }

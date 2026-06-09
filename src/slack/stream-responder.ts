@@ -18,6 +18,8 @@ export interface StreamResponderOptions {
 export interface StreamResponderHandle {
   /** Feed text chunks from the agent stream. */
   onText: (text: string) => void;
+  /** Update the status line (e.g. "queued behind another task") before streaming starts. */
+  setStatus: (text: string) => void;
   /** Reset accumulated text between tool-use turns to prevent repetition. */
   resetAccumulated: () => void;
   /** Called once the agent finishes successfully. Posts the final response. */
@@ -214,6 +216,14 @@ export function createStreamResponder(
     pushProgressiveUpdate();
   };
 
+  const setStatus = (text: string): void => {
+    // Only before any real text has streamed — never clobber actual output.
+    if (accumulated.length > 0) return;
+    lastUpdatePromise = setupPromise
+      .then(() => updateMessage(`:hourglass_flowing_sand: *${agentName}* ${text}`))
+      .catch((err: unknown) => logger.warn({ err }, 'Failed to set status'));
+  };
+
   const resetAccumulated = (): void => {
     accumulated = '';
     lastUpdateLen = 0;
@@ -276,5 +286,5 @@ export function createStreamResponder(
     await removeReaction('hourglass_flowing_sand', userMessageTs);
   };
 
-  return { onText, resetAccumulated, finalize, onError };
+  return { onText, setStatus, resetAccumulated, finalize, onError };
 }

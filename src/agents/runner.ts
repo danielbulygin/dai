@@ -22,6 +22,7 @@ import type { ToolProfile } from './profiles/index.js';
 import { runLaunchClaimGuard } from './hooks/launch-claim-guard.js';
 import type { ExecutedToolCall } from './hooks/launch-claim-guard.js';
 import { extractBatchIds, getBatchStates, buildLaunchStateSection } from './launch-state.js';
+import { detectClientCodes, loadClientContextExtras, loadMethodologyExtra } from './client-context.js';
 
 let client: Anthropic | null = null;
 
@@ -226,7 +227,8 @@ async function runSimple(
 
     const stream = apiClient.messages.stream({
       model,
-      max_tokens: 4096,
+      max_tokens: 16000,
+      thinking: { type: 'adaptive' },
       system: [
         {
           type: 'text' as const,
@@ -272,11 +274,17 @@ async function runWithTools(
   onText?: (text: string) => void,
   onTurnReset?: () => void,
   onToolUse?: (toolName: string) => void,
-): Promise<{ responseText: string; turns: number; usage: TokenUsage; executedTools: ExecutedToolCall[] }> {
+): Promise<{ responseText: string; turns: number; usage: TokenUsage; executedTools: ExecutedToolCall[]; toolDigest: string }> {
   const messages: Anthropic.MessageParam[] = [...initialMessages];
   // Every tool call executed this run, for post-response claim guards
   // (launch-claim-guard cross-checks "launched ✅" replies against these).
   const executedTools: ExecutedToolCall[] = [];
+  // Compact record of data pulled this run. Appended to the STORED assistant
+  // message (not the Slack reply) so follow-up turns in the thread aren't
+  // data-blind — only user/assistant text survives between turns otherwise.
+  const toolDigests: string[] = [];
+  const DIGEST_SKIP = new Set(['post_message', 'reply_in_thread', 'remember', 'recall']);
+  const MAX_DIGEST_CHARS = 6_000;
   let totalInput = 0;
   let totalOutput = 0;
   let totalCacheRead = 0;
@@ -343,7 +351,11 @@ async function runWithTools(
       turnText = ''; // Reset on retry
       const stream = apiClient.messages.stream({
         model,
-        max_tokens: 4096,
+        max_tokens: 32000,
+        // Adaptive thinking: the model decides when/how deeply to reason, and
+        // interleaves thinking between tool calls. Thinking blocks ride along
+        // in msg.content and are echoed back on the next turn automatically.
+        thinking: { type: 'adaptive' },
         system: cachedSystem,
         messages,
         tools: cachedTools,
@@ -376,6 +388,7 @@ async function runWithTools(
         turns: turn + 1,
         usage: { input: totalInput, output: totalOutput, cacheRead: totalCacheRead, cacheCreation: totalCacheCreation },
         executedTools,
+        toolDigest: toolDigests.join('\n'),
       };
     }
 
@@ -404,6 +417,15 @@ async function runWithTools(
           toolContext,
         );
         executedTools.push({ name: block.name, isError });
+
+        if (!isError && !DIGEST_SKIP.has(block.name)) {
+          const usedChars = toolDigests.reduce((s, d) => s + d.length, 0);
+          if (usedChars < MAX_DIGEST_CHARS) {
+            const inputStr = JSON.stringify(block.input ?? {}).slice(0, 150);
+            const resultStr = result.replace(/\s+/g, ' ').slice(0, 600);
+            toolDigests.push(`${block.name}(${inputStr}) → ${resultStr}`);
+          }
+        }
 
         // Dynamic truncation: per-tool limit shrinks as context fills
         const perToolLimit = getToolResultLimit();
@@ -474,6 +496,7 @@ async function runWithTools(
     turns: maxTurns,
     usage: { input: totalInput, output: totalOutput, cacheRead: totalCacheRead, cacheCreation: totalCacheCreation },
     executedTools,
+    toolDigest: toolDigests.join('\n'),
   };
 }
 
@@ -572,6 +595,31 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
   // Loaded BEFORE the system prompt is built so launch-state injection below
   // can scan it for batch references.
   const priorMessages = await getMessages(session.id, 20);
+
+  // Internal runs: inject per-client intelligence files when the conversation
+  // references a client. Client-scoped runs already get theirs via the overlay.
+  if (!clientScope) {
+    try {
+      const detected = detectClientCodes([
+        ...priorMessages.map((m: ChatMessage) => m.content),
+        userMessage,
+      ]);
+      if (detected.length > 0) {
+        const clientExtras = loadClientContextExtras(detected);
+        extras.push(...clientExtras);
+        // Methodology pre-step: top extracted rules/insights for the primary
+        // detected client, so the 7K-item corpus shapes the analysis without
+        // relying on the model remembering to call search_methodology.
+        const methodologyExtra = await loadMethodologyExtra(detected[0]!);
+        if (methodologyExtra) extras.push(methodologyExtra);
+        if (clientExtras.length > 0 || methodologyExtra) {
+          logger.info({ sessionId: session.id, clients: detected }, 'Injected client context files');
+        }
+      }
+    } catch (err) {
+      logger.warn({ err }, 'client-context injection failed (continuing without it)');
+    }
+  }
 
   // Launch-state ground truth: if this thread references launch batches, inject
   // their LIVE launch_batches status into the system prompt. Even a context-
@@ -673,7 +721,7 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
 
   try {
 
-    let result: { responseText: string; turns: number; usage: TokenUsage; executedTools?: ExecutedToolCall[] };
+    let result: { responseText: string; turns: number; usage: TokenUsage; executedTools?: ExecutedToolCall[]; toolDigest?: string };
 
     if (toolDefs.length === 0) {
       // No tools registered for this profile — use simple streaming path
@@ -729,12 +777,18 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
       logger.warn({ err: guardErr }, 'launch-claim-guard failed (continuing without it)');
     }
 
-    // Persist the user message and assistant response (text only)
+    // Persist the user message and assistant response. The stored assistant
+    // message carries a compact digest of tool data pulled this turn so that
+    // follow-up turns in the same thread aren't data-blind (the digest is in
+    // history only — never shown in Slack).
     await addMessage({ session_id: session.id, role: 'user', content: userMessage });
+    const storedContent = result.toolDigest
+      ? `${result.responseText}\n\n[internal — data I pulled this turn, for my own future reference; the user did not see this block:]\n${result.toolDigest}`
+      : result.responseText;
     await addMessage({
       session_id: session.id,
       role: 'assistant',
-      content: result.responseText,
+      content: storedContent,
     });
 
     // Update session in the database

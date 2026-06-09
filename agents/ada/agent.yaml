@@ -6,3 +6,11 @@ profile: media_buyer
 max_turns: 25
 channels: []
 sub_agents: []
+skills:
+  - media-buying-analysis
+  - analysis-workflow
+  - ad-performance-analysis
+  - meta-ads-compliance
+  - meta-ads-strategy
+knowledge:
+  - media-buying

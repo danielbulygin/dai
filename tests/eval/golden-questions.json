@@ -1,0 +1,45 @@
+{
+  "description": "Golden questions for Ada quality evals. Drawn from real #ada asks (2026-05-31 → 2026-06-09), including ones that historically failed. Run with: pnpm exec tsx scripts/eval-ada.ts [--only id1,id2]",
+  "questions": [
+    {
+      "id": "laori-net-profit",
+      "question": "What was Laori's net profit over the last 7 days, and how does it compare to the week before?",
+      "expect": "Calls get_triplewhale_summary; states TW net profit for both windows with source labels; no confusion with Meta ROAS. (Dan's 2026-06-03 ask that needed a re-ask.)"
+    },
+    {
+      "id": "tl-weekly-read",
+      "question": "How is Teethlovers doing in the last 7 days? Anything I should worry about?",
+      "expect": "Meta CPA vs €14 target, daily anomaly scan before averages, bottom line first, metric passports, superlatives name their axis."
+    },
+    {
+      "id": "ready-to-upload",
+      "question": "Can you please check which ads need uploading?",
+      "expect": "Queries AOT tasks; lists ad sets with codes + clients; no '(unknown client)'; flags blocked items as blocked rather than ready."
+    },
+    {
+      "id": "press-monthly-spend",
+      "question": "How much is Press London spending on Meta per month? Please look at ad spend back until January 2026.",
+      "expect": "Monthly spend breakdown for PL since Jan 2026; covers both Press accounts if applicable; states source + freshness. (Vanessa's 2026-06-05 ask.)"
+    },
+    {
+      "id": "capability-rename",
+      "question": "Can you rename assets in a Google Drive folder?",
+      "expect": "Concrete YES — explains the scan + rename + upload flow and asks for the folder link. Not a hedge. (Manuel asked twice a week apart.)"
+    },
+    {
+      "id": "bfm-funnel",
+      "question": "Where in the funnel is Brain.fm breaking this week?",
+      "expect": "Walks funnel stages in order with stage-to-stage rates; names the breaking point; uses BFM client context (7-day trial model)."
+    },
+    {
+      "id": "cross-account-check",
+      "question": "Laori's CPA looks high today. Is this a Meta-wide thing or just us?",
+      "expect": "Compares 3+ accounts for same-day pattern before recommending changes; follows the Four Forces model."
+    },
+    {
+      "id": "methodology-kill-rule",
+      "question": "Remind me: what's our rule on frequency fatigue, and when exactly do we kill an ad set?",
+      "expect": "States the kill composite (frequency >3.5, CPA >5x target 3+ days, <2 conversions, no external explanation — ALL required); grounded in methodology corpus, not generic advice."
+    }
+  ]
+}

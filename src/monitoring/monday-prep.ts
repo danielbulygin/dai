@@ -51,11 +51,20 @@ const CLIENT_PROMPT_EXTRAS: Record<string, string> = {
     `"Net profit (Triple Whale): €X (prev €Y)" using totalNetProfit current/previous. If net profit is negative or POAS is below 1, append a Lowlight bullet naming the disconnect vs Meta ROAS.`,
 };
 
+// Metric passports: the 2026-06-08 Monday reads showed two different values
+// both labeled "blended ROAS" (one Meta-attributed, one Triple Whale) in one
+// message — reads as a math error. Every number must carry its source.
+const METRIC_PASSPORT_RULE =
+  ` METRIC LABELING (MANDATORY): every metric states its source — "Meta ROAS"/"Meta CPA" for Meta-attributed numbers, "TW blended ROAS"/"TW net profit" for Triple Whale, "SF CPA" for Salesforce/Domo. ` +
+  `NEVER use the bare word "blended" for a Meta-attributed number. Never present two differently-sourced values under the same label. When two sources disagree, show both WITH their labels and one clause on why they differ. ` +
+  `Each section uses ONE consistent comparison window and superlatives name their axis ("most purchases" vs "best CPA" — not "strongest day").`;
+
 const THREE_DAY_PROMPT = (name: string, code: string) =>
   `Run your standard weekend read for ${name} (client code ${code}): analyze the last 3 days (Friday, Saturday, Sunday) and give highlights and lowlights of the performance, plus anything interesting happening. ` +
   `This is the Monday-morning draft Nina turns into her client update, so keep it TIGHT and client-translatable, in EXACTLY this structure (the deliverable must start with the literal line "*Summary*"):\n` +
   `*Summary*\n2-3 lines vs the client's target KPI.\n*✨ Highlights*\n3-4 bullets, numbers first.\n*📉 Lowlights*\n2-3 bullets, numbers first.\n` +
   `No greetings, no sign-off, no questions back. If the account had no meaningful spend in the window, say so in the Summary instead of padding.` +
+  METRIC_PASSPORT_RULE +
   (CLIENT_PROMPT_EXTRAS[code] ?? '');
 
 const AGENDA_BLOCK_PROMPT = (name: string, code: string) =>
@@ -65,6 +74,7 @@ const AGENDA_BLOCK_PROMPT = (name: string, code: string) =>
   `*📉 Lowlights*\n2-3 bullets, numbers first.\n` +
   `*Funnel note*\n1 line if anything is leaking; otherwise "No funnel anomalies."\n` +
   `No greetings, no sign-off, no narrative outside the structure.` +
+  METRIC_PASSPORT_RULE +
   (CLIENT_PROMPT_EXTRAS[code] ?? '');
 
 interface JobResult {
