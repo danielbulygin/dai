@@ -133,8 +133,77 @@ export async function sendInsightsForApproval(
     return { durable: 0, situational: situationalInsights.length };
   }
 
-  // --- Handle durable insights: existing approval flow ---
-  const durableRows = durableInsights.map((ins, i) => ({
+  // --- Handle durable insights ---
+  // 2026-06-09 (Dan): the human-review queue was dead (1,858 pending, 31 ever
+  // approved — last on Mar 4), starving methodology_knowledge while meetings
+  // kept ingesting. New policy: HIGH-confidence durable insights auto-approve
+  // straight into the canonical corpus; medium-confidence ones are stored
+  // (status "pending", queryable, drainable later) and only summarized in the
+  // channel — no per-meeting button flow.
+  const highConfidence = durableInsights.filter((i) => i.confidence === "high");
+  const mediumConfidence = durableInsights.filter((i) => i.confidence !== "high");
+
+  for (const ins of highConfidence) {
+    await supabase.from("methodology_knowledge").insert({
+      type: ins.type,
+      title: ins.title,
+      body: ins.body,
+      account_code: ins.account_code,
+      category: ins.category,
+      confidence: ins.confidence,
+      source_meeting: meetingTitle,
+      source_date: meetingDate,
+      extraction_run: SOURCE_SESSION,
+    });
+    const category = ins.type === "rule" ? "methodology_rule" : "account_knowledge";
+    await addLearning({
+      agent_id: ADA_AGENT_ID,
+      category,
+      content: ins.account_code ? `[${ins.account_code}] ${ins.title}` : ins.title,
+      confidence: 0.8,
+      source_session_id: SOURCE_SESSION,
+      client_code: ins.account_code,
+    });
+  }
+  if (highConfidence.length > 0) {
+    // Audit trail in pending_insights with a terminal status.
+    await supabase.from("pending_insights").insert(
+      highConfidence.map((ins, i) => ({
+        meeting_id: meetingId,
+        meeting_title: meetingTitle,
+        meeting_date: meetingDate,
+        type: ins.type,
+        title: ins.title,
+        body: ins.body,
+        account_code: ins.account_code,
+        category: ins.category,
+        confidence: ins.confidence,
+        status: "auto_approved",
+        durability: "durable",
+        seq: i + 1,
+        participants: participants ?? null,
+        reviewed_at: new Date().toISOString(),
+        review_notes: "auto-approved (high confidence, policy 2026-06-09)",
+      })),
+    );
+    logger.info(
+      { meetingId, count: highConfidence.length },
+      "Auto-approved high-confidence durable insights into methodology_knowledge",
+    );
+  }
+
+  if (mediumConfidence.length === 0) {
+    if (highConfidence.length > 0) {
+      const examples = highConfidence.slice(0, 3).map((i) => `"${i.title}"`).join(", ");
+      await getDedicatedBotClient('ada').chat.postMessage({
+        channel,
+        text: `_"${meetingTitle}" (${meetingDate}) — ${highConfidence.length} durable insight${highConfidence.length === 1 ? '' : 's'} auto-approved into methodology (e.g. ${examples})${situationalInsights.length > 0 ? `; ${situationalInsights.length} situational auto-saved` : ''}_`,
+      });
+    }
+    return { durable: durableInsights.length, situational: situationalInsights.length };
+  }
+
+  const durableRows = mediumConfidence.map((ins, i) => ({
     meeting_id: meetingId,
     meeting_title: meetingTitle,
     meeting_date: meetingDate,
@@ -171,8 +240,20 @@ export async function sendInsightsForApproval(
     body: Record<string, unknown>;
   }>;
 
-  // Build Block Kit message (durable only)
+  // Build Block Kit message (medium-confidence durable only — high-confidence
+  // ones were auto-approved above)
   const blocks = buildApprovalBlocks(pendingRows, meetingId, meetingTitle, meetingDate);
+  if (highConfidence.length > 0) {
+    blocks.push({
+      type: "context",
+      elements: [
+        {
+          type: "mrkdwn",
+          text: `_${highConfidence.length} high-confidence insight${highConfidence.length === 1 ? '' : 's'} already auto-approved into methodology_`,
+        },
+      ],
+    });
+  }
 
   // Append situational footnote if any
   if (situationalInsights.length > 0) {
@@ -196,7 +277,7 @@ export async function sendInsightsForApproval(
   const result = await getDedicatedBotClient('ada').chat.postMessage({
     channel,
     blocks: blocks as any,
-    text: `${durableInsights.length} methodology insights extracted from "${meetingTitle}" — review and approve/reject`,
+    text: `${mediumConfidence.length} medium-confidence methodology insights from "${meetingTitle}" — review and approve/reject`,
   });
 
   // Store slack_message_ts on pending rows
