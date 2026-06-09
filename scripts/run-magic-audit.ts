@@ -14,5 +14,5 @@ if (!clientCode) {
 const { auditId, token } = await runMagicAudit(clientCode);
 console.log(`audit_id: ${auditId}`);
 console.log(`token:    ${token}`);
-console.log(`(report page will live at /audit/${token} once the dashboard route ships)`);
+console.log(`report:   https://bmad-lac.vercel.app/audit/${token}`);
 process.exit(0);
