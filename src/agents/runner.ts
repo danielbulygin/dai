@@ -23,6 +23,7 @@ import { runLaunchClaimGuard } from './hooks/launch-claim-guard.js';
 import type { ExecutedToolCall } from './hooks/launch-claim-guard.js';
 import { extractBatchIds, getBatchStates, buildLaunchStateSection } from './launch-state.js';
 import { detectClientCodes, loadClientContextExtras, loadMethodologyExtra } from './client-context.js';
+import { detectLaunchShaped, loadLaunchWorkflowExtra } from './workflow-context.js';
 
 let client: Anthropic | null = null;
 
@@ -595,6 +596,24 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
   // Loaded BEFORE the system prompt is built so launch-state injection below
   // can scan it for batch references.
   const priorMessages = await getMessages(session.id, 20);
+
+  // Conditional launch workflow (A10): the full upload/launch playbook loads
+  // only when the conversation looks launch-shaped. Internal runs only —
+  // client-scoped profiles have no launch tools.
+  if (!clientScope) {
+    try {
+      const texts = [...priorMessages.map((m: ChatMessage) => m.content), userMessage];
+      if (detectLaunchShaped(texts)) {
+        const wf = loadLaunchWorkflowExtra(agent.manifest.path);
+        if (wf) {
+          extras.push(wf);
+          logger.info({ sessionId: session.id }, 'Injected launch workflow (launch-shaped conversation)');
+        }
+      }
+    } catch (err) {
+      logger.warn({ err }, 'launch-workflow injection failed (continuing without it)');
+    }
+  }
 
   // Internal runs: inject per-client intelligence files when the conversation
   // references a client. Client-scoped runs already get theirs via the overlay.
