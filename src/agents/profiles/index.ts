@@ -13,7 +13,7 @@ export const toolProfiles = {
     'get_account_changes', 'get_creative_details',
     'get_alerts', 'get_learnings', 'get_briefs', 'get_concepts',
     'get_domo_funnel', 'get_weather_daily', 'get_triplewhale_summary',
-    'query_meta_insights', 'query_meta_creatives',
+    'query_meta_insights', 'query_meta_creatives', 'audit_dataset_health',
     'search_meetings', 'get_meeting_summary', 'get_meeting_transcript', 'list_recent_meetings',
     'post_message', 'reply_in_thread',
     'log_decision',

@@ -15,6 +15,7 @@ import * as googleTools from './tools/google-tools.js';
 import * as browserTools from './tools/browser-tools.js';
 import * as creativeTools from './tools/creative-tools.js';
 import * as metaApiTools from './tools/meta-api-tools.js';
+import { auditDatasetHealth } from './tools/dataset-health-tools.js';
 import * as mediaLibraryTools from './tools/media-library-tools.js';
 import * as adLaunchTools from './tools/ad-launch-tools.js';
 import * as triplewhaleTools from './tools/triplewhale-tools.js';
@@ -293,6 +294,29 @@ register({
 // ---------------------------------------------------------------------------
 // Meta API tools (direct Facebook Insights API — hourly/intraday data)
 // ---------------------------------------------------------------------------
+
+register({
+  definition: {
+    name: 'audit_dataset_health',
+    description:
+      "Audit a client's Meta pixel/dataset health — the data foundation underneath all tracking. Call this when asked about pixel health, tracking setup, event match quality (EMQ), advanced matching, CAPI vs pixel, data restrictions/flags (health & wellness), or when bottom-funnel events look wrong and you need to rule out the dataset itself. Returns per pixel: automatic advanced matching on/off + fields, restricted-use flag, first-party cookie status, last-fired time, per-event counts for the last ~24h (are core funnel events firing?), SERVER vs BROWSER split (are both CAPI and the browser pixel alive?), and which customer-info match keys flow on Purchase events (the EMQ inputs). Includes a warnings list with plain-language findings.",
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        client_code: {
+          type: 'string',
+          description: 'Client code (e.g. "PL", "BFM", "LA")',
+        },
+      },
+      required: ['client_code'],
+    },
+  },
+  async execute(input, context) {
+    return auditDatasetHealth({
+      clientCode: (context.clientScope?.clientCode ?? input.client_code) as string,
+    });
+  },
+});
 
 register({
   definition: {
