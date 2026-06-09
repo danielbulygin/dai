@@ -1,5 +1,7 @@
 # Piper — Evolution Plan
 
+> **⚠️ SEQUENCING SUPERSEDED 2026-06-09 by `~/dev/bmad/docs/piper-master-plan-2026-06-09.md` — that file is the only build order (read it before any Piper work). This doc remains as design history; do not add new phases here.**
+
 The long-term goal: Piper handles the project management of AOT's entire production pipeline as a proactive partner — surfacing what's slipping before it slips, helping things move, identifying trends. The team handles exceptions; Piper handles the routine 80%.
 
 This document is the roadmap. Each phase is shippable on its own and unlocks the next. Update as phases complete; mark items ✅ as they ship.
