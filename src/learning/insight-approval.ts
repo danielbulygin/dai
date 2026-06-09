@@ -203,108 +203,54 @@ export async function sendInsightsForApproval(
     return { durable: durableInsights.length, situational: situationalInsights.length };
   }
 
-  const durableRows = mediumConfidence.map((ins, i) => ({
-    meeting_id: meetingId,
-    meeting_title: meetingTitle,
-    meeting_date: meetingDate,
-    type: ins.type,
-    title: ins.title,
-    body: ins.body,
-    account_code: ins.account_code,
-    category: ins.category,
-    confidence: ins.confidence,
-    status: "pending",
-    durability: "durable",
-    seq: i + 1,
-    participants: participants ?? null,
-  }));
-
-  const { data: inserted, error } = await supabase
-    .from("pending_insights")
-    .insert(durableRows)
-    .select("id, seq, type, title, account_code, category, confidence, body");
-
-  if (error) {
-    logger.error({ error }, "Failed to insert pending insights");
-    throw new Error(`Failed to insert pending insights: ${error.message}`);
-  }
-
-  const pendingRows = inserted as Array<{
-    id: string;
-    seq: number;
-    type: string;
-    title: string;
-    account_code: string | null;
-    category: string | null;
-    confidence: string | null;
-    body: Record<string, unknown>;
-  }>;
-
-  // Build Block Kit message (medium-confidence durable only — high-confidence
-  // ones were auto-approved above)
-  const blocks = buildApprovalBlocks(pendingRows, meetingId, meetingTitle, meetingDate);
-  if (highConfidence.length > 0) {
-    blocks.push({
-      type: "context",
-      elements: [
-        {
-          type: "mrkdwn",
-          text: `_${highConfidence.length} high-confidence insight${highConfidence.length === 1 ? '' : 's'} already auto-approved into methodology_`,
-        },
-      ],
+  // Medium/unknown-confidence durable insights are CALL CONTEXT, never rules
+  // (Dan 2026-06-10): recallable via recall()/search_memories with full
+  // provenance, but they never enter methodology_knowledge and never ask a
+  // human to triage them.
+  await supabase.from("pending_insights").insert(
+    mediumConfidence.map((ins, i) => ({
+      meeting_id: meetingId,
+      meeting_title: meetingTitle,
+      meeting_date: meetingDate,
+      type: ins.type,
+      title: ins.title,
+      body: ins.body,
+      account_code: ins.account_code,
+      category: ins.category,
+      confidence: ins.confidence,
+      status: "auto_saved",
+      durability: "durable",
+      seq: i + 1,
+      participants: participants ?? null,
+      reviewed_at: new Date().toISOString(),
+      review_notes: "call context (policy 2026-06-10): medium confidence — saved as context, not methodology",
+    })),
+  );
+  for (const ins of mediumConfidence) {
+    await addLearning({
+      agent_id: ADA_AGENT_ID,
+      category: "call_context",
+      content: `${ins.account_code ? `[${ins.account_code}] ` : ""}${ins.title} — context from "${meetingTitle}" (${meetingDate})`,
+      confidence: 0.5,
+      source_session_id: SOURCE_SESSION,
+      client_code: ins.account_code,
     });
   }
 
-  // Append situational footnote if any
-  if (situationalInsights.length > 0) {
-    const examples = situationalInsights
-      .slice(0, 3)
-      .map((i) => `"${i.title}"`)
-      .join(", ");
-    blocks.push({
-      type: "context",
-      elements: [
-        {
-          type: "mrkdwn",
-          text: `_${situationalInsights.length} situational observations auto-saved — ${examples}_`,
-        },
-      ],
-    });
-  }
-
-  // Post to review channel
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const result = await getDedicatedBotClient('ada').chat.postMessage({
+  // One compact channel note — no buttons, no review pressure.
+  const parts = [
+    highConfidence.length > 0 ? `${highConfidence.length} auto-approved into methodology` : null,
+    `${mediumConfidence.length} saved as call context`,
+    situationalInsights.length > 0 ? `${situationalInsights.length} situational auto-saved` : null,
+  ].filter(Boolean);
+  await getDedicatedBotClient('ada').chat.postMessage({
     channel,
-    blocks: blocks as any,
-    text: `${mediumConfidence.length} medium-confidence methodology insights from "${meetingTitle}" — review and approve/reject`,
+    text: `_"${meetingTitle}" (${meetingDate}) — ${parts.join("; ")} (e.g. ${durableInsights.slice(0, 3).map((i) => `"${i.title}"`).join(", ")})_`,
   });
 
-  // Store slack_message_ts on pending rows
-  if (result.ts) {
-    const ids = pendingRows.map((r) => r.id);
-    await supabase
-      .from("pending_insights")
-      .update({ slack_message_ts: result.ts })
-      .in("id", ids);
-
-    // Post a helper message in the thread
-    await getDedicatedBotClient('ada').chat.postMessage({
-      channel,
-      thread_ts: result.ts,
-      text: [
-        "Reply in this thread to cherry-pick:",
-        "`reject 3, 7, 14` — reject specific items by number",
-        "`approve 1-5, 8` — approve a range + individual",
-        "`reject all decisions` — reject an entire type",
-        "Buttons above handle bulk approve/reject by type or all at once.",
-      ].join("\n"),
-    });
-  }
-
   logger.info(
-    { meetingId, durable: durableInsights.length, situational: situationalInsights.length, messageTs: result.ts, channel },
-    "Sent insights for approval",
+    { meetingId, autoApproved: highConfidence.length, callContext: mediumConfidence.length, situational: situationalInsights.length },
+    "Processed insights (auto-approve + call-context policy)",
   );
 
   return { durable: durableInsights.length, situational: situationalInsights.length };
@@ -314,7 +260,9 @@ export async function sendInsightsForApproval(
 // Block Kit builder
 // ---------------------------------------------------------------------------
 
-function buildApprovalBlocks(
+// Retained for the button/cherry-pick handlers on historical posts; the daily
+// pipeline no longer posts approval messages (call-context policy 2026-06-10).
+export function buildApprovalBlocks(
   insights: Array<{
     id: string;
     seq: number;
