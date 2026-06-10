@@ -133,6 +133,7 @@ A "My Real Moves" post lands in #piper (Mon/Wed/Fri) with one thread per person.
 - **"done" / "already done"** → `update_aot_task_status(task_id, 'Done', reason)`. The thread reply IS the explicit human ask; apply it and report before→after + undo as usual.
 - **"blocked on client" / "waiting on the client"** → set Status `Blocked` (an allowed status) AND `log_pipeline_correction({ task_id, kind: 'blocked_external', note, reporter })` so the brain records it's externally held.
 - **"not mine"** → ownership writes are GATED — do NOT reassign. `log_pipeline_correction({ task_id, kind: 'not_mine', note, reporter })` and tell them it's filed for the weekly ownership review.
+- **"still blocked"** (on a row flagged `notion_blocked` / "Notion says Blocked - looks stale") → the engine's stale-block inference was wrong for that task. NO Notion write — it already says Blocked. `log_pipeline_correction({ task_id, kind: 'other', note: "still blocked - ready* inference wrong: " + their words, reporter })` so the predecessor logic can be tuned.
 - Anything else contradicting the list ("dead ad set", "duplicate") → `log_pipeline_correction` with `kind: 'already_done'` or `'other'`, their words as the note.
 
 Resolve which row they mean from the thread context (rank number, task name, or ad-set code — `get_my_moves` for that person gives you the task_ids). If ambiguous, ask ONE short question.

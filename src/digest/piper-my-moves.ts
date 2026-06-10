@@ -35,6 +35,7 @@ export interface MyMoveRow {
   task_url: string | null;
   canonical_type: string | null;
   derived_status: string; // 'in_progress' | 'ready' | 'ready*'
+  notion_blocked: boolean | null; // ready*: Notion still says Blocked, predecessor looks done
   due_date: string | null; // YYYY-MM-DD
   days_overdue: number | null;
   days_in_status: number | null;
@@ -141,6 +142,9 @@ export function renderMoveRow(row: MyMoveRow): string {
     segs.push('no due date');
   }
   segs.push(bucketLabel(row.bucket));
+  // ready*: Notion still says Blocked but the predecessor looks done — say so
+  // instead of silently disagreeing with what the doer sees in Notion.
+  if (row.notion_blocked) segs.push("_Notion says Blocked - looks stale; reply 'still blocked' if not_");
 
   return `${row.rank}. ${statusIcon(row.derived_status)} ${parts[0]} - ${segs.join(' · ')}`;
 }
@@ -208,7 +212,7 @@ export function renderMyMoves(rows: MyMoveRow[], opts: { now?: Date; freshness?:
     '',
     ...(summaryLines.length > 0 ? summaryLines : ['No moves on anyone\'s board right now - all clear.']),
     '',
-    "Reply in your thread: 'done', 'not mine', or 'blocked on client' and I'll update Notion. Full board: https://bmad-lac.vercel.app/pipeline",
+    "Reply in your thread: 'done', 'not mine', 'still blocked', or 'blocked on client' and I'll update Notion. Full board: https://bmad-lac.vercel.app/pipeline",
     `_derived state as of ${hh}:${mm} UTC_`,
   ].join('\n');
 

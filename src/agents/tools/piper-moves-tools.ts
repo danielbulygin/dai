@@ -89,6 +89,7 @@ function presentRow(row: MyMoveRow) {
     task_name: row.task_name,
     task_url: row.task_url,
     derived_status: row.derived_status,
+    notion_blocked: row.notion_blocked ?? false,
     due_date: row.due_date,
     days_overdue: row.days_overdue,
     days_in_status: row.days_in_status,
