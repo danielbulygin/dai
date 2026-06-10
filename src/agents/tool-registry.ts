@@ -23,6 +23,7 @@ import * as reportTools from '../reports/index.js';
 import * as methodologySanitizer from '../client-agents/methodology-sanitizer.js';
 import { logger } from '../utils/logger.js';
 import { logToolCall, logWrite, fetchRecentActions } from './action-log.js';
+import * as piperMovesTools from './tools/piper-moves-tools.js';
 import * as cadenceTools from './tools/cadence-tools.js';
 import * as cadenceReadTools from './tools/cadence-read-tools.js';
 import { getSupabase } from '../integrations/supabase.js';
@@ -2518,6 +2519,72 @@ register({
       limit: input.limit as number | undefined,
     });
     return JSON.stringify({ count: rows.length, rows });
+  },
+});
+
+register({
+  definition: {
+    name: 'get_my_moves',
+    description:
+      'THE tool for "my moves" / "what are X\'s moves" / "what should I work on" questions. Reads the Tier-1 "My Real Moves" list straight from the SQL brain (piper_my_moves RPC): each person\'s ranked, de-zombied, <=10-item list of tasks that are actually theirs to act on NOW (derived_status in_progress/ready on an alive ad set, future-dated work stripped). Rows come PRE-RANKED from the brain (gate proximity -> due date -> ad-set delivery date) with a freshness stamp — render them in order, do NOT recompute, re-rank, or second-guess against query_aot_tasks. Each row carries task_url and ad_set_url; hyperlink every task name and ad-set code (<url|CODE>). `person` accepts a slug ("zyra"), a display-name fragment ("Zyr", case-insensitive), or a Slack user ID (with or without <@...> wrapping). Omit `person` to get the all-people summary counts (moves/overdue/in_progress per person).',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        person: {
+          type: 'string',
+          description: 'Who to fetch moves for: slug ("zyra"), display-name fragment ("Fabio"), or Slack ID ("U097RJ2KMEU" / "<@U097RJ2KMEU>"). Omit for the all-people summary.',
+        },
+      },
+    },
+  },
+  async execute(input) {
+    return await piperMovesTools.getMyMoves({
+      person: input.person as string | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'log_pipeline_correction',
+    description:
+      'File a human correction to the pipeline data into piper_event_log (actor=\'human-correction\') — the My Real Moves correction loop. Use when a doer contradicts their list and the fix is NOT one of your scoped Notion writes: "not mine" (ownership is gated — file it for the weekly ownership review), "blocked on the client" (pair with setting Status Blocked), "already done elsewhere", or any other data correction. This writes an event-log row only; it never touches Notion. Provide task_id (Notion task page id from query_aot_tasks / get_my_moves) OR ad_set_code (e.g. "TLx4101"), the kind, the reporter (who said it), and their words as the note. Never argue with a doer about their own task — apply the matching scoped write or file the correction, and thank them either way.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        task_id: {
+          type: 'string',
+          description: 'Notion task page id the correction targets (preferred when the correction is about a task).',
+        },
+        ad_set_code: {
+          type: 'string',
+          description: 'Ad-set code (e.g. "TLx4101") when the correction targets a whole ad set rather than one task.',
+        },
+        kind: {
+          type: 'string',
+          enum: ['not_mine', 'already_done', 'blocked_external', 'other'],
+          description: 'not_mine = ownership wrong (gated — filed for weekly review); already_done = work finished but data disagrees; blocked_external = held by client/outside party; other = anything else.',
+        },
+        note: {
+          type: 'string',
+          description: 'What the person said / what is wrong, in their words.',
+        },
+        reporter: {
+          type: 'string',
+          description: 'Who reported the correction (display name or Slack ID).',
+        },
+      },
+      required: ['kind', 'note', 'reporter'],
+    },
+  },
+  async execute(input) {
+    return await piperMovesTools.logPipelineCorrection({
+      task_id: input.task_id as string | undefined,
+      ad_set_code: input.ad_set_code as string | undefined,
+      kind: input.kind as piperMovesTools.CorrectionKind,
+      note: input.note as string,
+      reporter: input.reporter as string,
+    });
   },
 });
 

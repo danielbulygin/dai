@@ -19,6 +19,7 @@
     "creative-audit": "tsx --env-file=.env scripts/creative-audit.ts",
     "chat:piper": "tsx --env-file=.env scripts/chat-piper.ts",
     "digest:piper": "tsx --env-file=.env scripts/piper-digest.ts",
+    "digest:piper-moves": "tsx --env-file=.env scripts/piper-my-moves.ts",
     "hygiene:sweep": "tsx --env-file=.env scripts/piper-hygiene-sweep.ts"
   },
   "keywords": [

@@ -8,6 +8,7 @@
 
 import { getDaiSupabase } from '../integrations/dai-supabase.js';
 import { logger } from '../utils/logger.js';
+import { emitPiperEvent, type PiperEventTargetType } from './piper-event-log.js';
 import type { ToolContext } from './tool-registry.js';
 
 // Cap row payload sizes so a single row stays well under 1MB.
@@ -84,10 +85,23 @@ export interface WriteLogInput {
   status?: 'success' | 'failed' | 'partial';
 }
 
+// Dual-emit rule (master plan 2026-06-09 §1.5): scoped Notion writes that
+// target a task or ad set ALSO land in piper_event_log (bmad Supabase), the
+// one narrative log per target. piper_actions stays unchanged — raw tool-call
+// telemetry. Only tools in this map emit; everything else is telemetry-only.
+const EVENT_LOG_TARGET_TYPES: Record<string, PiperEventTargetType> = {
+  update_aot_task_status: 'task',
+  update_aot_task_due_date: 'task',
+  update_aot_ad_set_stage: 'ad_set',
+};
+
 /**
  * Log a state-changing write (action_type='write') with the before/after and a
  * machine-readable reverse_action, so every Piper mutation is auditable AND
  * undoable. Mirrors the piper-hygiene-sweep pattern. Fire-and-forget.
+ *
+ * Scoped Notion writes (see EVENT_LOG_TARGET_TYPES) additionally emit a
+ * piper_event_log row so each task/ad set has one filterable narrative.
  */
 export function logWrite(input: WriteLogInput): void {
   void writeWriteRow(input).catch((err) => {
@@ -96,6 +110,21 @@ export function logWrite(input: WriteLogInput): void {
       'piper_actions write-log failed (non-fatal)',
     );
   });
+
+  const targetType = EVENT_LOG_TARGET_TYPES[input.toolName];
+  if (targetType) {
+    emitPiperEvent({
+      actor: input.context.agentId,
+      action: input.toolName,
+      targetType,
+      targetId: input.targetId,
+      before: input.before,
+      after: input.after,
+      why: input.summary,
+      channel: input.context.channelId ?? 'slack',
+      result: input.status ?? 'success',
+    });
+  }
 }
 
 async function writeWriteRow(input: WriteLogInput): Promise<void> {

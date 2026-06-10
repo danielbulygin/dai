@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { env } from '../../env.js';
 import { logger } from '../../utils/logger.js';
 import { runPiperDigest } from '../../digest/piper-digest.js';
+import { runPiperMyMoves } from '../../digest/piper-my-moves.js';
 
 export const cronRouter = new Hono();
 
@@ -75,6 +76,42 @@ cronRouter.post('/cron/piper-digest', async (c) => {
     });
   } catch (err) {
     logger.error({ err }, 'piper-digest cron failed');
+    return c.json({ error: (err as Error).message }, 500);
+  }
+});
+
+/**
+ * POST /api/cron/piper-my-moves
+ *
+ * Triggered by the droplet systemd timer (Mon/Wed/Fri mornings). Deterministic —
+ * no LLM: fetches piper_my_moves_all() from the brain and posts the "My Real
+ * Moves" parent + per-person threads to #piper as Piper.
+ *
+ * ?dry_run=1 → render but don't post; returns the full text in the response.
+ */
+cronRouter.post('/cron/piper-my-moves', async (c) => {
+  if (!env.CRON_SECRET) {
+    return c.json({ error: 'CRON_SECRET not configured' }, 503);
+  }
+  if (!cronAuthed(c)) {
+    return c.json({ error: 'Unauthorized' }, 401);
+  }
+
+  const dryRun = c.req.query('dry_run') === '1';
+
+  try {
+    const result = await runPiperMyMoves({ post: !dryRun });
+    return c.json({
+      status: result.posted ? 'posted' : 'generated',
+      channel: result.channel,
+      ts: result.parentTs ?? null,
+      people: result.peopleCount,
+      moves: result.moveCount,
+      chars: result.text.length,
+      ...(dryRun ? { text: result.text } : {}),
+    });
+  } catch (err) {
+    logger.error({ err }, 'piper-my-moves cron failed');
     return c.json({ error: (err as Error).message }, 500);
   }
 });
