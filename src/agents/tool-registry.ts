@@ -24,6 +24,7 @@ import * as methodologySanitizer from '../client-agents/methodology-sanitizer.js
 import { logger } from '../utils/logger.js';
 import { logToolCall, logWrite, fetchRecentActions } from './action-log.js';
 import * as piperMovesTools from './tools/piper-moves-tools.js';
+import * as piperBrainTools from './tools/piper-brain-tools.js';
 import * as cadenceTools from './tools/cadence-tools.js';
 import * as cadenceReadTools from './tools/cadence-read-tools.js';
 import { getSupabase } from '../integrations/supabase.js';
@@ -2584,6 +2585,76 @@ register({
       kind: input.kind as piperMovesTools.CorrectionKind,
       note: input.note as string,
       reporter: input.reporter as string,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'get_pipeline_summary',
+    description:
+      'THE default for "state of X" / "how\'s the pipeline" / "what\'s going on at <client>" questions. Reads the precomputed SQL brain (piper_pipeline_summary + piper_bucket_rollup RPCs): per-client live/working/sitting/external/data-gap set counts, REAL overdue tasks (de-zombied by the engine), gate-done-7d, avg coverage %, plus the per-bucket working/sitting rollup — all stamped with a freshness timestamp. Clients come sorted worst-first. Render these numbers VERBATIM and always cite the freshness ("brain as of HH:MM UTC"). Do NOT recompute pipeline state from query_aot_tasks / query_aot_adsets / count_aot_* for any covered client — the brain already separated real work from zombies and stamped confidence. Pass `client` (case-insensitive code, e.g. "TL") to filter to one client; omit for the whole pipeline.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        client: {
+          type: 'string',
+          description: 'Optional client code to filter to (case-insensitive, e.g. "TL", "adbn"). Omit for all clients.',
+        },
+      },
+    },
+  },
+  async execute(input) {
+    return await piperBrainTools.getPipelineSummary({
+      client: input.client as string | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'get_adset_case',
+    description:
+      'ONE call answers "what\'s going on with <ad-set code>" — the full brain case file for a single ad set (piper_adset_case RPC): bucket + motion, frontier task + holder, days at frontier vs the bucket median, blocker, open tasks, recent events, predicted ship, data confidence, AND a deterministic suggested ping (pickup / client_chase / overdue_nudge) with a prewritten one-line message addressed to the right person. Render the payload directly; NEVER spelunk with query_aot_tasks for a set the brain covers. Always include the suggested ping (when present), the confidence, and the freshness ("derived state as of HH:MM UTC"). The code is normalized for you ("tlx4101" → "TLx4101"). If the set isn\'t in the brain (found=false), THEN fall back to query_aot_adsets against live Notion.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        ad_set_code: {
+          type: 'string',
+          description: 'The ad-set code, any casing ("TLx4101", "tlx4101", "MEOW3880").',
+        },
+      },
+      required: ['ad_set_code'],
+    },
+  },
+  async execute(input) {
+    return await piperBrainTools.getAdsetCase({
+      ad_set_code: input.ad_set_code as string,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'query_piper_state',
+    description:
+      'Forensic-grade filtered read over the derived brain state: piper_task_state joined to piper_ad_set_state, filterable by client (code, case-insensitive), person (owner_person_id slug, e.g. "zyra"), ad_set_code, and status (derived_status: in_progress / ready / ready* / waiting / done). Each row carries derived_status, canonical_type, raw_status, owner, due_derived, plus the ad-set\'s bucket, motion, and data_confidence; the response carries a freshness timestamp (max updated_at). Limit 200 rows. Use ONLY when get_pipeline_summary / get_adset_case / get_my_moves don\'t cover the slice you need (e.g. "every waiting raw.deliver task for TL"). Cite the freshness note in your answer.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        client: { type: 'string', description: 'Client code filter, case-insensitive (e.g. "TL").' },
+        person: { type: 'string', description: 'Owner person_id slug filter (e.g. "zyra", "nina").' },
+        ad_set_code: { type: 'string', description: 'Single ad-set code filter (normalized for you).' },
+        status: { type: 'string', description: 'derived_status filter: in_progress, ready, ready*, waiting, done.' },
+      },
+    },
+  },
+  async execute(input) {
+    return await piperBrainTools.queryPiperState({
+      client: input.client as string | undefined,
+      person: input.person as string | undefined,
+      ad_set_code: input.ad_set_code as string | undefined,
+      status: input.status as string | undefined,
     });
   },
 });
