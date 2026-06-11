@@ -85,6 +85,7 @@ interface JobResult {
 
 async function runClientAnalysis(prompt: string, code: string, marker: string): Promise<string> {
   const result = await runAgent({
+    source: 'monday-prep',
     agentId: 'ada',
     userMessage: prompt,
     userId: 'system',

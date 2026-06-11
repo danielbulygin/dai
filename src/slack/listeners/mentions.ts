@@ -106,6 +106,7 @@ export function registerMentionListener(app: App): void {
     try {
       const result = await agentQueue.enqueue(channel, () =>
         runAgent({
+          source: 'interactive',
           agentId,
           userMessage: route.cleanedText,
           userId: user,

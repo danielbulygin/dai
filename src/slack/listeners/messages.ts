@@ -146,6 +146,7 @@ export function registerMessageListener(app: App): void {
     try {
       const result = await agentQueue.enqueue(msg.channel as string, () =>
         runAgent({
+          source: 'interactive',
           agentId,
           userMessage: cleanedText,
           userId,

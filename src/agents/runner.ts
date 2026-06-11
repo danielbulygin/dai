@@ -73,6 +73,8 @@ export interface RunOptions {
   channelId: string;
   threadTs?: string;
   sessionId?: string;
+  /** Where this run originated (interactive | monday-prep | delegation | api-* | eval | orchestrator). Telemetry only. */
+  source?: string;
   onText?: (text: string) => void;
   /** Called between tool-use turns to reset streamed text and prevent repetition. */
   onTurnReset?: () => void;
@@ -98,55 +100,139 @@ export interface RunResult {
   usage: TokenUsage;
 }
 
-function buildSystemPrompt(
-  persona: string,
-  instructions: string,
-  context: QuickContext,
-  extras?: { name: string; content: string }[],
-): string {
-  const parts: string[] = [];
+// ---------------------------------------------------------------------------
+// Cost estimation (USD per 1M tokens; cw = 5-min cache write, cr = cache read)
+// ---------------------------------------------------------------------------
 
-  // Current date/time so the agent always knows "now"
-  const berlinNow = new Date().toLocaleString('en-GB', {
+const MODEL_PRICES: Array<{ match: string; in: number; cw: number; cr: number; out: number }> = [
+  { match: 'opus', in: 5, cw: 6.25, cr: 0.5, out: 25 },
+  { match: 'sonnet', in: 3, cw: 3.75, cr: 0.3, out: 15 },
+  { match: 'haiku', in: 1, cw: 1.25, cr: 0.1, out: 5 },
+];
+
+export function estimateCostUsd(model: string, usage: TokenUsage): number {
+  const p = MODEL_PRICES.find((e) => model.includes(e.match)) ?? MODEL_PRICES[0]!;
+  return (
+    (usage.input * p.in +
+      (usage.cacheCreation ?? 0) * p.cw +
+      (usage.cacheRead ?? 0) * p.cr +
+      usage.output * p.out) /
+    1_000_000
+  );
+}
+
+// ---------------------------------------------------------------------------
+// System prompt assembly — cache-aware two-block structure.
+//
+// Prompt caching is a PREFIX match: any byte change invalidates everything
+// after it. Render order is tools → system → messages. So the system prompt
+// is split into two blocks, each with its own cache breakpoint:
+//
+//   Block 1 (STABLE, ~45K tokens): persona + instructions + registry extras
+//     (METRICS/skills/knowledge) + agent directory. Identical for every run
+//     of an agent within a process — caches once, read forever.
+//   Block 2 (VOLATILE): per-thread context (slack-context, client files,
+//     methodology, launch workflow, launch-state), session summary,
+//     learnings, prefs, and the current DATE — at DAY precision, LAST.
+//     A change here rewrites only this block; block 1 still cache-hits.
+//
+// The old layout put a MINUTE-precision datetime as the FIRST part of one
+// monolithic block, so the entire prefix invalidated every minute and
+// cross-turn cache reads almost never hit (cache writes were ~55% of the
+// dai key's spend, 2026-06-04..10 admin-API data).
+// ---------------------------------------------------------------------------
+
+function buildDateSection(): string {
+  const berlinDay = new Date().toLocaleDateString('en-GB', {
     timeZone: 'Europe/Berlin',
     weekday: 'long',
     year: 'numeric',
     month: 'long',
     day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
   });
   const isoDate = new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/Berlin' }); // YYYY-MM-DD
-  parts.push(`## Current Date & Time\nRight now it is: ${berlinNow} (Europe/Berlin)\nISO date: ${isoDate}\nIMPORTANT: The current year is ${new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/Berlin' }).slice(0, 4)}. Always use this date as your reference when answering questions about days of the week, time periods, or relative dates like "yesterday", "last week", etc.`);
+  return `## Current Date\nToday is: ${berlinDay} (Europe/Berlin)\nISO date: ${isoDate}\nIMPORTANT: The current year is ${isoDate.slice(0, 4)}. Always use this date as your reference when answering questions about days of the week, time periods, or relative dates like "yesterday", "last week", etc. For precise time-of-day, rely on timestamps in tool results — you only know the date, not the clock time.`;
+}
 
-  parts.push(persona);
-  parts.push(instructions);
+function buildSystemBlocks(
+  persona: string,
+  instructions: string,
+  context: QuickContext,
+  stableExtras: { name: string; content: string }[],
+  volatileExtras: { name: string; content: string }[],
+): Anthropic.TextBlockParam[] {
+  const stableParts: string[] = [persona, instructions];
+  for (const extra of stableExtras) {
+    stableParts.push(extra.content);
+  }
 
-  if (extras && extras.length > 0) {
-    for (const extra of extras) {
-      parts.push(extra.content);
-    }
+  const volatileParts: string[] = [];
+  for (const extra of volatileExtras) {
+    volatileParts.push(extra.content);
   }
 
   if (context.lastSessionSummary) {
-    parts.push(`## Previous Session\n${context.lastSessionSummary}`);
+    volatileParts.push(`## Previous Session\n${context.lastSessionSummary}`);
   }
 
   if (context.topLearnings.length > 0) {
     const items = context.topLearnings
       .map((l) => `- ${l.content}`)
       .join('\n');
-    parts.push(`## Key Learnings\n${items}`);
+    volatileParts.push(`## Key Learnings\n${items}`);
   }
 
   if (context.userLearnings.length > 0) {
     const items = context.userLearnings
       .map((l) => `- ${l.content}`)
       .join('\n');
-    parts.push(`## User Preferences\n${items}`);
+    volatileParts.push(`## User Preferences\n${items}`);
   }
 
-  return parts.join('\n\n');
+  // Date goes LAST so the daily flip invalidates as little as possible.
+  volatileParts.push(buildDateSection());
+
+  return [
+    {
+      type: 'text' as const,
+      text: stableParts.join('\n\n'),
+      cache_control: { type: 'ephemeral' as const },
+    },
+    {
+      type: 'text' as const,
+      text: volatileParts.join('\n\n'),
+      cache_control: { type: 'ephemeral' as const },
+    },
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// Moving message-cache breakpoint — caches the growing conversation
+// incrementally across turns of the tool loop (and across runs in a thread).
+// Budget: tools(1) + system(2) + messages(1) = the 4-breakpoint maximum.
+// ---------------------------------------------------------------------------
+
+function applyMovingCacheBreakpoint(messages: Anthropic.MessageParam[]): void {
+  // Strip any marker placed on a previous turn…
+  for (const msg of messages) {
+    if (Array.isArray(msg.content)) {
+      for (const block of msg.content) {
+        delete (block as { cache_control?: unknown }).cache_control;
+      }
+    }
+  }
+  // …then mark the last block of the last message. The last message before an
+  // API call is always a user message (initial text or tool_results), so the
+  // marked block is a text/tool_result block — both accept cache_control.
+  const last = messages[messages.length - 1];
+  if (!last) return;
+  if (typeof last.content === 'string') {
+    last.content = [{ type: 'text' as const, text: last.content }];
+  }
+  if (Array.isArray(last.content) && last.content.length > 0) {
+    const lastBlock = last.content[last.content.length - 1] as { cache_control?: unknown };
+    lastBlock.cache_control = { type: 'ephemeral' };
+  }
 }
 
 async function resolveSession(
@@ -219,10 +305,11 @@ async function generateSessionSummary(sessionId: string): Promise<void> {
 async function runSimple(
   apiClient: Anthropic,
   model: string,
-  systemPrompt: string,
+  systemBlocks: Anthropic.TextBlockParam[],
   messages: Anthropic.MessageParam[],
   onText?: (text: string) => void,
 ): Promise<{ responseText: string; usage: TokenUsage }> {
+  applyMovingCacheBreakpoint(messages);
   return withRetry(async () => {
     let responseText = '';
 
@@ -230,13 +317,7 @@ async function runSimple(
       model,
       max_tokens: 16000,
       thinking: { type: 'adaptive' },
-      system: [
-        {
-          type: 'text' as const,
-          text: systemPrompt,
-          cache_control: { type: 'ephemeral' as const },
-        },
-      ],
+      system: systemBlocks,
       messages,
     });
 
@@ -267,7 +348,7 @@ async function runSimple(
 async function runWithTools(
   apiClient: Anthropic,
   model: string,
-  systemPrompt: string,
+  systemBlocks: Anthropic.TextBlockParam[],
   initialMessages: Anthropic.MessageParam[],
   tools: Anthropic.Tool[],
   toolContext: ToolContext,
@@ -291,15 +372,6 @@ async function runWithTools(
   let totalCacheRead = 0;
   let totalCacheCreation = 0;
 
-  // Prepare cached system prompt and tools — static across all turns
-  const cachedSystem: Anthropic.TextBlockParam[] = [
-    {
-      type: 'text' as const,
-      text: systemPrompt,
-      cache_control: { type: 'ephemeral' as const },
-    },
-  ];
-
   // Add cache breakpoint to the last tool so tool definitions are cached too
   const cachedTools: Anthropic.Tool[] = tools.map((tool, i) =>
     i === tools.length - 1
@@ -316,7 +388,7 @@ async function runWithTools(
   const MAX_CONTEXT_CHARS = MAX_CONTEXT_TOKENS * CHARS_PER_TOKEN; // ~760K chars
 
   // Estimate static context size (system prompt + tool defs + initial messages)
-  const staticChars = systemPrompt.length
+  const staticChars = systemBlocks.reduce((s, b) => s + b.text.length, 0)
     + JSON.stringify(tools).length
     + initialMessages.reduce((s, m) => s + (typeof m.content === 'string' ? m.content.length : JSON.stringify(m.content).length), 0);
 
@@ -348,6 +420,10 @@ async function runWithTools(
 
     let turnText = '';
 
+    // Move the message-cache breakpoint to the newest message so the growing
+    // conversation (incl. tool results) caches incrementally turn over turn.
+    applyMovingCacheBreakpoint(messages);
+
     const msg = await withRetry(async () => {
       turnText = ''; // Reset on retry
       const stream = apiClient.messages.stream({
@@ -357,7 +433,7 @@ async function runWithTools(
         // interleaves thinking between tool calls. Thinking blocks ride along
         // in msg.content and are echoed back on the next turn automatically.
         thinking: { type: 'adaptive' },
-        system: cachedSystem,
+        system: systemBlocks,
         messages,
         tools: cachedTools,
       });
@@ -552,13 +628,15 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
     ? await getClientQuickContext(effectiveAgentId, clientScope.clientCode, userId)
     : await getQuickContext(agent.config.id, userId);
 
-  // Jasmin: inject preference context and fetch more learnings
-  const extras = agent.extras ? [...agent.extras] : [];
+  // STABLE extras — identical for every run of this agent within a process.
+  // These join persona+instructions in cache block 1 (see buildSystemBlocks).
+  // Agent directory is static config, so it lives here — agents can emit REAL
+  // <@U...> mentions (plain-text "@Ace" triggers nothing — 2026-06-03 demo).
+  const stableExtras = agent.extras ? [...agent.extras] : [];
+  stableExtras.push({ name: 'agent-directory', content: buildAgentDirectorySection(agent.config.display_name) });
 
-  // Agent directory + live Slack context — so agents can emit REAL <@U...> mentions
-  // (plain-text "@Ace" triggers nothing — 2026-06-03 demo) and never post to a
-  // placeholder channel ID (Ada tried `slack_post` with a made-up channel that day).
-  extras.push({ name: 'agent-directory', content: buildAgentDirectorySection(agent.config.display_name) });
+  // VOLATILE extras — per-thread/per-run context; cache block 2.
+  const extras: { name: string; content: string }[] = [];
   if (channelId && !channelId.startsWith('internal-')) {
     extras.push({
       name: 'slack-context',
@@ -664,12 +742,14 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
     logger.warn({ err }, 'launch-state injection failed (continuing without it)');
   }
 
-  const systemPrompt = buildSystemPrompt(
+  const systemBlocks = buildSystemBlocks(
     agent.persona,
     agent.instructions,
     context,
+    stableExtras,
     extras,
   );
+  const systemPromptChars = systemBlocks.reduce((s, b) => s + b.text.length, 0);
 
   // Fire-and-forget: increment applied_count for all injected learnings
   const allInjected = [...context.topLearnings, ...context.userLearnings];
@@ -731,7 +811,9 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
       sessionId: session.id,
       historyLength: priorMessages.length,
       historyChars,
-      systemPromptChars: systemPrompt.length,
+      systemPromptChars,
+      stableBlockChars: systemBlocks[0]?.text.length ?? 0,
+      volatileBlockChars: systemBlocks[1]?.text.length ?? 0,
       toolCount: toolDefs.length,
       userMessageChars: userMessage.length,
     },
@@ -747,7 +829,7 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
       const simple = await runSimple(
         getClient(),
         agent.config.model,
-        systemPrompt,
+        systemBlocks,
         conversationMessages,
         onText,
       );
@@ -767,7 +849,7 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
       result = await runWithTools(
         getClient(),
         agent.config.model,
-        systemPrompt,
+        systemBlocks,
         conversationMessages,
         toolDefs,
         toolContext,
@@ -837,11 +919,16 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
       {
         agentId: effectiveAgentId,
         sessionId: session.id,
+        source: options.source ?? 'untagged',
+        model: agent.config.model,
         responseLength: result.responseText.length,
         historyLength: priorMessages.length,
         turns: result.turns,
         inputTokens: result.usage.input,
         outputTokens: result.usage.output,
+        cacheReadTokens: result.usage.cacheRead ?? 0,
+        cacheCreationTokens: result.usage.cacheCreation ?? 0,
+        estCostUsd: Math.round(estimateCostUsd(agent.config.model, result.usage) * 10000) / 10000,
         hasTools: toolDefs.length > 0,
       },
       `Agent ${agentLabel} completed`,

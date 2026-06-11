@@ -31,6 +31,7 @@ chatRouter.post('/chat', async (c) => {
   return streamSSE(c, async (stream) => {
     try {
       const result = await runAgent({
+        source: 'api-chat',
         agentId: 'maya',
         userMessage,
         userId,

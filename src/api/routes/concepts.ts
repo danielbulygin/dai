@@ -55,6 +55,7 @@ conceptsRouter.post('/generate-concepts', async (c) => {
       let fullResponse = '';
 
       const result = await runAgent({
+        source: 'api-concepts',
         agentId: 'maya',
         userMessage: prompt,
         userId: 'studio-api',

@@ -39,6 +39,7 @@ export async function askAgent(params: {
 
   try {
     const result = await runAgent({
+      source: 'delegation',
       agentId: params.agent_id,
       userMessage,
       userId: DELEGATION_USER,
@@ -110,6 +111,7 @@ export async function delegateTo(params: {
 
   try {
     const result = await runAgent({
+      source: 'delegation',
       agentId: params.agent_id,
       userMessage,
       userId: DELEGATION_USER,

@@ -355,6 +355,7 @@ async function handleDedicatedBotMessage(opts: {
     try {
       const result = await agentQueue.enqueue(channel, () =>
         runAgent({
+          source: 'interactive',
           agentId,
           userMessage: text,
           userId,
@@ -391,6 +392,7 @@ async function handleDedicatedBotMessage(opts: {
   try {
     const result = await agentQueue.enqueue(channel, () =>
       runAgent({
+        source: 'interactive',
         agentId,
         userMessage: text,
         userId,

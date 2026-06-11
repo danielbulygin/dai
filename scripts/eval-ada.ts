@@ -48,6 +48,7 @@ for (const q of selected) {
   const started = Date.now();
   try {
     const result = await runAgent({
+      source: 'eval',
       agentId: 'ada',
       userMessage: q.question,
       userId: 'eval-harness',
