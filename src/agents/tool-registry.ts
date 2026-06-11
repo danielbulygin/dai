@@ -505,7 +505,7 @@ register({
   definition: {
     name: 'upload_to_media_library',
     description:
-      'Rename files in Google Drive (prepend ad ID prefix) and upload them to the Meta Business Media Library. Routes to the correct Business Manager based on client code: TL and LA go to Growth Squad, all others go to Ads on Tap. Always call scan_media_library_folder first to preview what will happen. This operation can take several minutes for large video files.',
+      'Rename files in Google Drive (prepend ad ID prefix) and upload them to the Meta Business Media Library. Routes to the correct Business Manager AND access token based on client code: TL and LA go to Growth Squad, all others go to Ads on Tap. Dedups by content hash and by title — pre-warmed files come back as skipped_title/skipped_hash with their cached video_id/image_hash in seconds. Always call scan_media_library_folder first to preview what will happen. If the result has a top-level `error`, some or all files failed: report the per-file errors and hints and do NOT proceed to preview/launch. This operation can take several minutes for large video files.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -517,6 +517,11 @@ register({
           type: 'string',
           description: 'Client code (e.g. TL, LA, NP, MEOW). Determines which Business Manager to upload to.',
         },
+        expected_asset_id: {
+          type: 'string',
+          description:
+            'Authoritative ad-set asset id (e.g. "TLx4086") from the Notion ad set. When set, unprefixed files get THIS id prepended, and files carrying a DIFFERENT id fail with asset_id_conflict instead of being uploaded. Always pass it when uploading for a known ad set.',
+        },
       },
       required: ['drive_url', 'client_code'],
     },
@@ -525,6 +530,7 @@ register({
     return mediaLibraryTools.uploadToMediaLibrary({
       drive_url: input.drive_url as string,
       client_code: input.client_code as string,
+      expected_asset_id: input.expected_asset_id as string | undefined,
     });
   },
 });
@@ -3886,6 +3892,30 @@ const SCOPED_BMAD_TOOLS = new Set([
   'query_meta_creatives',
 ]);
 
+/**
+ * Detect the registry-wide soft-failure convention in a tool's string result:
+ * a JSON object with a truthy top-level `error`, or a `summary.failed` count
+ * above zero (batch tools like upload_to_media_library). Returns the error
+ * string for the audit log, or undefined when the result looks healthy.
+ * Deliberately conservative: anything unparseable counts as healthy.
+ */
+function detectSoftError(result: string): string | undefined {
+  if (!result || result[0] !== '{') return undefined;
+  try {
+    const parsed = JSON.parse(result) as Record<string, unknown>;
+    if (typeof parsed.error === 'string' && parsed.error.length > 0) {
+      return parsed.error;
+    }
+    const summary = parsed.summary as Record<string, unknown> | undefined;
+    if (summary && typeof summary.failed === 'number' && summary.failed > 0) {
+      return `summary.failed=${summary.failed} of ${summary.total ?? '?'}`;
+    }
+  } catch {
+    // Not JSON — plain-text results are never soft failures.
+  }
+  return undefined;
+}
+
 export async function executeTool(
   name: string,
   input: Record<string, unknown>,
@@ -3916,7 +3946,14 @@ export async function executeTool(
   try {
     const result = await tool.execute(input, context);
     const durationMs = Date.now() - startedAt;
-    logger.debug({ toolName: name, durationMs }, 'Tool executed successfully');
+    // Most tools report failures by RETURNING {"error": ...} JSON instead of
+    // throwing (so the agent can read the details). Without this sniff those
+    // calls land in piper_actions as status='success' — the 2026-06-11 TLx4086
+    // upload failure was invisible to "show me failed Ada actions" exactly
+    // because of that. Soft failures keep isError=false (the agent still gets
+    // the full JSON); only the audit-log status changes.
+    const softError = detectSoftError(result);
+    logger.debug({ toolName: name, durationMs, softError }, 'Tool executed');
     // Skip self-logging the audit-log read tool to avoid recursive noise.
     if (name !== 'inspect_piper_actions') {
       logToolCall({
@@ -3924,8 +3961,9 @@ export async function executeTool(
         context,
         params: input,
         result,
-        status: 'success',
+        status: softError ? 'failed' : 'success',
         durationMs,
+        error: softError,
       });
     }
     return { result, isError: false };

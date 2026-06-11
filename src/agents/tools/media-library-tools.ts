@@ -88,6 +88,7 @@ export interface ScanResult {
 
 export interface UploadResult {
   client_code: string;
+  ad_account_id: string;
   business_config: {
     business_id: string;
     folder_id: string;
@@ -100,15 +101,20 @@ export interface UploadResult {
     media_type: "video" | "image";
     video_id?: string;
     image_hash?: string;
-    image_id?: string;
     url?: string;
+    // v2 statuses: uploaded | uploaded_pending | skipped_title | skipped_hash | error
     status: string;
     error?: string;
+    hint?: string;
     renamed_in_drive: boolean;
   }>;
   summary: {
     total: number;
     successful: number;
+    uploaded: number;
+    uploaded_pending: number;
+    skipped_hash: number;
+    skipped_title: number;
     failed: number;
     renamed: number;
   };
@@ -135,23 +141,46 @@ export async function scanMediaLibraryFolder(params: {
 
 /**
  * Rename files in Google Drive and upload them to Meta Business Media Library.
+ *
+ * Uses the v2 droplet endpoint: per-client token routing (Growth Squad clients
+ * like TL/LA MUST NOT upload with the AOT token — the 2026-06-11 TLx4086 thread
+ * failed exactly this way on the old v1 endpoint), content-hash dedup, real
+ * library video-id resolution, and the expected_asset_id conflict guard.
  */
 export async function uploadToMediaLibrary(params: {
   drive_url: string;
   client_code: string;
+  expected_asset_id?: string;
 }): Promise<string> {
   const { data, error } = await dropletRequest(
-    "/api/media-library/upload",
+    "/api/media-library/v2/upload",
     {
       drive_url: params.drive_url,
       client_code: params.client_code,
-      poll_for_ready: true,
+      resolve_real_ids: true,
+      ...(params.expected_asset_id ? { expected_asset_id: params.expected_asset_id } : {}),
     },
     2_700_000, // 45 min timeout (large video uploads, 3+ files at ~167MB each)
   );
 
   if (error) {
     return JSON.stringify({ error });
+  }
+
+  // The endpoint returns HTTP 200 even when individual files fail. Promote
+  // per-file failures to a top-level `error` so the agent can't read a failed
+  // batch as success and so the audit log records the call as failed.
+  const upload = data as Partial<UploadResult> | undefined;
+  const failed = upload?.summary?.failed ?? 0;
+  if (failed > 0) {
+    const failures = (upload?.results ?? [])
+      .filter((r) => r.status === "error")
+      .map((r) => `${r.normalized_name}: ${r.error}${r.hint ? ` (${r.hint})` : ""}`);
+    return JSON.stringify({
+      error: `${failed}/${upload?.summary?.total ?? "?"} file(s) failed to upload — do NOT proceed to preview/launch. ${failures[0] ?? ""}`,
+      failures,
+      ...data as Record<string, unknown>,
+    });
   }
 
   return JSON.stringify(data);
