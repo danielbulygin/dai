@@ -60,6 +60,30 @@ export interface DigestClient {
   cadence: DigestCadence | null;
 }
 
+/** Phase 4 LOOKING AHEAD item (piper_digest_payload()->looking_ahead, <=3). */
+export interface DigestLookingAhead {
+  kind: 'capacity' | 'stage_lag' | 'cadence';
+  // capacity
+  person?: string;
+  ratio?: number;
+  open_near?: number;
+  weekly_rate?: number;
+  window_weeks?: number;
+  // stage_lag
+  ad_set_code?: string;
+  client_code?: string;
+  bucket?: string;
+  frontier_task?: string | null;
+  owner?: string | null;
+  days?: number;
+  window_capped?: boolean;
+  bucket_p50?: number;
+  // cadence
+  pct?: number;
+  avg_4w?: number;
+  target_per_week?: number;
+}
+
 export interface DigestPayload {
   generated_at: string | null;
   freshness: string | null;
@@ -68,6 +92,7 @@ export interface DigestPayload {
   clients: DigestClient[];
   people_bottlenecks: { person: string; open: number; overdue: number }[];
   data_quality_drift: { metric: string; now: number; week_ago: number }[];
+  looking_ahead?: DigestLookingAhead[];
 }
 
 export async function fetchDigestPayload(): Promise<DigestPayload> {
@@ -128,6 +153,20 @@ function renderPingLine(item: DigestOverdueItem): string | null {
   const task = item.task_name ?? 'the task';
   const days = item.days_overdue !== null && item.days_overdue !== undefined ? `${item.days_overdue}d` : 'past';
   return `  Suggest pinging ${owner}: '${code} ${task} is ${days} past due - can you move it today?'`;
+}
+
+function renderLookingAhead(item: DigestLookingAhead): string {
+  if (item.kind === 'capacity') {
+    return `• ${item.person}'s next-7-day load is ${item.ratio}x their completion rate (${item.open_near} open vs ~${item.weekly_rate}/wk observed over ${item.window_weeks}w).`;
+  }
+  if (item.kind === 'stage_lag') {
+    const days = item.window_capped ? `${item.days}d+` : `${item.days}d`;
+    return `• ${item.ad_set_code} (${item.client_code}) has sat in ${item.bucket} ${days} - typical for that stage is ${item.bucket_p50}d${item.owner ? ` - frontier with ${item.owner}` : ''}.`;
+  }
+  if (item.kind === 'cadence') {
+    return `• ${item.client_code} tracking ${item.pct}% of contract (${item.avg_4w}/wk vs ${item.target_per_week} target, 4-full-week basis).`;
+  }
+  return `• ${JSON.stringify(item)}`;
 }
 
 export function renderDigest(payload: DigestPayload): string {
@@ -195,10 +234,21 @@ export function renderDigest(payload: DigestPayload): string {
   if (belowTarget.length > 0) {
     lines.push('');
     lines.push(
-      `*Cadence below target (28d):* ${belowTarget
+      `*Cadence below target (4 full wks):* ${belowTarget
         .map((c) => `${c.client_code} ${c.cadence!.tracking_pct}%${c.cadence!.provisional ? ' (prov.)' : ''}`)
         .join(', ')}`,
     );
+  }
+
+  // Phase 4.4 — LOOKING AHEAD: <=3 threshold-gated predictive lines, all
+  // computed in SQL (piper_stage_lag / piper_capacity_read / piper_cadence_read).
+  const ahead = payload.looking_ahead ?? [];
+  if (ahead.length > 0) {
+    lines.push('');
+    lines.push('*LOOKING AHEAD:*');
+    for (const item of ahead.slice(0, 3)) {
+      lines.push(renderLookingAhead(item));
+    }
   }
 
   if ((payload.qc_sitting_sets ?? 0) > QC_SIGNAL_THRESHOLD) {
