@@ -868,7 +868,7 @@ register({
   definition: {
     name: 'search_slack_messages',
     description:
-      'Search messages across every Slack channel the workspace can see. Use this to find ground-truth events that may never have been logged in Notion — e.g. ad-set deliveries announced in a client channel ("delivered", "sent to client", "we shipped X"), client approvals, or go-live confirmations. Supports Slack search modifiers in the query: in:#channel, from:@user, after:YYYY-MM-DD, "exact phrase". This is how you reconcile "what actually shipped" against the Notion task state.',
+      'Search messages across every Slack channel the workspace can see — internal AND external (client-facing) channels. Use this for ground-truth research that Notion never captures: client feedback and revision notes, approvals, delivery confirmations ("delivered", "sent to client", "we shipped X"), go-live confirmations, and any "what did the client actually say" question. Results include thread replies; when a match has a thread_ts, use read_slack_thread to pull the full conversation. Supports Slack search modifiers in the query: in:#channel, from:@user, after:YYYY-MM-DD, "exact phrase".',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -897,7 +897,7 @@ register({
   definition: {
     name: 'read_slack_channel',
     description:
-      'Read recent messages from a specific Slack channel (by channel ID, or by #name which is resolved). Use after search_slack_messages to get the surrounding context of a delivery/approval message, or to scan a known client channel directly.',
+      'Read recent messages from a specific Slack channel (by channel ID, or by #name which is resolved). Use after search_slack_messages to get the surrounding context of a delivery/approval message, or to scan a known client channel directly. NOTE: thread replies are NOT included in channel history — a returned message with a reply_count has a hidden conversation under it; pull it with read_slack_thread.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -922,6 +922,40 @@ register({
       channel: input.channel as string,
       limit: input.limit as number | undefined,
       oldest: input.oldest as string | undefined,
+    });
+    return JSON.stringify(result);
+  },
+});
+
+register({
+  definition: {
+    name: 'read_slack_thread',
+    description:
+      'Read a full Slack thread — the parent message plus every reply. Client feedback, revision notes, and approvals routinely live in thread replies under a delivery post, and those replies are invisible to read_slack_channel and only partially surfaced by search. Use the thread_ts from a search match, or the ts of a channel-history message that shows a reply_count.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        channel: {
+          type: 'string',
+          description: 'Channel ID (e.g. C0A6B4X8WP3) or #name (e.g. #audibene-ads-on-tap).',
+        },
+        thread_ts: {
+          type: 'string',
+          description: 'Timestamp of the thread parent message (e.g. "1779977032.288949").',
+        },
+        limit: {
+          type: 'number',
+          description: 'Max messages to return (default 50).',
+        },
+      },
+      required: ['channel', 'thread_ts'],
+    },
+  },
+  async execute(input) {
+    const result = await slackTools.readSlackThread({
+      channel: input.channel as string,
+      thread_ts: input.thread_ts as string,
+      limit: input.limit as number | undefined,
     });
     return JSON.stringify(result);
   },

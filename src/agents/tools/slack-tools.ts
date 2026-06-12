@@ -436,6 +436,8 @@ export interface SlackSearchMatch {
   text: string;
   ts: string;
   permalink?: string;
+  /** Parent thread ts when the match is a thread reply — feed it to readSlackThread. */
+  thread_ts?: string;
 }
 
 /**
@@ -465,20 +467,55 @@ export async function searchSlackMessages(params: {
       sort_dir: "desc",
     });
 
-    const matches: SlackSearchMatch[] = (result.messages?.matches ?? []).map((m) => ({
-      channel: (m.channel as { name?: string } | undefined)?.name ?? "",
-      channel_id: (m.channel as { id?: string } | undefined)?.id ?? "",
-      user: m.username ?? m.user ?? "unknown",
-      text: m.text ?? "",
-      ts: m.ts ?? "",
-      permalink: m.permalink,
-    }));
+    const matches: SlackSearchMatch[] = (result.messages?.matches ?? []).map((m) => {
+      // search.messages doesn't expose thread_ts directly, but thread-reply
+      // permalinks carry it as a query param.
+      let threadTs: string | undefined;
+      if (m.permalink) {
+        const tsMatch = /[?&]thread_ts=(\d+\.\d+)/.exec(m.permalink);
+        if (tsMatch) threadTs = tsMatch[1];
+      }
+      return {
+        channel: (m.channel as { name?: string } | undefined)?.name ?? "",
+        channel_id: (m.channel as { id?: string } | undefined)?.id ?? "",
+        user: m.username ?? m.user ?? "unknown",
+        text: m.text ?? "",
+        ts: m.ts ?? "",
+        permalink: m.permalink,
+        thread_ts: threadTs,
+      };
+    });
 
     return { ok: true, matches, total: result.messages?.total ?? matches.length };
   } catch (error) {
     logger.error({ error, query: params.query }, "Failed to search Slack messages");
     return { ok: false, error: (error as Error).message };
   }
+}
+
+/**
+ * Resolve a #name (or bare name) to a channel ID. Returns the input unchanged
+ * if it already looks like a channel ID.
+ */
+async function resolveChannelId(client: WebClient, channel: string): Promise<string | null> {
+  const channelId = channel.trim();
+  if (/^[CGD][A-Z0-9]{6,}$/.test(channelId)) return channelId;
+
+  const wanted = channelId.replace(/^#/, "").toLowerCase();
+  let cursor: string | undefined;
+  do {
+    const list = await client.conversations.list({
+      types: "public_channel,private_channel",
+      limit: 200,
+      cursor,
+      exclude_archived: true,
+    });
+    for (const ch of list.channels ?? []) {
+      if ((ch.name ?? "").toLowerCase() === wanted) return ch.id ?? null;
+    }
+    cursor = list.response_metadata?.next_cursor || undefined;
+  } while (cursor);
+  return null;
 }
 
 /**
@@ -495,30 +532,8 @@ export async function readSlackChannel(params: {
   const client = userClient ?? slack;
 
   try {
-    let channelId = params.channel.trim();
-    // Resolve a #name (or bare name) to a channel ID if needed.
-    if (!/^[CGD][A-Z0-9]{6,}$/.test(channelId)) {
-      const wanted = channelId.replace(/^#/, "").toLowerCase();
-      let cursor: string | undefined;
-      let resolved: string | undefined;
-      do {
-        const list = await client.conversations.list({
-          types: "public_channel,private_channel",
-          limit: 200,
-          cursor,
-          exclude_archived: true,
-        });
-        for (const ch of list.channels ?? []) {
-          if ((ch.name ?? "").toLowerCase() === wanted) {
-            resolved = ch.id;
-            break;
-          }
-        }
-        cursor = resolved ? undefined : list.response_metadata?.next_cursor || undefined;
-      } while (cursor && !resolved);
-      if (!resolved) return { ok: false, error: `Channel not found: ${params.channel}` };
-      channelId = resolved;
-    }
+    const channelId = await resolveChannelId(client, params.channel);
+    if (!channelId) return { ok: false, error: `Channel not found: ${params.channel}` };
 
     const result = await client.conversations.history({
       channel: channelId,
@@ -530,11 +545,52 @@ export async function readSlackChannel(params: {
       user: m.user ?? (m as { username?: string }).username ?? "unknown",
       text: m.text ?? "",
       ts: m.ts ?? "",
+      // A message that anchors a thread — replies are NOT in channel history;
+      // pull them with readSlackThread(channel, ts).
+      thread_ts: m.thread_ts,
+      reply_count: (m as { reply_count?: number }).reply_count,
     }));
 
     return { ok: true, channel_id: channelId, messages };
   } catch (error) {
     logger.error({ error, channel: params.channel }, "Failed to read Slack channel");
+    return { ok: false, error: (error as Error).message };
+  }
+}
+
+/**
+ * Read a full Slack thread — the parent message plus every reply. Channel
+ * history and search hits only show individual messages; client feedback and
+ * decisions routinely live in the replies under a delivery post, so this is
+ * how you get the whole conversation.
+ */
+export async function readSlackThread(params: {
+  channel: string;
+  thread_ts: string;
+  limit?: number;
+}): Promise<{ ok: boolean; channel_id?: string; messages?: Array<{ user: string; text: string; ts: string }>; error?: string }> {
+  const userClient = getUserClient();
+  const client = userClient ?? slack;
+
+  try {
+    const channelId = await resolveChannelId(client, params.channel);
+    if (!channelId) return { ok: false, error: `Channel not found: ${params.channel}` };
+
+    const result = await client.conversations.replies({
+      channel: channelId,
+      ts: params.thread_ts,
+      limit: params.limit ?? 50,
+    });
+
+    const messages = (result.messages ?? []).map((m) => ({
+      user: m.user ?? (m as { username?: string }).username ?? "unknown",
+      text: m.text ?? "",
+      ts: m.ts ?? "",
+    }));
+
+    return { ok: true, channel_id: channelId, messages };
+  } catch (error) {
+    logger.error({ error, channel: params.channel, thread_ts: params.thread_ts }, "Failed to read Slack thread");
     return { ok: false, error: (error as Error).message };
   }
 }
