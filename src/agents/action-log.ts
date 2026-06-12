@@ -93,6 +93,7 @@ const EVENT_LOG_TARGET_TYPES: Record<string, PiperEventTargetType> = {
   update_aot_task_status: 'task',
   update_aot_task_due_date: 'task',
   update_aot_ad_set_stage: 'ad_set',
+  create_aot_task: 'task',
 };
 
 /**

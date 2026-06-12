@@ -1179,6 +1179,147 @@ export async function updateAotTaskDueDate(params: {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Task creation (scoped write, 2026-06-12)
+// ---------------------------------------------------------------------------
+
+let workspaceUsersCache: Array<{ id: string; name: string }> | null = null;
+
+/**
+ * Resolve a person's name to their Notion user id via the workspace user list
+ * (cached per process). Case-insensitive substring match. Returns an error
+ * string instead of guessing when the match is missing or ambiguous —
+ * assigning the wrong person is worse than asking.
+ */
+export async function resolveNotionUserByName(
+  name: string,
+): Promise<{ ok: true; user_id: string; user_name: string } | { ok: false; error: string }> {
+  const notion = getNotion();
+  if (!workspaceUsersCache) {
+    const users: Array<{ id: string; name: string }> = [];
+    let cursor: string | undefined;
+    do {
+      const page = await notion.users.list({ page_size: 100, ...(cursor ? { start_cursor: cursor } : {}) });
+      for (const u of page.results) {
+        if (u.type === 'person' && u.name) users.push({ id: u.id, name: u.name });
+      }
+      cursor = page.has_more ? (page.next_cursor ?? undefined) : undefined;
+    } while (cursor);
+    workspaceUsersCache = users;
+  }
+
+  const needle = name.trim().toLowerCase();
+  const matches = workspaceUsersCache.filter((u) => u.name.toLowerCase().includes(needle));
+  if (matches.length === 1) return { ok: true, user_id: matches[0]!.id, user_name: matches[0]!.name };
+  if (matches.length === 0) {
+    return { ok: false, error: `No Notion user matches "${name}". Ask the human for the exact name.` };
+  }
+  return {
+    ok: false,
+    error: `"${name}" is ambiguous — matches: ${matches.map((m) => m.name).join(', ')}. Ask which one.`,
+  };
+}
+
+export interface CreateAotTaskResult {
+  ok: boolean;
+  task_id?: string;
+  url?: string;
+  task_name?: string;
+  ad_set_title?: string;
+  assignee_name?: string;
+  reverse?: { archive_created_task: string };
+  error?: string;
+}
+
+/**
+ * Create a new task in the AOT Tasks DB, linked to an existing ad set. The
+ * Client relation is copied from the ad-set page so the task joins all
+ * client-filtered views. `details` lines become bulleted list items in the
+ * task page body. Returns a reverse action (archive the created page); the
+ * registry execute wrapper owns piper_actions logging.
+ */
+export async function createAotTask(params: {
+  task_name: string;
+  ad_set_id: string;
+  assignee_name?: string;
+  due_date?: string;
+  status?: string;
+  details?: string;
+}): Promise<CreateAotTaskResult> {
+  const notion = getNotion();
+  const adSetPageId = normalizePageId(params.ad_set_id);
+
+  if (!params.task_name.trim()) return { ok: false, error: 'task_name is required.' };
+  if (params.due_date && !/^\d{4}-\d{2}-\d{2}$/.test(params.due_date)) {
+    return { ok: false, error: `Due date "${params.due_date}" is not valid. Use YYYY-MM-DD.` };
+  }
+  const status = params.status ?? 'Not Started';
+  if (!(ALLOWED_TASK_STATUS_WRITES as readonly string[]).includes(status)) {
+    return { ok: false, error: `Status "${status}" is not a real Tasks DB status.` };
+  }
+
+  try {
+    // Verify the ad set exists and pull its title + Client relation.
+    const adSetPage = (await notion.pages.retrieve({ page_id: adSetPageId })) as PageObjectResponse;
+    const adSetProps = adSetPage.properties as Record<string, unknown>;
+    const adTitleProp = adSetProps['Ad Title'] as { title?: Array<{ plain_text?: string }> } | undefined;
+    const adSetTitle = (adTitleProp?.title ?? []).map((t) => t.plain_text ?? '').join('').trim();
+    const clientRelationIds = (
+      (adSetProps['Client'] as { relation?: Array<{ id: string }> } | undefined)?.relation ?? []
+    ).map((r) => r.id);
+
+    let assignee: { user_id: string; user_name: string } | undefined;
+    if (params.assignee_name) {
+      const resolved = await resolveNotionUserByName(params.assignee_name);
+      if (!resolved.ok) return { ok: false, error: resolved.error };
+      assignee = resolved;
+    }
+
+    const properties: Record<string, unknown> = {
+      // NOTE: the Tasks DB title property name really has a trailing space.
+      'Task name ': { title: [{ type: 'text', text: { content: params.task_name.trim() } }] },
+      Status: { status: { name: status } },
+      'Ad Set': { relation: [{ id: adSetPageId }] },
+    };
+    if (clientRelationIds.length > 0) {
+      properties['Client'] = { relation: clientRelationIds.map((id) => ({ id })) };
+    }
+    if (params.due_date) properties['Task Due Date'] = { date: { start: params.due_date } };
+    if (assignee) properties['Assignee'] = { people: [{ id: assignee.user_id }] };
+
+    const detailLines = (params.details ?? '')
+      .split('\n')
+      .map((l) => l.replace(/^\s*[-•*]\s*/, '').trim())
+      .filter(Boolean);
+    const children = detailLines.map((line) => ({
+      object: 'block' as const,
+      type: 'bulleted_list_item' as const,
+      bulleted_list_item: { rich_text: [{ type: 'text' as const, text: { content: line } }] },
+    }));
+
+    const dsId = await resolveDataSourceId(env.NOTION_AOT_TASKS_DB_ID);
+    const response = await notion.pages.create({
+      parent: { data_source_id: dsId },
+      properties: properties as Parameters<typeof notion.pages.create>[0]['properties'],
+      ...(children.length > 0 ? { children } : {}),
+    });
+
+    return {
+      ok: true,
+      task_id: response.id,
+      url: 'url' in response ? (response as { url: string }).url : undefined,
+      task_name: params.task_name.trim(),
+      ad_set_title: adSetTitle,
+      assignee_name: assignee?.user_name,
+      reverse: { archive_created_task: response.id },
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ error: msg, ad_set_id: adSetPageId }, 'createAotTask failed');
+    return { ok: false, error: msg };
+  }
+}
+
 /**
  * Stages writable on the Ad Sets DB `Stage` status property. The full set of
  * real options (To-do: Concept; In progress: Production, Revision, Launch;

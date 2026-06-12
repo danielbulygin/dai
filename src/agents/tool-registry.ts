@@ -2475,6 +2475,77 @@ register({
 
 register({
   definition: {
+    name: 'create_aot_task',
+    description:
+      'Create a NEW task in the AOT Tasks DB, linked to an existing ad set. SCOPED WRITE — logged to piper_actions with a reverse_action (archiving the created task), so it is undoable. The Client relation is copied from the ad set automatically; `details` lines become bullets in the task page body; assignee is resolved by name from the Notion workspace (errors instead of guessing on ambiguity). ' +
+      'RULES: (1) Only on explicit human request — never create tasks speculatively, as part of a digest, or as a side effect of reconciliation. (2) DRAFT FIRST, ALWAYS: post the full draft (task name, ad set, assignee, due date, body bullets) in the channel and wait for an explicit go ("yes", "confirmed", "go ahead") BEFORE calling this tool. A request to "create tasks" is a request for a draft; only the confirmation is a request to write. (3) After creating, report each created task with its Notion URL and the undo. (4) Setting the assignee at creation is allowed; REASSIGNING existing tasks is still gated.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        task_name: {
+          type: 'string',
+          description: 'Title of the new task, e.g. "Design Corrections Rev 1".',
+        },
+        ad_set_id: {
+          type: 'string',
+          description: 'Notion page id of the ad set to link (the `ad_set_id` from query_aot_adsets / get_adset_case; a notion.so URL also works).',
+        },
+        assignee_name: {
+          type: 'string',
+          description: 'Person to assign, by name as it appears in Notion (e.g. "Glaira"). Resolved case-insensitively; fails with candidates listed if ambiguous.',
+        },
+        due_date: {
+          type: 'string',
+          description: 'Due date in YYYY-MM-DD format (optional).',
+        },
+        status: {
+          type: 'string',
+          description: "Initial status (default 'Not Started').",
+        },
+        details: {
+          type: 'string',
+          description: 'Task body content — one bullet per line (leading "-"/"•" stripped). Put the actual correction/feedback points here so the doer never has to hunt for them.',
+        },
+        reason: {
+          type: 'string',
+          description: 'Short human-readable reason for the creation (logged for audit), e.g. "Steven design feedback 06-01, confirmed by Dan".',
+        },
+      },
+      required: ['task_name', 'ad_set_id', 'reason'],
+    },
+  },
+  async execute(input, context) {
+    const result = await aotNotionTools.createAotTask({
+      task_name: input.task_name as string,
+      ad_set_id: input.ad_set_id as string,
+      assignee_name: input.assignee_name as string | undefined,
+      due_date: input.due_date as string | undefined,
+      status: input.status as string | undefined,
+      details: input.details as string | undefined,
+    });
+    if (result.ok) {
+      logWrite({
+        context,
+        toolName: 'create_aot_task',
+        targetSystem: 'notion',
+        targetId: result.task_id ?? '',
+        before: null,
+        after: {
+          task_name: result.task_name,
+          ad_set: result.ad_set_title,
+          assignee: result.assignee_name ?? null,
+          due_date: (input.due_date as string | undefined) ?? null,
+        },
+        reverse: result.reverse,
+        summary: `Created task "${result.task_name}" on ${result.ad_set_title ?? input.ad_set_id}${result.assignee_name ? ` → ${result.assignee_name}` : ''}${input.due_date ? `, due ${input.due_date as string}` : ''} (${input.reason as string})`,
+      });
+    }
+    return JSON.stringify(result);
+  },
+});
+
+register({
+  definition: {
     name: 'update_aot_ad_set_stage',
     description:
       "Set an AOT ad set's 'Stage' in Notion (the Ad Sets DB status property). SCOPED WRITE — every write is logged to piper_actions with a reverse_action so it can be undone. Allowed stages: 'Concept', 'Production', 'Revision', 'Launch', 'Completed', 'On Hold', 'Cancelled', 'Archived'. " +
