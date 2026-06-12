@@ -212,3 +212,87 @@ export async function logPipelineCorrection(input: LogCorrectionInput): Promise<
     note: 'Filed in piper_event_log. Ownership corrections are reviewed in the weekly batch — no Notion write was made.',
   });
 }
+
+// ---------------------------------------------------------------------------
+// get_recovery_plan — Recovery Quarterback v1 (Dan 2026-06-12)
+// docs/piper-recovery-quarterback-plan-2026-06-12.md (bmad repo)
+// ---------------------------------------------------------------------------
+
+interface RecoveryPlayRow {
+  rank: number;
+  client_code: string;
+  deficit_per_week: number;
+  pct_of_target: number;
+  play: string;
+  kind: 'drain' | 'refill';
+  bottleneck_bucket: string | null;
+  volume: number;
+  leverage: number;
+  est_effort_days: number;
+  suggested_owner: string | null;
+  owner_display: string | null;
+  owner_ratio: number | null;
+  alt_owner: string | null;
+  alt_display: string | null;
+  alt_ratio: number | null;
+  contract_note: string | null;
+}
+
+export async function getRecoveryPlan(input: { exclude_person?: string }): Promise<string> {
+  const { data, error } = await getSupabase().rpc('piper_recovery_plays');
+  if (error) return JSON.stringify({ ok: false, error: `piper_recovery_plays failed: ${error.message}` });
+  let plays = ((data ?? []) as RecoveryPlayRow[]).map((p) => ({ ...p }));
+
+  // "What if X is unavailable" — swap them out of every suggestion.
+  const ex = input.exclude_person?.trim().toLowerCase();
+  let constraint: string | null = null;
+  if (ex) {
+    constraint = `excluding ${input.exclude_person}`;
+    for (const p of plays) {
+      const isAlt =
+        p.alt_owner?.toLowerCase().includes(ex) || p.alt_display?.toLowerCase().includes(ex);
+      if (isAlt) {
+        p.alt_owner = null;
+        p.alt_display = null;
+        p.alt_ratio = null;
+      }
+      const isOwner =
+        p.suggested_owner?.toLowerCase().includes(ex) || p.owner_display?.toLowerCase().includes(ex);
+      if (isOwner) {
+        if (p.alt_owner) {
+          p.suggested_owner = p.alt_owner;
+          p.owner_display = `${p.alt_display} (stand-in)`;
+          p.owner_ratio = p.alt_ratio;
+          p.alt_owner = null;
+          p.alt_display = null;
+          p.alt_ratio = null;
+        } else {
+          p.owner_display = `NO STAND-IN AVAILABLE (was ${p.owner_display})`;
+          p.suggested_owner = null;
+        }
+      }
+    }
+  }
+
+  // Sanctioned sums: portfolio debt = one deficit per client (clients carry <=2 plays).
+  const perClient = new Map<string, number>();
+  for (const p of plays) perClient.set(p.client_code, p.deficit_per_week);
+  const debt = [...perClient.values()].reduce((s, d) => s + d, 0);
+
+  const freshness = await fetchDerivedStateFreshness();
+  return JSON.stringify({
+    ok: true,
+    freshness_note: freshness ? `brain as of ${freshness.toISOString()}` : 'freshness unknown',
+    constraint,
+    summary: {
+      behind_contract_clients: perClient.size,
+      pipeline_debt_sets_per_week: Math.round(debt * 100) / 100,
+    },
+    plays,
+    rendering_rules:
+      'Plays are PROPOSALS for Dan/Vanessa/leads to relay — never address doers directly. ' +
+      'Sequence drain plays before refill plays per client. If owner_ratio > 1.5 the suggested ' +
+      'owner is overloaded — lead with the alternate. Close with: which plays are approved, ' +
+      'and reply with a name if someone is unavailable (re-run with exclude_person).',
+  });
+}

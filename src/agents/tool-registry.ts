@@ -2553,6 +2553,28 @@ register({
 
 register({
   definition: {
+    name: 'get_recovery_plan',
+    description:
+      'THE tool for "how do we get back on track" / "recovery plan" / "unfuck the pipeline" / "what do we tackle first" questions. Reads piper_recovery_plays() — deterministic, capacity-aware play candidates for every client behind contract: per play the deficit (sets/week vs contract), the play type (clear_approvals / clear_qc / finish_edits = DRAIN nearly-done work first; write_briefs / intake = REFILL the pipeline), volume, effort estimate (empirical lead times), and a capacity-based owner suggestion with a least-loaded alternate. Pre-ranked: every behind client\'s top play first, drain before refill — render in order, never re-rank. Plays are PROPOSALS addressed to Dan/Vanessa/leads who relay them; NEVER instruct a doer directly. Pass exclude_person ("Manuel") to re-plan as if that person is unavailable — the "if he can\'t, find another solution" loop. Cite the freshness note and the pipeline-debt summary number.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        exclude_person: {
+          type: 'string',
+          description: 'Re-plan as if this person is unavailable (slug or name fragment, e.g. "manuel"). Swaps them out of every owner suggestion.',
+        },
+      },
+    },
+  },
+  async execute(input) {
+    return await piperMovesTools.getRecoveryPlan({
+      exclude_person: input.exclude_person as string | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
     name: 'log_pipeline_correction',
     description:
       'File a human correction to the pipeline data into piper_event_log (actor=\'human-correction\') — the My Real Moves correction loop. Use when a doer contradicts their list and the fix is NOT one of your scoped Notion writes: "not mine" (ownership is gated — file it for the weekly ownership review), "blocked on the client" (pair with setting Status Blocked), "already done elsewhere", or any other data correction. This writes an event-log row only; it never touches Notion. Provide task_id (Notion task page id from query_aot_tasks / get_my_moves) OR ad_set_code (e.g. "TLx4101"), the kind, the reporter (who said it), and their words as the note. Never argue with a doer about their own task — apply the matching scoped write or file the correction, and thank them either way.',
