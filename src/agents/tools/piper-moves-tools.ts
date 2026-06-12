@@ -91,7 +91,11 @@ function presentRow(row: MyMoveRow) {
     derived_status: row.derived_status,
     notion_blocked: row.notion_blocked ?? false,
     due_date: row.due_date,
-    days_overdue: row.days_overdue,
+    // plan_slip = vs the ORIGINAL plan date (a set-level fact, do not present as
+    // personal lateness); days_held = how long it has been actionable with the owner.
+    plan_slip_days: row.days_overdue,
+    days_held: row.days_held,
+    typical_days: row.typical_days,
     days_in_status: row.days_in_status,
     ad_set_code: row.ad_set_code,
     ad_set_url: row.ad_set_url,
@@ -136,7 +140,8 @@ export async function getMyMoves(input: { person?: string }): Promise<string> {
       byPerson.set(row.person_id, entry);
     }
     entry.moves += 1;
-    if (row.days_overdue && row.days_overdue > 0) entry.overdue += 1;
+    // held 2d+ with the person, NOT plan slip — see presentRow note
+    if ((row.days_held ?? 0) >= 2) entry.overdue += 1;
     if (row.derived_status === 'in_progress') entry.in_progress += 1;
   }
   const people = [...byPerson.values()].sort((a, b) => b.overdue - a.overdue || b.moves - a.moves);

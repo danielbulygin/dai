@@ -45,6 +45,11 @@ export interface MyMoveRow {
   bucket: string | null;
   ad_delivery_date: string | null;
   data_confidence: string | null;
+  /** Days since the task became actionable for its owner (hold time). Pre-2026-06-10
+   *  backfill may UNDERSTATE this (clock starts at first brain observation). */
+  days_held: number | null;
+  /** Empirical lead time for this task type, in days (piper_task_types). */
+  typical_days: number | null;
 }
 
 export async function fetchMyMovesAll(): Promise<MyMoveRow[]> {
@@ -136,10 +141,19 @@ export function renderMoveRow(row: MyMoveRow): string {
   const segs: string[] = [];
   if (row.ad_set_code) segs.push(slackLink(row.ad_set_url, row.ad_set_code));
   if (row.due_date) {
-    const overdue = row.days_overdue && row.days_overdue > 0 ? ` (${row.days_overdue}d overdue)` : '';
-    segs.push(`due ${shortDate(row.due_date)}${overdue}`);
+    segs.push(`due ${shortDate(row.due_date)}`);
   } else {
     segs.push('no due date');
+  }
+  // Personal hold time, NOT plan slip (Dan 2026-06-12): inherited lateness is a
+  // set-level fact; the per-person signal is how long the task has been with you.
+  if (row.days_held !== null && row.days_held !== undefined) {
+    if (row.days_held === 0) {
+      segs.push('landed today');
+    } else {
+      const typical = row.typical_days && row.typical_days > 0 ? ` (typical ${row.typical_days}d)` : '';
+      segs.push(`with you ${row.days_held}d${typical}`);
+    }
   }
   segs.push(bucketLabel(row.bucket));
   // ready*: Notion still says Blocked but the predecessor looks done — say so
@@ -170,7 +184,9 @@ function groupByPerson(rows: MyMoveRow[]): PersonBlock[] {
       byPerson.set(row.person_id, block);
     }
     block.moves.push(row);
-    if (row.days_overdue && row.days_overdue > 0) block.overdueCount += 1;
+    // "held" = sitting with the person beyond a grace day — the fair per-person
+    // count. Plan slip (days_overdue) is deliberately NOT a person-level number.
+    if ((row.days_held ?? 0) >= 2) block.overdueCount += 1;
   }
   for (const block of byPerson.values()) {
     block.moves.sort((a, b) => a.rank - b.rank);
@@ -199,8 +215,8 @@ export function renderMyMoves(rows: MyMoveRow[], opts: { now?: Date; freshness?:
 
   const summaryLines = blocks.map((b) => {
     const moves = `${b.moves.length} move${b.moves.length === 1 ? '' : 's'}`;
-    const overdue = b.overdueCount > 0 ? ` (${b.overdueCount} overdue)` : '';
-    return `*${mrkdwnEscape(b.display)}* - ${moves}${overdue}`;
+    const held = b.overdueCount > 0 ? ` (${b.overdueCount} with you 2d+)` : '';
+    return `*${mrkdwnEscape(b.display)}* - ${moves}${held}`;
   });
 
   const freshness = opts.freshness ?? now;

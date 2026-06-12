@@ -93,6 +93,14 @@ export interface DigestPayload {
   people_bottlenecks: { person: string; open: number; overdue: number }[];
   data_quality_drift: { metric: string; now: number; week_ago: number }[];
   looking_ahead?: DigestLookingAhead[];
+  /** Shadow-mode reflow summary (no Notion writes; supervised week). */
+  reflow_shadow?: {
+    sets: number;
+    internal: number;
+    delivery_slip: number;
+    validator_failed: number;
+    worst: { ad_set_code: string; client_code: string; earliest_finish: string; ad_delivery_date: string }[] | null;
+  } | null;
 }
 
 export async function fetchDigestPayload(): Promise<DigestPayload> {
@@ -153,6 +161,12 @@ function renderPingLine(item: DigestOverdueItem): string | null {
   const task = item.task_name ?? 'the task';
   const days = item.days_overdue !== null && item.days_overdue !== undefined ? `${item.days_overdue}d` : 'past';
   return `  Suggest pinging ${owner}: '${code} ${task} is ${days} past due - can you move it today?'`;
+}
+
+function shortDateISO(iso: string): string {
+  const d = new Date(`${iso}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return iso;
+  return `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`;
 }
 
 function renderLookingAhead(item: DigestLookingAhead): string {
@@ -262,6 +276,22 @@ export function renderDigest(payload: DigestPayload): string {
       `*Data-quality drift:* ${payload.data_quality_drift
         .map((d) => `${d.metric} ${d.week_ago} -> ${d.now}`)
         .join(' · ')}.`,
+    );
+  }
+
+  // Shadow-mode reflow visibility (supervised week — nothing was written).
+  const rf = payload.reflow_shadow;
+  if (rf && rf.sets > 0) {
+    const worst = (rf.worst ?? [])
+      .map((w) => `${w.ad_set_code} -> ${shortDateISO(w.earliest_finish)} vs ${shortDateISO(w.ad_delivery_date)}`)
+      .join(', ');
+    lines.push('');
+    lines.push(
+      `_Reflow (shadow - nothing written): would rebaseline ${rf.sets} chains - ` +
+        `${rf.internal} fit their delivery date, ${rf.delivery_slip} need a delivery decision` +
+        (rf.validator_failed > 0 ? `, ${rf.validator_failed} FAILED validation` : '') +
+        (worst ? `. Worst: ${worst}.` : '.') +
+        '_',
     );
   }
 
