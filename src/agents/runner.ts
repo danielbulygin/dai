@@ -882,9 +882,16 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
     // message carries a compact digest of tool data pulled this turn so that
     // follow-up turns in the same thread aren't data-blind (the digest is in
     // history only — never shown in Slack).
+    //
+    // The marker wording matters: on 2026-06-12 Piper saw the old marker
+    // ("[internal — data I pulled this turn…]") in its history and MIMICKED it —
+    // fabricated a digest with invented ok:true write results it never executed
+    // and posted it to the channel. The marker now states it is machine-appended
+    // and must never be written by the agent; launch-claim-guard hard-flags any
+    // response text containing a digest marker or hand-written tool transcript.
     await addMessage({ session_id: session.id, role: 'user', content: userMessage });
     const storedContent = result.toolDigest
-      ? `${result.responseText}\n\n[internal — data I pulled this turn, for my own future reference; the user did not see this block:]\n${result.toolDigest}`
+      ? `${result.responseText}\n\n[machine-appended tool digest — recorded by the runner AFTER this message was sent. The agent NEVER writes a block like this; tool results only exist when tools actually execute:]\n${result.toolDigest}`
       : result.responseText;
     await addMessage({
       session_id: session.id,

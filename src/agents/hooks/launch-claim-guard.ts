@@ -75,18 +75,29 @@ const EXTRA_CLAIM_FAMILIES: ClaimFamily[] = [
   {
     name: "notion_write",
     patterns: [
-      /\bmark(ed|ing)\b[^\n]{0,60}\b(done|completed)\b/i, // "marking both tasks Done"
-      /\btasks?\s*(→|->)\s*done\b/i, // "Upload task → Done"
-      /\bstage\s*(→|->)\s*['"`]?completed\b/i, // "ad set Stage → Completed"
+      /\bmark(ed|ing)\b[^\n]{0,60}\b(done|completed|in progress|blocked|not started)\b/i, // "marking both tasks Done" / "...In Progress"
+      // Any "task(s) → <real status>" arrow claim, not just Done — the 2026-06-12
+      // Piper fabrication was "Glaira's four design tasks → In Progress".
+      /\btasks?\b[^\n]{0,40}(→|->)\s*[*_"'“]*(done|completed|in progress|blocked|not started|cancelled|archived)/i,
+      /\bstage\s*(→|->)\s*['"`]?\w/i, // "ad set Stage → <anything>"
       /\bflipp(ed|ing)\b[^\n]{0,50}\b(stage|status)\b/i,
+      /\bset(ting)?\b[^\n]{0,60}\bto\s+[*_"'“]*(in progress|not started|blocked|done|cancelled|archived)/i, // "Setting Glaira's four tasks to In Progress now"
       /\bnotion\b[^\n]{0,50}\b(closed out|updated|is closed)\b/i,
       /\bclos(ed|ing) out\b[^\n]{0,40}\bnotion\b/i,
       /\bwrites?\s+(are|were)\s+logged\b/i, // "all four writes are logged with reverse actions"
+      /\ball logged\b/i, // "All logged — say the word and I'll revert"
+      /\b(all\s+)?(four|three|two|five|\d+)\s+(tasks?\s+)?created\b/i, // "All four created, Glaira assigned"
+      /\btasks?\s+created\b/i,
+      /\bcreated\b[^\n]{0,60}\b(assigned|due\s+\w)/i,
+      /\bsay the word and i.?ll (revert|archive|undo)\b/i, // undo offers imply a claimed write
+      /\bfiled the correction\b/i,
     ],
     proofTools: new Set([
       "update_aot_task_status",
       "update_aot_ad_set_stage",
       "update_aot_task_due_date",
+      "create_aot_task",
+      "log_pipeline_correction",
       "update_task",
       "create_task",
       "add_task_comment",
@@ -115,6 +126,28 @@ export function detectExtraClaims(text: string): string[] {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Fabricated tool transcripts (2026-06-12 Piper incident): the runner stores
+// each assistant turn in session history with a machine-appended
+// "[internal — …]" tool digest. Piper saw that format in its history and
+// MIMICKED it — wrote a fake digest with invented ok:true results for four
+// status writes it never executed (turns=1, zero tool calls) and posted it to
+// the channel. The marker is storage-only; it NEVER legitimately appears in
+// response text — so its presence (or hand-written `tool({...}) → {...}`
+// transcript lines) is fabrication by definition, regardless of what else ran.
+// ---------------------------------------------------------------------------
+
+const FABRICATED_TRANSCRIPT_PATTERNS: RegExp[] = [
+  /\[internal\s*[—-]/i, // the storage marker, model-written
+  /\[machine-appended tool digest/i, // current marker wording
+  /\w+\(\{[^\n]*\}\)\s*(→|->)\s*\{\s*"?ok"?\s*:/i, // tool({...}) → {"ok":...
+];
+
+/** Exposed for tests. */
+export function detectFabricatedTranscript(text: string): boolean {
+  return FABRICATED_TRANSCRIPT_PATTERNS.some((re) => re.test(text));
+}
+
 export interface LaunchClaimGuardResult {
   flagged: boolean;
   /** Slack-markdown banner to append to the reply when flagged. */
@@ -129,8 +162,23 @@ export async function runLaunchClaimGuard(params: {
 }): Promise<LaunchClaimGuardResult> {
   const { responseText, executedTools, agentId, sessionId } = params;
 
-  // Non-launch claim families first (Notion writes, Slack posts) — soft banner.
+  // Fabricated tool transcript — hard banner, unconditional. The "[internal —"
+  // digest marker and tool({...}) → {...} transcript lines are never legitimate
+  // in response text; the runner appends digests to STORED history only.
   const extraWarnings: string[] = [];
+  if (detectFabricatedTranscript(responseText)) {
+    logger.error(
+      { agentId, sessionId, executedTools: executedTools.map((t) => t.name) },
+      "launch-claim-guard: FABRICATED tool transcript in response text",
+    );
+    extraWarnings.push(
+      ":rotating_light: *AUTOMATED QC — FABRICATED TOOL TRANSCRIPT.* " +
+        "The message above contains what is formatted as tool output, but that block was WRITTEN BY THE MODEL, not produced by any tool. " +
+        "*Treat every \"result\" in it as FALSE* — check `piper_actions` / the actual system for what (if anything) really happened. _(launch-claim-guard)_",
+    );
+  }
+
+  // Non-launch claim families (Notion writes, Slack posts) — soft banner.
   for (const family of EXTRA_CLAIM_FAMILIES) {
     if (!family.patterns.some((re) => re.test(responseText))) continue;
     const proven = executedTools.some((t) => family.proofTools.has(t.name) && !t.isError);

@@ -1067,8 +1067,20 @@ export interface UpdateTaskStatusResult {
   task_name?: string;
   before?: string | null;
   after?: string;
+  /** True only when a post-write read-back confirmed the new value in Notion. */
+  verified?: boolean;
   reverse?: { set_task_status: string | null };
   error?: string;
+}
+
+/** Re-read a single property after a write and confirm it took. */
+async function readBackProperty(
+  pageId: string,
+  extract: (props: Record<string, unknown>) => string | null,
+): Promise<string | null> {
+  const notion = getNotion();
+  const page = (await notion.pages.retrieve({ page_id: pageId })) as PageObjectResponse;
+  return extract(page.properties as Record<string, unknown>);
 }
 
 /**
@@ -1104,12 +1116,29 @@ export async function updateAotTaskStatus(params: {
       });
     }
 
+    // QC read-back: never report a write that Notion doesn't show.
+    const readBack = await readBackProperty(
+      pageId,
+      (props) => (props['Status'] as { status?: { name: string } } | undefined)?.status?.name ?? null,
+    );
+    if (readBack !== params.new_status) {
+      return {
+        ok: false,
+        task_id: pageId,
+        task_name: taskName,
+        before,
+        verified: false,
+        error: `Write did not stick: read-back shows Status="${readBack}", expected "${params.new_status}". Report this as a FAILED write.`,
+      };
+    }
+
     return {
       ok: true,
       task_id: pageId,
       task_name: taskName,
       before,
       after: params.new_status,
+      verified: true,
       reverse: { set_task_status: before },
     };
   } catch (err) {
@@ -1125,6 +1154,8 @@ export interface UpdateTaskDueDateResult {
   task_name?: string;
   before?: string | null;
   after?: string;
+  /** True only when a post-write read-back confirmed the new value in Notion. */
+  verified?: boolean;
   reverse?: { set_task_due_date: string | null };
   error?: string;
 }
@@ -1164,12 +1195,28 @@ export async function updateAotTaskDueDate(params: {
       });
     }
 
+    const readBack = await readBackProperty(
+      pageId,
+      (props) => (props['Task Due Date'] as { date?: { start: string } | null } | undefined)?.date?.start ?? null,
+    );
+    if (readBack !== params.new_due_date) {
+      return {
+        ok: false,
+        task_id: pageId,
+        task_name: taskName,
+        before,
+        verified: false,
+        error: `Write did not stick: read-back shows Task Due Date="${readBack}", expected "${params.new_due_date}". Report this as a FAILED write.`,
+      };
+    }
+
     return {
       ok: true,
       task_id: pageId,
       task_name: taskName,
       before,
       after: params.new_due_date,
+      verified: true,
       reverse: { set_task_due_date: before },
     };
   } catch (err) {
@@ -1275,6 +1322,8 @@ export interface CreateAotTaskResult {
   task_name?: string;
   ad_set_title?: string;
   assignee_name?: string;
+  /** True only when a post-create read-back confirmed the page + key fields in Notion. */
+  verified?: boolean;
   reverse?: { archive_created_task: string };
   error?: string;
 }
@@ -1352,6 +1401,28 @@ export async function createAotTask(params: {
       ...(children.length > 0 ? { children } : {}),
     });
 
+    // QC read-back: confirm the page really exists with the key fields set.
+    const created = (await notion.pages.retrieve({ page_id: response.id })) as PageObjectResponse;
+    const cProps = created.properties as Record<string, unknown>;
+    const cStatus = (cProps['Status'] as { status?: { name: string } } | undefined)?.status?.name ?? null;
+    const cDue = (cProps['Task Due Date'] as { date?: { start: string } | null } | undefined)?.date?.start ?? null;
+    const cAssignees = ((cProps['Assignee'] as { people?: Array<{ id: string }> } | undefined)?.people ?? []).map((p) => p.id);
+    const problems: string[] = [];
+    if (cStatus !== status) problems.push(`Status="${cStatus}" expected "${status}"`);
+    if (params.due_date && cDue !== params.due_date) problems.push(`Task Due Date="${cDue}" expected "${params.due_date}"`);
+    if (assignee && !cAssignees.includes(assignee.user_id)) problems.push(`Assignee missing (expected ${assignee.user_name})`);
+    if (problems.length > 0) {
+      return {
+        ok: false,
+        task_id: response.id,
+        task_name: params.task_name.trim(),
+        ad_set_title: adSetTitle,
+        verified: false,
+        reverse: { archive_created_task: response.id },
+        error: `Task page was created but read-back found mismatches: ${problems.join('; ')}. Report this as a PARTIAL write and surface the task URL for manual fixing.`,
+      };
+    }
+
     return {
       ok: true,
       task_id: response.id,
@@ -1359,6 +1430,7 @@ export async function createAotTask(params: {
       task_name: params.task_name.trim(),
       ad_set_title: adSetTitle,
       assignee_name: assignee?.user_name,
+      verified: true,
       reverse: { archive_created_task: response.id },
     };
   } catch (err) {
@@ -1393,6 +1465,8 @@ export interface UpdateAdSetStageResult {
   ad_id_code?: string | null;
   before?: string | null;
   after?: string;
+  /** True only when a post-write read-back confirmed the new value in Notion. */
+  verified?: boolean;
   reverse?: { set_ad_set_stage: string | null };
   error?: string;
 }
@@ -1433,6 +1507,22 @@ export async function updateAotAdSetStage(params: {
       });
     }
 
+    const readBack = await readBackProperty(
+      pageId,
+      (props) => (props['Stage'] as { status?: { name: string } } | undefined)?.status?.name ?? null,
+    );
+    if (readBack !== params.new_stage) {
+      return {
+        ok: false,
+        ad_set_id: pageId,
+        ad_title: adTitle,
+        ad_id_code: adIdCode,
+        before,
+        verified: false,
+        error: `Write did not stick: read-back shows Stage="${readBack}", expected "${params.new_stage}". Report this as a FAILED write.`,
+      };
+    }
+
     return {
       ok: true,
       ad_set_id: pageId,
@@ -1440,6 +1530,7 @@ export async function updateAotAdSetStage(params: {
       ad_id_code: adIdCode,
       before,
       after: params.new_stage,
+      verified: true,
       reverse: { set_ad_set_stage: before },
     };
   } catch (err) {
