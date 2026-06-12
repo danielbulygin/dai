@@ -1184,35 +1184,83 @@ export async function updateAotTaskDueDate(params: {
 // ---------------------------------------------------------------------------
 
 let workspaceUsersCache: Array<{ id: string; name: string }> | null = null;
+let guestAssigneesCache: Array<{ id: string; name: string }> | null = null;
+
+async function getWorkspaceUsers(): Promise<Array<{ id: string; name: string }>> {
+  if (workspaceUsersCache) return workspaceUsersCache;
+  const notion = getNotion();
+  const users: Array<{ id: string; name: string }> = [];
+  let cursor: string | undefined;
+  do {
+    const page = await notion.users.list({ page_size: 100, ...(cursor ? { start_cursor: cursor } : {}) });
+    for (const u of page.results) {
+      if (u.type === 'person' && u.name) users.push({ id: u.id, name: u.name });
+    }
+    cursor = page.has_more ? (page.next_cursor ?? undefined) : undefined;
+  } while (cursor);
+  workspaceUsersCache = users;
+  return users;
+}
 
 /**
- * Resolve a person's name to their Notion user id via the workspace user list
- * (cached per process). Case-insensitive substring match. Returns an error
- * string instead of guessing when the match is missing or ambiguous —
- * assigning the wrong person is worse than asking.
+ * Workspace GUESTS (most external editors/designers, e.g. Glaira, Amr) are
+ * invisible to users.list — but they appear inline (id + name) in the people
+ * property of tasks they're assigned to. Harvest them from recently edited
+ * tasks. Cached per process.
+ */
+async function getGuestAssignees(): Promise<Array<{ id: string; name: string }>> {
+  if (guestAssigneesCache) return guestAssigneesCache;
+  const notion = getNotion();
+  const dsId = await resolveDataSourceId(env.NOTION_AOT_TASKS_DB_ID);
+  const seen = new Map<string, string>();
+  let cursor: string | undefined;
+  let fetched = 0;
+  while (fetched < 600) {
+    const response = await notion.dataSources.query({
+      data_source_id: dsId,
+      page_size: 100,
+      sorts: [{ timestamp: 'last_edited_time', direction: 'descending' }] as never,
+      ...(cursor ? { start_cursor: cursor } : {}),
+    });
+    for (const page of response.results) {
+      if (!('properties' in page)) continue;
+      const assignee = (page as PageObjectResponse).properties['Assignee'] as
+        | { people?: Array<{ id: string; name?: string | null }> }
+        | undefined;
+      for (const p of assignee?.people ?? []) {
+        if (p.id && p.name && !seen.has(p.id)) seen.set(p.id, p.name);
+      }
+    }
+    fetched += response.results.length;
+    if (!response.has_more || !response.next_cursor) break;
+    cursor = response.next_cursor;
+  }
+  guestAssigneesCache = Array.from(seen, ([id, name]) => ({ id, name }));
+  return guestAssigneesCache;
+}
+
+/**
+ * Resolve a person's name to their Notion user id — workspace members via
+ * users.list, guests via assignees harvested from recent tasks. Cached per
+ * process. Case-insensitive substring match. Returns an error string instead
+ * of guessing when the match is missing or ambiguous — assigning the wrong
+ * person is worse than asking.
  */
 export async function resolveNotionUserByName(
   name: string,
 ): Promise<{ ok: true; user_id: string; user_name: string } | { ok: false; error: string }> {
-  const notion = getNotion();
-  if (!workspaceUsersCache) {
-    const users: Array<{ id: string; name: string }> = [];
-    let cursor: string | undefined;
-    do {
-      const page = await notion.users.list({ page_size: 100, ...(cursor ? { start_cursor: cursor } : {}) });
-      for (const u of page.results) {
-        if (u.type === 'person' && u.name) users.push({ id: u.id, name: u.name });
-      }
-      cursor = page.has_more ? (page.next_cursor ?? undefined) : undefined;
-    } while (cursor);
-    workspaceUsersCache = users;
+  const needle = name.trim().toLowerCase();
+
+  const members = await getWorkspaceUsers();
+  let matches = members.filter((u) => u.name.toLowerCase().includes(needle));
+  if (matches.length === 0) {
+    const guests = await getGuestAssignees();
+    matches = guests.filter((u) => u.name.toLowerCase().includes(needle));
   }
 
-  const needle = name.trim().toLowerCase();
-  const matches = workspaceUsersCache.filter((u) => u.name.toLowerCase().includes(needle));
   if (matches.length === 1) return { ok: true, user_id: matches[0]!.id, user_name: matches[0]!.name };
   if (matches.length === 0) {
-    return { ok: false, error: `No Notion user matches "${name}". Ask the human for the exact name.` };
+    return { ok: false, error: `No Notion user matches "${name}" (checked members + recent task assignees). Ask the human for the exact name.` };
   }
   return {
     ok: false,
