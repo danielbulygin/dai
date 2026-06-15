@@ -54,7 +54,7 @@ export const toolProfiles = {
     'list_clients',
     'query_aot_tasks', 'query_aot_adsets', 'count_aot_tasks', 'count_aot_adsets', 'check_ads_in_meta', 'search_notion',
     'get_my_moves', 'log_pipeline_correction', 'get_recovery_plan',
-    'get_pipeline_summary', 'get_adset_case', 'query_piper_state',
+    'get_pipeline_summary', 'get_adset_case', 'get_adset_comments', 'query_piper_state',
     'inspect_piper_actions',
     'remember_cadence_target', 'get_cadence_targets', 'inspect_data_quality',
     'get_cadence_read', 'get_cadence_read_all',

@@ -25,6 +25,7 @@ import { logger } from '../utils/logger.js';
 import { logToolCall, logWrite, fetchRecentActions } from './action-log.js';
 import * as piperMovesTools from './tools/piper-moves-tools.js';
 import * as piperBrainTools from './tools/piper-brain-tools.js';
+import * as piperCommentsTools from './tools/piper-comments-tools.js';
 import * as cadenceTools from './tools/cadence-tools.js';
 import * as cadenceReadTools from './tools/cadence-read-tools.js';
 import { getSupabase } from '../integrations/supabase.js';
@@ -2763,6 +2764,34 @@ register({
   async execute(input) {
     return await piperBrainTools.getAdsetCase({
       ad_set_code: input.ad_set_code as string,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'get_adset_comments',
+    description:
+      'Read the Notion page comment thread on a single ad set — the real decision + feedback history that the brain and the task properties do NOT carry. A large share of what actually happened to an ad set lives ONLY in the page comments: client revision relays (Stella/Alex/Steven feedback), reshoot debates, product/shipping-delay updates ("the products can\'t be shipped, still waiting for the limited edition bottles"), QC notes, and final "let\'s progress" / sign-off calls. Returns comments chronologically with author, date, and text (mentions already resolved to @Name). Use this on ANY deep-dive ("what\'s going on with LAx3871", "why is X stuck", "what was the feedback on Y") ALONGSIDE get_adset_case — the case file gives the mechanical state, the comments give the human story. The code is normalized for you ("lax3871" → "LAx3871"). Live read = freshness is now. Returns OPEN page-level comments only (resolved + block-level not included).',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        ad_set_code: {
+          type: 'string',
+          description: 'The ad-set code, any casing ("LAx3871", "lax3871", "TLx4101").',
+        },
+        max: {
+          type: 'number',
+          description: 'Max comments to return (default 40, most recent kept). 1-100.',
+        },
+      },
+      required: ['ad_set_code'],
+    },
+  },
+  async execute(input) {
+    return await piperCommentsTools.getAdsetComments({
+      ad_set_code: input.ad_set_code as string,
+      max: input.max as number | undefined,
     });
   },
 });
