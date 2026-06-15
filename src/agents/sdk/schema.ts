@@ -62,7 +62,7 @@ function nodeToZod(schema: JsonSchema): z.ZodTypeAny {
         const required = new Set(
           Array.isArray(schema.required) ? (schema.required as string[]) : [],
         );
-        const shape: z.ZodRawShape = {};
+        const shape: Record<string, z.ZodTypeAny> = {};
         for (const [key, child] of Object.entries(props)) {
           shape[key] = applyModifiers(nodeToZod(child), child, required.has(key));
         }
@@ -105,7 +105,7 @@ export function jsonSchemaToZodRawShape(
     Array.isArray(schema?.required) ? (schema.required as string[]) : [],
   );
 
-  const shape: z.ZodRawShape = {};
+  const shape: Record<string, z.ZodTypeAny> = {};
   for (const [key, child] of Object.entries(props)) {
     shape[key] = applyModifiers(nodeToZod(child), child, required.has(key));
   }
