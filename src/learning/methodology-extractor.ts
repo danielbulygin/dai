@@ -208,7 +208,7 @@ export async function extractMethodologyInsights(
   // Fetch full_transcript + speakers from the meetings table
   const { data: meetingRow, error } = await supabase
     .from("meetings")
-    .select("full_transcript, speakers, short_summary")
+    .select("full_transcript, speakers, short_summary, is_private")
     .eq("id", meetingId)
     .single();
 
@@ -221,7 +221,14 @@ export async function extractMethodologyInsights(
     full_transcript: string | null;
     speakers: string[] | null;
     short_summary: string | null;
+    is_private: boolean | null;
   } | null;
+
+  // Privacy: never derive methodology insights from a private meeting.
+  if (meeting?.is_private) {
+    logger.debug({ meetingId }, "Meeting is private, skipping methodology extraction");
+    return [];
+  }
 
   const transcript = meeting?.full_transcript ?? "";
 

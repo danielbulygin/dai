@@ -21,7 +21,7 @@ export async function processMeeting(meetingId: string): Promise<void> {
   // Fetch meeting
   const { data: meeting, error } = await supabase
     .from('meetings')
-    .select('id, title, date, speakers, participant_emails, short_summary, organizer_email, full_transcript, pipeline_status')
+    .select('id, title, date, speakers, participant_emails, short_summary, organizer_email, full_transcript, pipeline_status, is_private')
     .eq('id', meetingId)
     .maybeSingle();
 
@@ -32,6 +32,14 @@ export async function processMeeting(meetingId: string): Promise<void> {
 
   if (!meeting) {
     logger.warn({ meetingId }, 'Meeting not found');
+    return;
+  }
+
+  // Privacy: never extract learnings/insights from private (personal/finance/
+  // Dan-only) meetings — their content must not resurface via the team's tools.
+  if (meeting.is_private) {
+    logger.debug({ meetingId }, 'Meeting is private, skipping extraction');
+    await supabase.from('meetings').update({ pipeline_status: 'skipped_private' }).eq('id', meetingId);
     return;
   }
 
