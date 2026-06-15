@@ -1,12 +1,23 @@
 import { getDaiSupabase } from "../../integrations/dai-supabase.js";
 import { logger } from "../../utils/logger.js";
 
+// Privacy: meetings flagged is_private (Dan's personal / Dan+Franzi / finance /
+// external-non-business calls) must NOT surface to the team via the agents.
+// Ada/Piper read with the service key (bypasses RLS), so we enforce here in code.
+// `includePrivate` is true ONLY for the owner (set by the tool registry from the
+// requesting Slack user); everyone else — and any system/cron context — is
+// fail-closed to public-only.
+const NOT_ACCESSIBLE = JSON.stringify({
+  error: "Meeting not found or not accessible.",
+});
+
 export async function searchMeetings(params: {
   query: string;
   fromDate?: string;
   toDate?: string;
   speaker?: string;
   limit?: number;
+  includePrivate?: boolean;
 }): Promise<string> {
   try {
     const limit = params.limit ?? 20;
@@ -19,6 +30,7 @@ export async function searchMeetings(params: {
       to_date: params.toDate ?? null,
       speaker_filter: params.speaker ?? null,
       result_limit: limit,
+      include_private: params.includePrivate ?? false,
     });
 
     if (error) {
@@ -37,22 +49,30 @@ export async function searchMeetings(params: {
 
 export async function getMeetingSummary(params: {
   meetingId: string;
+  includePrivate?: boolean;
 }): Promise<string> {
   try {
     logger.debug({ meetingId: params.meetingId }, "Getting meeting summary");
     const supabase = getDaiSupabase();
 
-    const { data, error } = await supabase
+    let query = supabase
       .from("meetings")
       .select(
         "id, title, date, duration, organizer_email, speakers, participant_emails, short_summary, keywords, action_items, overview, notes, gist",
       )
-      .eq("id", params.meetingId)
-      .single();
+      .eq("id", params.meetingId);
+
+    if (!params.includePrivate) {
+      query = query.eq("is_private", false);
+    }
+
+    const { data, error } = await query.single();
 
     if (error) {
-      logger.error({ error }, "Failed to get meeting summary");
-      return JSON.stringify({ error: error.message });
+      // No row may mean genuinely missing OR private-and-not-owner. Return the
+      // same response either way so the existence of a private meeting isn't leaked.
+      logger.debug({ meetingId: params.meetingId }, "Meeting summary not accessible");
+      return NOT_ACCESSIBLE;
     }
 
     logger.debug({ meetingId: params.meetingId }, "Got meeting summary");
@@ -67,6 +87,7 @@ export async function getMeetingSummary(params: {
 export async function getMeetingTranscript(params: {
   meetingId: string;
   speaker?: string;
+  includePrivate?: boolean;
 }): Promise<string> {
   try {
     logger.debug(
@@ -74,6 +95,19 @@ export async function getMeetingTranscript(params: {
       "Getting meeting transcript",
     );
     const supabase = getDaiSupabase();
+
+    // meeting_sentences has no privacy flag of its own — gate on the parent meeting.
+    if (!params.includePrivate) {
+      const { data: meeting } = await supabase
+        .from("meetings")
+        .select("is_private")
+        .eq("id", params.meetingId)
+        .single();
+      if (!meeting || meeting.is_private) {
+        logger.debug({ meetingId: params.meetingId }, "Transcript not accessible (private)");
+        return NOT_ACCESSIBLE;
+      }
+    }
 
     let query = supabase
       .from("meeting_sentences")
@@ -108,6 +142,7 @@ export async function listRecentMeetings(params: {
   days?: number;
   limit?: number;
   speaker?: string;
+  includePrivate?: boolean;
 }): Promise<string> {
   try {
     const days = params.days ?? 7;
@@ -126,6 +161,10 @@ export async function listRecentMeetings(params: {
       .gte("date", since.toISOString())
       .order("date", { ascending: false })
       .limit(limit);
+
+    if (!params.includePrivate) {
+      query = query.eq("is_private", false);
+    }
 
     const { data, error } = await query;
 

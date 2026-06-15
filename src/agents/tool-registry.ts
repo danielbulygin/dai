@@ -1,4 +1,5 @@
 import type Anthropic from '@anthropic-ai/sdk';
+import { env } from '../env.js';
 import { toolProfiles, type ToolProfile } from './profiles/index.js';
 import * as memoryTools from './tools/memory-tools.js';
 import * as agentTools from './tools/agent-tools.js';
@@ -60,6 +61,12 @@ const REGISTRY = new Map<string, RegisteredTool>();
 
 function register(tool: RegisteredTool): void {
   REGISTRY.set(tool.definition.name, tool);
+}
+
+// Only the owner (Dan) may see meetings flagged is_private. Fail-closed: any
+// missing/non-owner userId (incl. system/cron contexts) gets public-only.
+function isOwner(context: ToolContext): boolean {
+  return !!context?.userId && context.userId === env.SLACK_OWNER_USER_ID;
 }
 
 // ---------------------------------------------------------------------------
@@ -1799,13 +1806,14 @@ register({
       required: ['query'],
     },
   },
-  async execute(input) {
+  async execute(input, context) {
     return await firefliesTools.searchMeetings({
       query: input.query as string,
       fromDate: input.fromDate as string | undefined,
       toDate: input.toDate as string | undefined,
       speaker: input.speaker as string | undefined,
       limit: input.limit as number | undefined,
+      includePrivate: isOwner(context),
     });
   },
 });
@@ -1826,9 +1834,10 @@ register({
       required: ['meetingId'],
     },
   },
-  async execute(input) {
+  async execute(input, context) {
     return await firefliesTools.getMeetingSummary({
       meetingId: input.meetingId as string,
+      includePrivate: isOwner(context),
     });
   },
 });
@@ -1853,10 +1862,11 @@ register({
       required: ['meetingId'],
     },
   },
-  async execute(input) {
+  async execute(input, context) {
     return await firefliesTools.getMeetingTranscript({
       meetingId: input.meetingId as string,
       speaker: input.speaker as string | undefined,
+      includePrivate: isOwner(context),
     });
   },
 });
@@ -1884,11 +1894,12 @@ register({
       },
     },
   },
-  async execute(input) {
+  async execute(input, context) {
     return await firefliesTools.listRecentMeetings({
       days: input.days as number | undefined,
       limit: input.limit as number | undefined,
       speaker: input.speaker as string | undefined,
+      includePrivate: isOwner(context),
     });
   },
 });
