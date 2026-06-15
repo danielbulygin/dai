@@ -174,6 +174,7 @@ async function main() {
   // ---- TEST 5: one golden eval (capability-rename) on Ada's real model ----
   line(`\n=== TEST 5: golden eval [capability-rename] on ${ADA_MODEL} ===`);
   try {
+    if (process.env.SPIKE_SKIP_EVAL) { line('SKIPPED (SPIKE_SKIP_EVAL set — already passed prior run)'); throw { __skip: true }; }
     const r = await runQuery('Can you rename assets in a Google Drive folder?', { model: ADA_MODEL, skills: ['ada-media-library', 'ada-sweetspot-namer'], maxTurns: 8 });
     totalCost += r.cost ?? 0;
     line(`tool_uses: ${JSON.stringify(r.toolUses)}`);

@@ -88,9 +88,16 @@ const READ_TOOLS = new Set<string>([
   'generate_weekly_report',
 ]);
 
-/** Safe built-in read tools that skills may use. */
+/**
+ * Safe built-in read tools that skills may use. `ToolSearch` is the SDK's
+ * deferred-tool-discovery tool — with 60+ MCP tools the harness loads schemas
+ * lazily and the model calls `ToolSearch` to find tools. It has no side effects
+ * (it only surfaces schemas); the guard still gates the actual execution that
+ * follows. Denying it cripples tool discovery, so it must be allowed.
+ */
 const BUILTIN_READS = new Set<string>([
   'Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'Skill', 'TodoWrite',
+  'ToolSearch', 'ListMcpResourcesTool', 'ReadMcpResourceTool', 'ExitPlanMode',
 ]);
 
 /** dai's two authorized external mutations — gated behind per-run flags. */
