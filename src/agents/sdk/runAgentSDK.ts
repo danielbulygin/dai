@@ -56,6 +56,8 @@ export interface SdkRunExtras {
   maxBudgetUsd?: number;
   /** Collect every guard decision (for QC evidence). */
   onDecision?: (d: GuardDecision) => void;
+  /** Reports the SDK's authoritative cost + result subtype + tool names used. */
+  onResult?: (r: { costUsd: number; subtype: string; toolsUsed: string[] }) => void;
 }
 
 const DEFAULT_ADA_SKILLS = [
@@ -182,6 +184,7 @@ export async function runAgentSDK(options: RunOptions, extras: SdkRunExtras = {}
   let usage: TokenUsage = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
   let turns = 0;
   let claudeSessionId: string | undefined;
+  const toolsUsed: string[] = [];
 
   for await (const msg of q) {
     if (msg.type === 'assistant') {
@@ -191,7 +194,7 @@ export async function runAgentSDK(options: RunOptions, extras: SdkRunExtras = {}
       for (const b of content) {
         const blk = b as { type?: string; text?: string; name?: string };
         if (blk.type === 'text' && blk.text) { responseText += blk.text; options.onText?.(blk.text); }
-        if (blk.type === 'tool_use') { lastTurnHadToolUse = true; if (blk.name) options.onToolUse?.(blk.name); }
+        if (blk.type === 'tool_use') { lastTurnHadToolUse = true; if (blk.name) { toolsUsed.push(blk.name); options.onToolUse?.(blk.name); } }
       }
     } else if (msg.type === 'result') {
       const r = msg as Record<string, unknown>;
@@ -205,6 +208,7 @@ export async function runAgentSDK(options: RunOptions, extras: SdkRunExtras = {}
         cacheCreation: u.cache_creation_input_tokens ?? 0,
       };
       if (typeof r.result === 'string' && r.result && !responseText) responseText = r.result as string;
+      extras.onResult?.({ costUsd: (r.total_cost_usd as number) ?? 0, subtype: (r.subtype as string) ?? 'unknown', toolsUsed });
       if (r.subtype !== 'success') {
         logger.warn({ subtype: r.subtype, sessionId: session.id }, 'runAgentSDK non-success result');
       }
