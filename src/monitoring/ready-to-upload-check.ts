@@ -17,6 +17,7 @@ import { getClientCapabilities } from '../agents/tools/ad-launch-tools.js';
 import { getSupabase } from '../integrations/supabase.js';
 import { getStalePendingBatches, formatStaleBatchSection } from '../agents/launch-state.js';
 import { getAgentState, setAgentState } from '../memory/agent-state.js';
+import { createSession } from '../memory/sessions.js';
 
 const ADA_CHANNEL = (env as unknown as Record<string, string | undefined>).ADA_UPLOAD_CHECK_CHANNEL_ID || 'C0AHX94CBF0';
 const NINA_USER_ID = (env as unknown as Record<string, string | undefined>).NINA_SLACK_USER_ID || 'U08LEQVHDRU';
@@ -384,9 +385,27 @@ export async function runReadyToUploadCheck(trigger: 'morning' | 'evening'): Pro
 
   const text = [built?.message, staleSection].filter(Boolean).join('\n\n');
   try {
-    await getDedicatedBotClient('ada').chat.postMessage({ channel: ADA_CHANNEL, text });
+    const posted = await getDedicatedBotClient('ada').chat.postMessage({ channel: ADA_CHANNEL, text });
+    // Register the digest thread as an Ada-owned session so a PLAIN in-thread reply
+    // ("Ada, run the upload for X") is recognized by the channel thread-reply listener,
+    // which gates on findThreadOwner() (sessions.status='active'). The digest is posted
+    // by this scheduled job — not via handleDedicatedBotMessage — so without this its
+    // thread is untracked and replies are silently dropped unless the user explicitly
+    // @-mentions Ada. Caught 2026-06-16: Nina replied in-thread for Teethlovers exactly
+    // as the digest instructed and nothing fired. This survives a dai restart (DB-backed).
+    const digestTs = posted?.ts as string | undefined;
+    if (digestTs) {
+      try {
+        await createSession({ agent_id: 'ada', channel_id: ADA_CHANNEL, thread_ts: digestTs, user_id: 'system' });
+      } catch (sessErr) {
+        logger.warn(
+          { err: sessErr, threadTs: digestTs },
+          'ready-to-upload check: failed to register digest thread — in-thread replies may not trigger Ada',
+        );
+      }
+    }
     logger.info(
-      { trigger, count: built?.count ?? 0, staleBatches: staleSection ? true : false },
+      { trigger, count: built?.count ?? 0, staleBatches: staleSection ? true : false, threadTs: digestTs },
       'ready-to-upload check posted to #ada',
     );
   } catch (err) {
