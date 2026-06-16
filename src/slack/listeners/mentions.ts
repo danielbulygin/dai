@@ -2,6 +2,7 @@ import type { App } from '@slack/bolt';
 import { logger } from '../../utils/logger.js';
 import { routeMessage } from '../../orchestrator/router.js';
 import { runAgent } from '../../agents/runner.js';
+import { runAgentSDK, shouldUseSdkRunner } from '../../agents/sdk/runAgentSDK.js';
 import { getAgent, getDefaultAgent } from '../../agents/registry.js';
 import { agentQueue } from '../../orchestrator/queue.js';
 import { createStreamResponder } from '../stream-responder.js';
@@ -104,9 +105,9 @@ export function registerMentionListener(app: App): void {
 
     // Run the agent through the queue
     try {
-      const result = await agentQueue.enqueue(channel, () =>
-        runAgent({
-          source: 'interactive',
+      const result = await agentQueue.enqueue(channel, () => {
+        const runOpts = {
+          source: 'interactive' as const,
           agentId,
           userMessage: route.cleanedText,
           userId: user,
@@ -114,8 +115,18 @@ export function registerMentionListener(app: App): void {
           threadTs,
           onText: responder.onText,
           onTurnReset: responder.resetAccumulated,
-        }),
-      );
+        };
+        // Ada v2 (Claude Agent SDK) behind ADA_SDK_RUNNER=1; everything else keeps
+        // the hand-rolled runner. SDK Ada runs with the airtight PRODUCTION write
+        // allow-list (deletes + unknown tools denied; launches paused-bank only).
+        return shouldUseSdkRunner(agentId)
+          ? runAgentSDK(runOpts, {
+              policy: { allowProductionWrites: true },
+              maxTurns: 40,
+              maxBudgetUsd: 12,
+            })
+          : runAgent(runOpts);
+      });
 
       await responder.finalize(result.response, result.usage);
     } catch (err) {

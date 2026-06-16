@@ -31,6 +31,13 @@
 import type { CanUseTool, HookCallback, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 
 export interface GuardPolicy {
+  /**
+   * PRODUCTION mode: allow Ada's full legitimate write allow-list (PRODUCTION_WRITES)
+   * — exactly the writes current Ada already performs (Slack posts, Notion task/stage
+   * writes, learning/decision edits, paused-bank launches, media uploads). Deletes and
+   * anything NOT on the allow-list stay denied. Default false (spike = deny-all-writes).
+   */
+  allowProductionWrites: boolean;
   /** Master enable for dai's two authorized external mutations. Default false. */
   allowTestMutations: boolean;
   /** Enable the paused-launch verbs (launch_ads/set_adset_marker/pause_launch/update_landing_page_mapping). */
@@ -53,6 +60,7 @@ export interface GuardDecision {
 
 export function defaultPolicy(overrides: Partial<GuardPolicy> = {}): GuardPolicy {
   return {
+    allowProductionWrites: false,
     allowTestMutations: false,
     allowPausedLaunch: false,
     allowMediaUpload: false,
@@ -106,9 +114,45 @@ const LAUNCH_MUTATIONS = new Set<string>([
 ]);
 const UPLOAD_MUTATION = 'upload_to_media_library';
 
-/** Built-ins that must never run in the spike. */
+/** Built-ins that must never run (arbitrary code / file mutation / sub-agents). */
 const FORBIDDEN_BUILTINS = new Set<string>([
   'Bash', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Task',
+]);
+
+/**
+ * HARD DELETE RAIL — these (and anything matching the delete/destroy/purge/remove
+ * pattern) are NEVER allowed autonomously, in ANY mode, regardless of flags.
+ * Enforces the standing never-delete-without-explicit-ask rule.
+ */
+const DELETE_TOOLS = new Set<string>([
+  'delete_learning', 'delete_methodology', 'delete_memory',
+  'delete_task', 'delete_event', 'delete_concept', 'delete_brief',
+]);
+const DELETE_PATTERN = /(^|_)(delete|destroy|purge|remove)(s|d)?(_|$)/i;
+function isDeleteTool(bare: string): boolean {
+  return DELETE_TOOLS.has(bare) || DELETE_PATTERN.test(bare);
+}
+
+/**
+ * Ada's legitimate PRODUCTION writes — the explicit allow-list. Airtight: anything
+ * not in this set is denied. This is exactly the write surface current Ada already
+ * uses (media_buyer profile), so it grants NO new autonomy.
+ *   - launch_ads / upload_to_media_library create only PAUSED-bank objects by
+ *     construction: SafeMetaAPI verifies the parent bank campaign is PAUSED before
+ *     creating anything (it raises SafetyError otherwise), so nothing can ever spend.
+ *   - deletes are deliberately EXCLUDED — they are hard-blocked above.
+ */
+const PRODUCTION_WRITES = new Set<string>([
+  // memory / decisions / learnings (non-destructive edits only)
+  'remember', 'log_decision', 'correct_learning', 'correct_methodology',
+  // Slack
+  'post_message', 'reply_in_thread',
+  // Notion
+  'create_task', 'update_task', 'add_task_comment',
+  'update_aot_task_status', 'update_aot_ad_set_stage',
+  // Meta launch / media library (paused-bank only, via SafeMetaAPI)
+  'launch_ads', 'pause_launch', 'set_adset_marker', 'update_landing_page_mapping',
+  'upload_to_media_library',
 ]);
 
 export function bareToolName(name: string): string {
@@ -145,6 +189,18 @@ export function decide(
 
   if (FORBIDDEN_BUILTINS.has(bare)) {
     return { ...base, decision: 'deny', reason: `forbidden built-in (${bare})` };
+  }
+
+  // HARD delete rail — never autonomous, in ANY mode, regardless of flags.
+  if (isDeleteTool(bare)) {
+    return { ...base, decision: 'deny', reason: `delete tool hard-blocked — never autonomous (${bare})` };
+  }
+
+  // PRODUCTION write allow-list (airtight: explicit set only; everything else falls
+  // through to deny). launch_ads/upload are allow-listed here in production mode and
+  // are paused-bank-only by SafeMetaAPI construction.
+  if (policy.allowProductionWrites && PRODUCTION_WRITES.has(bare)) {
+    return { ...base, decision: 'allow', reason: `production write allow-listed (${bare})` };
   }
 
   // upload_to_media_library — authorized mutation (b)

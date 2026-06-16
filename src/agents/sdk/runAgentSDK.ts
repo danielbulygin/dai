@@ -54,6 +54,9 @@ export interface SdkRunExtras {
   skillsCwd?: string;
   /** maxBudgetUsd cap (default 3). */
   maxBudgetUsd?: number;
+  /** maxTurns cap (default min(config.max_turns, 20)). Production raises this — multi-tool
+   *  launch chains (ready-to-upload) need more than 20 agent turns to complete reliably. */
+  maxTurns?: number;
   /** Collect every guard decision (for QC evidence). */
   onDecision?: (d: GuardDecision) => void;
   /** Reports the SDK's authoritative cost + result subtype + tool names used. */
@@ -154,7 +157,7 @@ export async function runAgentSDK(options: RunOptions, extras: SdkRunExtras = {}
   });
 
   const model = extras.model ?? agent.config.model;
-  const maxTurns = Math.min(agent.config.max_turns ?? 25, 20);
+  const maxTurns = extras.maxTurns ?? Math.min(agent.config.max_turns ?? 25, 20);
 
   logger.info(
     { sessionId: session.id, claudeSessionId: session.claude_session_id, profile, model, tools: bridge.toolNames.length },
