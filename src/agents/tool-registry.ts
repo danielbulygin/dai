@@ -530,6 +530,11 @@ register({
           description:
             'Authoritative ad-set asset id (e.g. "TLx4086") from the Notion ad set. When set, unprefixed files get THIS id prepended, and files carrying a DIFFERENT id fail with asset_id_conflict instead of being uploaded. Always pass it when uploading for a known ad set.',
         },
+        ad_account_id: {
+          type: 'string',
+          description:
+            'OPTIONAL ad-account override (e.g. "act_1570076840279279"). When set, the upload targets THIS account directly instead of resolving the account from client_code. Use ONLY for testing against the internal test account; omit for all normal client uploads.',
+        },
       },
       required: ['drive_url', 'client_code'],
     },
@@ -539,6 +544,7 @@ register({
       drive_url: input.drive_url as string,
       client_code: input.client_code as string,
       expected_asset_id: input.expected_asset_id as string | undefined,
+      ad_account_id: input.ad_account_id as string | undefined,
     });
   },
 });

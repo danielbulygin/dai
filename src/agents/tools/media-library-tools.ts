@@ -151,6 +151,7 @@ export async function uploadToMediaLibrary(params: {
   drive_url: string;
   client_code: string;
   expected_asset_id?: string;
+  ad_account_id?: string;
 }): Promise<string> {
   const { data, error } = await dropletRequest(
     "/api/media-library/v2/upload",
@@ -159,6 +160,7 @@ export async function uploadToMediaLibrary(params: {
       client_code: params.client_code,
       resolve_real_ids: true,
       ...(params.expected_asset_id ? { expected_asset_id: params.expected_asset_id } : {}),
+      ...(params.ad_account_id ? { ad_account_id: params.ad_account_id } : {}),
     },
     2_700_000, // 45 min timeout (large video uploads, 3+ files at ~167MB each)
   );

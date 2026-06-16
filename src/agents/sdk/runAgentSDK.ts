@@ -150,7 +150,13 @@ export async function runAgentSDK(options: RunOptions, extras: SdkRunExtras = {}
     clientScope: options.clientScope ? { clientCode: options.clientScope.clientCode } : undefined,
   };
 
-  const policy: GuardPolicy = defaultPolicy({ ...extras.policy, onDecision: extras.onDecision });
+  // Default the guard's decision callback to a logger so every allow/deny is
+  // visible in `journalctl -u dai` during testing (denies at warn, allows at debug).
+  const onDecision = extras.onDecision ?? ((d: GuardDecision) => {
+    if (d.decision === 'deny') logger.warn({ tool: d.bareName, clientCode: d.clientCode, reason: d.reason }, `guard DENY: ${d.bareName}`);
+    else logger.debug({ tool: d.bareName }, `guard allow: ${d.bareName}`);
+  });
+  const policy: GuardPolicy = defaultPolicy({ ...extras.policy, onDecision });
   const bridge = buildAdaToolBridge(profile, {
     getContext: () => toolContext,
     onToolExec: (name) => options.onToolUse?.(name),
@@ -197,7 +203,7 @@ export async function runAgentSDK(options: RunOptions, extras: SdkRunExtras = {}
       for (const b of content) {
         const blk = b as { type?: string; text?: string; name?: string };
         if (blk.type === 'text' && blk.text) { responseText += blk.text; options.onText?.(blk.text); }
-        if (blk.type === 'tool_use') { lastTurnHadToolUse = true; if (blk.name) { toolsUsed.push(blk.name); options.onToolUse?.(blk.name); } }
+        if (blk.type === 'tool_use') { lastTurnHadToolUse = true; if (blk.name) { toolsUsed.push(blk.name); logger.info({ tool: blk.name, sessionId: session.id }, `tool_use: ${blk.name}`); options.onToolUse?.(blk.name); } }
       }
     } else if (msg.type === 'result') {
       const r = msg as Record<string, unknown>;
