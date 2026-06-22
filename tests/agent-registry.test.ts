@@ -3,9 +3,9 @@ import { loadAgentRegistry, getAgent, getDefaultAgent } from '../src/agents/regi
 import { toolProfiles } from '../src/agents/profiles/index.js';
 
 describe('Agent Registry', () => {
-  it('loads all 7 agents from manifest', () => {
+  it('loads all 8 agents from manifest', () => {
     const registry = loadAgentRegistry();
-    expect(registry.size).toBe(7);
+    expect(registry.size).toBe(8);
     expect(registry.has('otto')).toBe(true);
     expect(registry.has('coda')).toBe(true);
     expect(registry.has('rex')).toBe(true);
@@ -13,6 +13,7 @@ describe('Agent Registry', () => {
     expect(registry.has('ada')).toBe(true);
     expect(registry.has('jasmin')).toBe(true);
     expect(registry.has('maya')).toBe(true);
+    expect(registry.has("piper")).toBe(true);
   });
 
   it('getAgent returns correct agent', () => {
