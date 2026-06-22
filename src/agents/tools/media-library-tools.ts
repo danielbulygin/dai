@@ -32,7 +32,7 @@ async function dropletRequest(
   try {
     const response = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...(env.DROPLET_API_KEY ? { "X-API-Key": env.DROPLET_API_KEY } : {}) },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs),
     });
