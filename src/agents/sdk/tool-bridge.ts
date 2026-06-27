@@ -18,6 +18,7 @@ import { getToolsForProfile, executeTool } from '../tool-registry.js';
 import type { ToolContext } from '../tool-registry.js';
 import type { ToolProfile } from '../profiles/index.js';
 import { jsonSchemaToZodRawShape } from './schema.js';
+import { surfaceWriteFailure } from './observe-after.js';
 
 export const ADA_MCP_SERVER_NAME = 'ada-tools';
 
@@ -72,9 +73,11 @@ export function buildAdaToolBridge(
           (args ?? {}) as Record<string, unknown>,
           opts.getContext(),
         );
+        // Observe-after: a failed WRITE must reach the model as an error, not a
+        // narratable success (the structural fix for streams-success-on-failure).
         return {
           content: [{ type: 'text' as const, text: result }],
-          isError,
+          isError: surfaceWriteFailure(def.name, result, isError),
         };
       },
     ),

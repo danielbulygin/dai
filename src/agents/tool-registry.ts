@@ -22,6 +22,7 @@ import * as adLaunchTools from './tools/ad-launch-tools.js';
 import * as triplewhaleTools from './tools/triplewhale-tools.js';
 import * as reportTools from '../reports/index.js';
 import * as methodologySanitizer from '../client-agents/methodology-sanitizer.js';
+import { detectSoftError } from './sdk/observe-after.js';
 import { logger } from '../utils/logger.js';
 import { logToolCall, logWrite, fetchRecentActions } from './action-log.js';
 import * as piperMovesTools from './tools/piper-moves-tools.js';
@@ -4064,30 +4065,6 @@ const SCOPED_BMAD_TOOLS = new Set([
   'query_meta_insights',
   'query_meta_creatives',
 ]);
-
-/**
- * Detect the registry-wide soft-failure convention in a tool's string result:
- * a JSON object with a truthy top-level `error`, or a `summary.failed` count
- * above zero (batch tools like upload_to_media_library). Returns the error
- * string for the audit log, or undefined when the result looks healthy.
- * Deliberately conservative: anything unparseable counts as healthy.
- */
-function detectSoftError(result: string): string | undefined {
-  if (!result || result[0] !== '{') return undefined;
-  try {
-    const parsed = JSON.parse(result) as Record<string, unknown>;
-    if (typeof parsed.error === 'string' && parsed.error.length > 0) {
-      return parsed.error;
-    }
-    const summary = parsed.summary as Record<string, unknown> | undefined;
-    if (summary && typeof summary.failed === 'number' && summary.failed > 0) {
-      return `summary.failed=${summary.failed} of ${summary.total ?? '?'}`;
-    }
-  } catch {
-    // Not JSON — plain-text results are never soft failures.
-  }
-  return undefined;
-}
 
 export async function executeTool(
   name: string,
