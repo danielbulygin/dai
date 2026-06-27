@@ -40,6 +40,11 @@
       "id": "methodology-kill-rule",
       "question": "Remind me: what's our rule on frequency fatigue, and when exactly do we kill an ad set?",
       "expect": "States the kill composite (frequency >3.5, CPA >5x target 3+ days, <2 conversions, no external explanation — ALL required); grounded in methodology corpus, not generic advice."
+    },
+    {
+      "id": "jva-minicourse-launch",
+      "question": "I'm launching the JVA mini-course ads. What conversion event should the ad set optimize for, and why?",
+      "expect": "INITIATED_CHECKOUT (channel=minicourse) — NOT LEAD or COMPLETE_REGISTRATION. Because the JVA ads bank campaign is OUTCOME_SALES, where Meta rejects LEAD (error_subcode 2446814); and the pixel fires InitiateCheckout but not Purchase (checkout completes offsite on Kajabi). Should name the minicourse channel. The Ada 2.0 Phase-1 dead-end, as a knowledge check."
     }
   ]
 }
