@@ -7,6 +7,7 @@ import { estimateCostUsd } from '../agents/runner.js';
 import { env } from '../env.js';
 import { logger } from '../utils/logger.js';
 import { extractJson, triageLibrary, type LibraryAd } from './library-triage.js';
+import { buildClientKnowledgeBundle } from '../agents/client-context.js';
 
 /**
  * Magic Audit orchestrator (master-plan B1, expanded 2026-06-11: creative /
@@ -173,6 +174,49 @@ const SYNTH_SYSTEM =
   'NEVER use the bare word "blended" for a Meta-attributed number; when two sources disagree, show both with their labels. ' +
   'Respond with PURE JSON matching the requested schema — no markdown, no commentary.';
 
+/**
+ * Compose the per-audit synthesis system prompt: the base + this client's
+ * knowledge bundle (targets/KPI config, client-scoped learnings, the client
+ * intelligence file) + any data-window caveat. Phase B: an audit that judges
+ * "below breakeven" without the client's real target is an overreach — every
+ * synthesis now sees the same client context (progress doc §5 #3, #5, #6).
+ */
+export function buildSynthSystem(clientKnowledge: string, dataCaveat: string | null): string {
+  const parts = [SYNTH_SYSTEM];
+  if (dataCaveat) {
+    parts.push(`DATA WINDOW CAUTION (state this in the section when it changes a read): ${dataCaveat}`);
+  }
+  if (clientKnowledge.trim()) {
+    parts.push(
+      '=== CLIENT CONTEXT (anchor every judgment to it) ===\n' +
+      'The client\'s real targets, KPI model, and saved client-specific learnings follow. ' +
+      '"Good"/"bad"/"below breakeven" only mean something relative to THIS client\'s primary KPI and target — never a generic benchmark when a real target exists. ' +
+      'If the account\'s conversion events differ from an e-commerce default (app trials, leads, appointments, offsite checkout), read the funnel through THIS client\'s model, not an e-com lens.\n\n' +
+      clientKnowledge,
+    );
+  }
+  return parts.join('\n\n');
+}
+
+/**
+ * Days-with-data over the audit window (pure; unit-tested). A thin window
+ * silently skews every 30d number (BFM had 10/30 — progress doc §5 #4), so
+ * the caveat rides the synthesis system prompt when coverage is poor.
+ */
+export function summarizeDataWindow(
+  dates: Array<string | null | undefined>,
+  windowDays = 30,
+): { daysWithData: number; caveat: string | null } {
+  const days = new Set<string>();
+  for (const d of dates) if (d) days.add(String(d).slice(0, 10));
+  const daysWithData = days.size;
+  const caveat =
+    daysWithData < Math.ceil(windowDays * 0.8)
+      ? `only ${daysWithData} of the last ${windowDays} days have ad-level data rows — every "${windowDays}d" aggregate is really a ${daysWithData}-day read; qualify trends and averages accordingly.`
+      : null;
+  return { daysWithData, caveat };
+}
+
 // ---------------------------------------------------------------------------
 // Supabase aggregation helpers (PostgREST silently caps at 1000 rows — page)
 // ---------------------------------------------------------------------------
@@ -300,6 +344,7 @@ async function runCreativeAnalysis(
   clientCode: string,
   meter: CostMeter,
   client: { id: string; name: string; currency: string },
+  synthSystem: string,
 ): Promise<Partial<AuditSection>> {
   const since = daysAgoISO(30);
   const rows = await pageAll<Record<string, unknown>>(
@@ -402,7 +447,7 @@ async function runCreativeAnalysis(
   const synth = await synthesizeJson<CreativeSynthesis>(
     meter,
     'creative_analysis',
-    SYNTH_SYSTEM,
+    synthSystem,
     `Account creative data (deterministic, from the Meta-synced warehouse):\n${JSON.stringify(facts, null, 1)}\n\n` +
       `Write the "Creative Performance & Angles" audit section. Schema:\n` +
       `{"summary": "2-3 sentences, must name at least one specific ad and number",` +
@@ -480,6 +525,7 @@ async function runFunnelRead(
   clientCode: string,
   meter: CostMeter,
   client: { id: string; name: string; currency: string },
+  synthSystem: string,
 ): Promise<Partial<AuditSection>> {
   const rows30 = await pageAll<Record<string, unknown>>(
     'account_daily',
@@ -544,7 +590,7 @@ async function runFunnelRead(
   const synth = await synthesizeJson<FunnelSynthesis>(
     meter,
     'funnel_read',
-    SYNTH_SYSTEM,
+    synthSystem,
     `Account funnel data (deterministic):\n${JSON.stringify(facts, null, 1)}\n\n` +
       `Write the "Funnel Diagnosis" audit section. Schema:\n` +
       `{"summary":"2-3 sentences with the bottom line and the headline numbers (CPA or CPL and ROAS with currency)",` +
@@ -666,6 +712,7 @@ async function runCompetitorTeardown(
   meter: CostMeter,
   client: { id: string; name: string; currency: string; adAccountId: string | null },
   options: AuditOptions,
+  synthSystem: string,
 ): Promise<Partial<AuditSection>> {
   let targets = options.competitorPages ?? [];
   let mode: 'competitors' | 'own_footprint' = 'competitors';
@@ -697,7 +744,7 @@ async function runCompetitorTeardown(
   const synth = await synthesizeJson<CompetitorSynthesis>(
     meter,
     'competitor_teardown',
-    SYNTH_SYSTEM,
+    synthSystem,
     `Public Facebook Ads Library scrape (deterministic triage, weights = ad-cluster size as spend proxy):\n` +
       `Mode: ${mode === 'own_footprint' ? `the client's OWN public footprint (page: ${perPage[0]!.name})` : 'competitor pages'}\n` +
       `Client: ${client.name}\n${JSON.stringify(perPage, null, 1)}\n\n` +
@@ -731,6 +778,7 @@ async function rankLeadInsights(
   meter: CostMeter,
   client: { name: string },
   sections: Record<string, AuditSection>,
+  synthSystem: string,
 ): Promise<LeadInsight[] | null> {
   const material = Object.values(sections)
     .filter((s) => s.status === 'complete')
@@ -745,7 +793,7 @@ async function rankLeadInsights(
   const out = await synthesizeJson<{ insights: LeadInsight[] }>(
     meter,
     'lead_insights',
-    SYNTH_SYSTEM,
+    synthSystem,
     `Completed audit sections for ${client.name}:\n${JSON.stringify(material, null, 1)}\n\n` +
       `Pick the THREE lead insights for the top of the report. Ranking rubric: surprise × specificity — ` +
       `a qualifying insight names a specific entity (ad, campaign, pixel, stage, competitor page) AND a number. ` +
@@ -770,6 +818,36 @@ export async function runMagicAudit(
 
   const client = await resolveClient(code);
   if (!client) throw new Error(`client ${code} not found`);
+
+  // Phase B (context layer): assemble this client's knowledge bundle ONCE
+  // (targets/KPI config + client-scoped learnings + the intelligence file) and
+  // the days-with-data preflight; every synthesis call sees both via the
+  // system prompt. Fail-soft — an audit without context still runs.
+  let clientKnowledge = '';
+  try {
+    clientKnowledge = await buildClientKnowledgeBundle(code);
+  } catch (err) {
+    logger.warn({ err, code }, 'client knowledge bundle failed (audit continues without it)');
+  }
+  let dataCaveat: string | null = null;
+  let daysWithData: number | null = null;
+  try {
+    const dateRows = await pageAll<{ date: string }>(
+      'ad_daily',
+      'date',
+      (q) => q.eq('client_id', client.id).gte('date', daysAgoISO(30)),
+    );
+    const win = summarizeDataWindow(dateRows.map((r) => r.date));
+    daysWithData = win.daysWithData;
+    dataCaveat = win.caveat;
+  } catch (err) {
+    logger.warn({ err, code }, 'days-with-data preflight failed (audit continues)');
+  }
+  const synthSystem = buildSynthSystem(clientKnowledge, dataCaveat);
+  logger.info(
+    { code, knowledgeChars: clientKnowledge.length, daysWithData, thinWindow: !!dataCaveat },
+    'audit client context assembled',
+  );
 
   const token = randomBytes(16).toString('hex');
   const sections: Record<string, AuditSection> = {};
@@ -799,9 +877,9 @@ export async function runMagicAudit(
   const RUNNERS: Record<string, () => Promise<Partial<AuditSection>>> = {
     dataset_health: () => runDatasetHealth(code),
     account_structure: () => runAccountStructure(code),
-    creative_analysis: () => runCreativeAnalysis(code, meter, client),
-    funnel_read: () => runFunnelRead(code, meter, client),
-    competitor_teardown: () => runCompetitorTeardown(code, meter, client, options),
+    creative_analysis: () => runCreativeAnalysis(code, meter, client, synthSystem),
+    funnel_read: () => runFunnelRead(code, meter, client, synthSystem),
+    competitor_teardown: () => runCompetitorTeardown(code, meter, client, options, synthSystem),
   };
 
   let anyError = false;
@@ -832,7 +910,7 @@ export async function runMagicAudit(
 
   // B3 — rank the lead insights across everything that completed
   try {
-    const insights = await rankLeadInsights(meter, client, sections);
+    const insights = await rankLeadInsights(meter, client, sections, synthSystem);
     if (insights) await updateRow({ lead_insights: insights });
   } catch (err) {
     logger.warn({ err }, 'lead-insight ranking failed (report still valid)');

@@ -162,3 +162,12 @@ The following items would significantly improve analysis and reporting quality:
 7. **Break-even ROAS** — What ROAS does the business need to be profitable after COGS, shipping, returns?
 8. **Historical benchmarks** — Any YoY data or prior period benchmarks for context?
 9. **Other channels** — Is Laori running on Google, TikTok, or other platforms? If so, how does Meta fit into the broader mix?
+---
+
+## Targets & rules (call-derived 2026-06-21 — verify against live config before acting)
+- **Target: ROAS 3 in TRIPLE WHALE, not in-platform** — and even TW ROAS 3 is not yet profitable; product-profitability breakeven ~2.5. Meta over-reports vs first-party post-purchase survey (~0.56–0.65 vs Meta ~2.1 in summer) — never judge Laori on Meta ROAS alone.
+- **Contribution-margin lens:** daily opex ~€1,600/day. Judge the day on margin-vs-opex, not ROAS alone. Stella's own KPI: ad spend ≤30% of revenue (insufficient when revenue is low — Nina).
+- **Routing: collection / best-seller pages outearn single-bottle PDPs every quarter** — default to collections. Statics > video on ROAS (summer); max 6 statics per ad set (working number 5). Sunday is the best day.
+- Temperature: ROAS correlate is negative full-year but strongly POSITIVE in the summer 60-day window — front-load budget onto hot days in summer.
+- **Open tracking issue:** two pixels (old = no consent; "Pixel NoIQ Fear 2025" = consent-aware); Meta-vs-TW gap grows since Jan 2026; some ad sets still optimize the old pixel; Elevar in the stack.
+- Compliance: do NOT bid alcoholic-drink keywords (Crodino/Sanbitter are alcohol-free; Sarti is alcoholic). Full QC = laori-stella-qc skill.

@@ -168,3 +168,22 @@ The true value of a webinar lead is determined by the downstream webinar-to-cour
 - **What webinar platform does the client use?** Useful for cross-validating lead counts.
 - **What is the typical webinar-to-course conversion rate?** Helps contextualize the full funnel economics.
 - **Recent 7-day CPL appears extremely high (£36) — is this a data issue or genuine performance problem?** Needs immediate investigation.
+---
+
+## UPDATE 2026-07 — The Mini-Course Funnel (a SECOND acquisition funnel; supersedes the "webinar-first only" framing above)
+
+JVA now also sells a **£49 paid mini-course** ("Do you want to become a football agent?") as a direct-purchase funnel alongside the webinar funnel — LP `path.jvacademy.net/mini-course`; checkout completes OFFSITE on Kajabi.
+
+**Launch / optimization config (critical — this was the Ada 2.0 Phase-1 dead-end class):**
+- The JVA ads bank campaign is **OUTCOME_SALES**. Meta REJECTS `LEAD` optimization on it (error_subcode 2446814).
+- Mini-course ad sets optimize for **INITIATED_CHECKOUT** via `channel=minicourse` — **NOT LEAD and NOT COMPLETE_REGISTRATION.** The pixel fires InitiateCheckout but NOT Purchase (the checkout completes offsite on Kajabi), so InitiateCheckout is the deepest reliable signal.
+- Since `ada-2.0.0` (2026-07-02) the upload server's channel_resolver auto-detects mini-course creatives/LPs; before that, mini-course batches silently fell through to `channel=training` → LEAD → Meta rejection.
+- Webinar campaigns keep their own lead-optimization config. Never blend the two funnels' configs, CPLs, or reads — they are different products with ~10x different economics.
+
+**Markets:** "football" everywhere, "soccer" ONLY for US/Canada (strict; mini-course launches are market-split ad sets: football→UK, soccer→US).
+
+## Targets & rules (call-derived 2026-06-21 — verify against live config before acting)
+- CPL reference points: UK general-training ~£8–8.5; webinar ~£6 (doubled from £3); webinar-funnel cost ~£580/lead vs general-training £22/lead (two different lead definitions — never compare across funnels).
+- The business problem is CLOSING, not lead-gen (no follow-up sequences scheduled). Course price doubles in month 4 — urgency is real and usable.
+- Compliance: FIFA 52% pass-rate baseline required on claims; no "guaranteed pass"; no em-dashes; "football" vs "soccer" per market. Full QC = the jva-john-qc skill.
+- John resonates in the UK, not Canada — use a UK creator for the "soccer" cut.

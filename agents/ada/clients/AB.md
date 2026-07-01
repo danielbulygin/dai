@@ -387,3 +387,11 @@ Country code alert: DE ≠ DK, AT ≠ AU, CH ≠ CN. Any spend in DK/AU/CN = tar
 7. **Age breakdown** — Confirm spend reaching 55+. Significant budget to under-45 = targeting issue.
 8. **Lead quality** — Compare Net Leads vs total leads. If ratio deteriorates, quality is dropping even if CPL looks stable.
 9. **Creative fatigue** — Declining hook rates on high-spend ads running 14+ days.
+
+---
+
+## Targets & rules (call-derived 2026-06-21 — verify against live config before acting)
+- **Cost-per-net-lead target ~€19–21** (€19 dream, €21 good). "€139" cost-per-appointment was handed-down/arbitrary (real Google targets 150–190; 130–139 phenomenal).
+- **Audience 65+, NOT 55+** (sub-65 lead quality and down-funnel CR3 materially worse). Net lead = after phone number shared (~2x the mobile-number-event count); mobile-number pixel event = the fast signal; View-Content is useless here.
+- **CR2 (lead→appointment) is the biggest CPA driver BUT is client-controlled** (call-center speed) — treat CR2 outperformance skeptically. Attribution: 7-day-click/1-day-view beats 1-day-click. Quality over volume on CM3.
+- Health-and-wellness restriction → high CPM. **Upload-only Ada client** (not launch-capable). Winding down as of June 2026 (pricing dispute).

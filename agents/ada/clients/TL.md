@@ -190,3 +190,10 @@ The following need to be filled in by the account manager to make this file full
 10. **Other channels** — Is Teethlovers running on any platforms besides Meta?
 11. **Tracking stack** — Meta-only, or also Triple Whale / GA4 / other?
 12. **Subscription/LTV** — Is there a repeat purchase or subscription model that affects acceptable first-purchase CPA?
+---
+
+## Targets & rules (call-derived 2026-06-21 — verify against live config before acting)
+- **Target: ROAS 3x IN-PLATFORM (Meta)** — Alex's stated preference (contrast Laori's TW-based target). Blended Meta ROAS ~3.2 is the bar; 7-day has hit 5.48.
+- Current focus: profitability / unit economics. Historical KPI = new-customer CPA ~€14–15 reference; Google CPA ~€9.
+- **Alex signs off every ad** (not just copy) via Frame.io; tweaks by feel. Full QC = teethlovers-alex-qc skill.
+- Statics-only account, high frequency tolerated; drops route to a collection page. Consolidated to 2 campaigns (bid cap + scaling). Manuel's AI statics are winning.

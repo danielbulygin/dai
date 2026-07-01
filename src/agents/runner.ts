@@ -23,7 +23,7 @@ import type { ToolProfile } from './profiles/index.js';
 import { runLaunchClaimGuard } from './hooks/launch-claim-guard.js';
 import type { ExecutedToolCall } from './hooks/launch-claim-guard.js';
 import { extractBatchIds, getBatchStates, buildLaunchStateSection } from './launch-state.js';
-import { detectClientCodes, loadClientContextExtras, loadMethodologyExtra } from './client-context.js';
+import { detectClientCodes, loadClientContextExtras, loadMethodologyExtra, loadClientTargetsExtra, loadClientLearningsExtra } from './client-context.js';
 import { detectLaunchShaped, loadLaunchWorkflowExtra } from './workflow-context.js';
 
 let client: Anthropic | null = null;
@@ -716,7 +716,16 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
         // relying on the model remembering to call search_methodology.
         const methodologyExtra = await loadMethodologyExtra(detected[0]!);
         if (methodologyExtra) extras.push(methodologyExtra);
-        if (clientExtras.length > 0 || methodologyExtra) {
+        // Phase B (context layer): KPI targets + client-scoped learnings for the
+        // primary detected client — judgments anchor to THIS client's targets, and
+        // fresh client corrections surface (the global top-5 can't carry them).
+        const [targetsExtra, learningsExtra] = await Promise.all([
+          loadClientTargetsExtra(detected[0]!),
+          loadClientLearningsExtra(detected[0]!),
+        ]);
+        if (targetsExtra) extras.push(targetsExtra);
+        if (learningsExtra) extras.push(learningsExtra);
+        if (clientExtras.length > 0 || methodologyExtra || targetsExtra || learningsExtra) {
           logger.info({ sessionId: session.id, clients: detected }, 'Injected client context files');
         }
       }

@@ -207,3 +207,9 @@ Every weekly report should include:
 - Confirm fulfilment capacity constraints and how they should inform budget recommendations
 - Clarify lead generation purpose — are the 61 leads email/SMS captures? What's the nurture flow?
 - Identify if there are other advertising platforms in play (Google, TikTok, etc.)
+---
+
+## Targets & rules (call-derived 2026-06-21 — verify against live config before acting)
+- **PRIMARY target is now ROAS; CPA secondary** (evolved ~Feb/Mar 2026). Category ranking: cleanses + shots > meals (shots ~£23 CPA; new account ~£20). Reallocate ~20% off meals at a time; flip meals to bid cap for cost control.
+- **TWO ad accounts (Naturally Better + V2)** — uploads MUST specify the account or default to V2; always report BOTH accounts' spend when asked for totals.
+- TikTok = 22% of attributed revenue (beats Google), bottlenecked on TikTok-safe LPs + creatives. Audience is **discount-sensitive, not price-sensitive.**

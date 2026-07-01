@@ -29,7 +29,7 @@ import type { ToolProfile } from '../profiles/index.js';
 import { findSession, createSession, updateSession } from '../../memory/sessions.js';
 import { addMessage } from '../../memory/messages.js';
 import { getQuickContext, getClientQuickContext } from '../../memory/search.js';
-import { detectClientCodes, loadClientContextExtras, loadMethodologyExtra } from '../client-context.js';
+import { detectClientCodes, loadClientContextExtras, loadMethodologyExtra, loadClientTargetsExtra, loadClientLearningsExtra } from '../client-context.js';
 import { extractBatchIds, getBatchStates, buildLaunchStateSection } from '../launch-state.js';
 import { buildAgentDirectorySection } from '../agent-directory.js';
 import { logger } from '../../utils/logger.js';
@@ -136,6 +136,16 @@ export async function buildSystemPrompt(opts: RunOptions): Promise<string> {
       parts.push(...loadClientContextExtras(detected).map((e) => e.content));
       const meth = await loadMethodologyExtra(detected[0]!);
       if (meth) parts.push(meth.content);
+      // Phase B (context layer): KPI targets + client-scoped learnings for the
+      // primary detected client. The global top-5 learnings (below) can never
+      // carry a fresh client-specific correction — this section can (newest
+      // first). This is the fix for the JVA golden-case eval fail (2026-07-02).
+      const [targetsExtra, learningsExtra] = await Promise.all([
+        loadClientTargetsExtra(detected[0]!),
+        loadClientLearningsExtra(detected[0]!),
+      ]);
+      if (targetsExtra) parts.push(targetsExtra.content);
+      if (learningsExtra) parts.push(learningsExtra.content);
     }
   } catch (err) { logger.warn({ err }, 'sdk: client-context injection failed'); }
 

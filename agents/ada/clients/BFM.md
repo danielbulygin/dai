@@ -180,3 +180,10 @@ When performance drops:
 - **Secondary metrics:** ROAS, spend, purchase volume
 - **Weekly report should flag:** CPA vs. target, creative concentration risk, any campaign-level divergence in efficiency
 - **Comparisons:** Week-over-week CPA trends are the most actionable comparison for this account
+---
+
+## Targets & rules (call-derived 2026-06-21 — verify against live config before acting)
+- **Target CPA trending to ~$25** (from $30); ~$50 tolerated; **$200/purchase = kill ceiling.** Daily spend goal $3,500/day, up to $200k/mo if performance holds. Hook-rate benchmark ~30%. US ~60% of traffic.
+- **"Purchases" in Meta = free-trial-starts + card adds, NOT real purchases.** This is an APP/SUBSCRIPTION account — the app campaign optimizes start-trial (no app purchase event). Absence of e-com events (ATC/checkout) is NOT broken tracking; read the funnel through the trial model (7-day free trial).
+- **The neurotype quiz funnel is the unlock** (AOT quiz converts ~50% vs client pages ~10%) — all new ads route there, not the homepage.
+- ASC not working → default CBO. Bid cap is the "graveyard" for underperformers.

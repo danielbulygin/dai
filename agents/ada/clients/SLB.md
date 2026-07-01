@@ -175,3 +175,9 @@ The following need input from the account manager to complete this context file:
 | **Backend tracking source** | Triple Whale, Northbeam, Shopify? Need for cross-validation |
 | **Return rate** | Impacts true CPA / net ROAS significantly |
 | **Break-even ROAS / CPA** | Need confirmed break-even from client, not just max CPA target |
+---
+
+## Targets & rules (call-derived 2026-06-21 — verify against live config before acting)
+- **Target CPA ~$35.** Kickers: CPA < $55 → +1% of spend; CPA < $42 → +3%. Base min $4k/mo or 12% of spend.
+- **Compliance: the word "THC" in landing-page SOURCE CODE gets ads flagged as cannabis** — QC the website + LP source before launch. No QC skill exists yet → flag copy as UNVETTED for human eyeball.
+- Bid cap is the main lever; the account needs more video.
