@@ -49,7 +49,10 @@ export async function getLearnings(
   agentId: string,
   category?: string,
   limit = 20,
-  clientCode?: string | null,
+  /** A single value, or a candidate SET — learnings.client_code is freeform
+   *  mixed-convention data ('jva', 'brain_fm', 'brainfm', 'bfm', 'press_london'
+   *  all coexist), so callers pass every plausible spelling. */
+  clientCode?: string | string[] | null,
 ): Promise<Learning[]> {
   const supabase = getDaiSupabase();
 
@@ -64,7 +67,9 @@ export async function getLearnings(
     query = query.eq("category", category);
   }
 
-  if (clientCode) {
+  if (Array.isArray(clientCode)) {
+    query = query.in("client_code", clientCode);
+  } else if (clientCode) {
     query = query.eq("client_code", clientCode);
   }
 

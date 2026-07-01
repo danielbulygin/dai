@@ -230,6 +230,27 @@ export function formatClientLearningsSection(
 }
 
 /**
+ * learnings.client_code is FREEFORM mixed-convention data — 'jva', 'brain_fm',
+ * 'brainfm', 'bfm', 'press_london', 'la', 'teethlovers' all coexist (verified
+ * on the live store 2026-07-02: 41 learnings under 'jva' were invisible to a
+ * code-keyed query). Build the candidate set for a bmad code from the maps we
+ * already maintain. Long-term fix = normalization at write time / the AOT
+ * Memory migration; this makes reads correct today.
+ */
+export function learningClientCodeCandidates(code: string): string[] {
+  const set = new Set<string>([code, code.toLowerCase()]);
+  const meth = METHODOLOGY_ACCOUNT_BY_CODE[code];
+  if (meth) set.add(meth);
+  for (const [alias, c] of Object.entries(NAME_ALIASES)) {
+    if (c === code) {
+      set.add(alias.replace(/[.\s]+/g, '_'));
+      set.add(alias.replace(/[.\s]+/g, ''));
+    }
+  }
+  return [...set];
+}
+
+/**
  * Client-scoped learnings for a detected client: Ada's learnings tagged with
  * this client_code (newest first — a fresh correction must surface immediately,
  * unlike the score-ranked global top-5) merged with the client-agent's own top
@@ -240,7 +261,7 @@ export async function loadClientLearningsExtra(
 ): Promise<{ name: string; content: string } | null> {
   try {
     const [scoped, agentTops] = await Promise.all([
-      getLearnings('ada', undefined, 10, code).catch(() => [] as Learning[]),
+      getLearnings('ada', undefined, 10, learningClientCodeCandidates(code)).catch(() => [] as Learning[]),
       getTopLearnings(`ada_client_${code}`, 5).catch(() => [] as Learning[]),
     ]);
     const section = formatClientLearningsSection(code, [...scoped, ...agentTops]);

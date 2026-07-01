@@ -6,6 +6,7 @@ import {
   loadClientTargetsExtra,
   loadClientLearningsExtra,
   buildClientKnowledgeBundle,
+  learningClientCodeCandidates,
 } from '../src/agents/client-context.js';
 import { buildSynthSystem, summarizeDataWindow } from '../src/audit/magic-audit.js';
 
@@ -38,6 +39,23 @@ describe('client knowledge formatters (pure)', () => {
 
   it('learnings section is null when empty', () => {
     expect(formatClientLearningsSection('JVA', [])).toBeNull();
+  });
+});
+
+describe('learning client_code candidates (the store is mixed-convention)', () => {
+  it('JVA expands to cover the lowercase rows the store actually holds', () => {
+    const c = learningClientCodeCandidates('JVA');
+    expect(c).toContain('JVA');
+    expect(c).toContain('jva');
+  });
+  it('BFM covers brainfm / brain_fm / bfm', () => {
+    const c = learningClientCodeCandidates('BFM');
+    for (const v of ['BFM', 'bfm', 'brainfm', 'brain_fm']) expect(c).toContain(v);
+  });
+  it('PL covers press_london; LA covers laori; TL covers teethlovers', () => {
+    expect(learningClientCodeCandidates('PL')).toContain('press_london');
+    expect(learningClientCodeCandidates('LA')).toContain('laori');
+    expect(learningClientCodeCandidates('TL')).toContain('teethlovers');
   });
 });
 

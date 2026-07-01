@@ -1,4 +1,5 @@
 import { getDaiSupabase } from "../integrations/dai-supabase.js";
+import { learningClientCodeCandidates } from "../agents/client-context.js";
 import { getObservations } from "./observations.js";
 import { getTopLearnings, getLearnings } from "./learnings.js";
 import { getSession } from "./sessions.js";
@@ -160,8 +161,10 @@ export async function getClientQuickContext(
   // Tier 1: Client agent's own top learnings
   const clientLearnings = await getTopLearnings(clientAgentId, 10);
 
-  // Tier 2: Ada's learnings for this specific client
-  const adaClientLearnings = await getLearnings('ada', undefined, 5, clientCode);
+  // Tier 2: Ada's learnings for this specific client. client_code in the store
+  // is freeform mixed-convention ('jva'/'brain_fm'/'bfm'…), so match the full
+  // candidate set for the code — a bare-code eq missed most rows (2026-07-02).
+  const adaClientLearnings = await getLearnings('ada', undefined, 5, learningClientCodeCandidates(clientCode));
 
   // Tier 3: Ada's global learnings (no client_code)
   const adaGlobalLearnings = await getTopLearnings('ada', 10);
