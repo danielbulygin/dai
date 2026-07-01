@@ -22,6 +22,7 @@
  */
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { getAgent } from '../registry.js';
+import { getConstitution } from '../constitution.js';
 import type { RunOptions, RunResult, TokenUsage } from '../runner.js';
 import type { ToolContext } from '../tool-registry.js';
 import type { ToolProfile } from '../profiles/index.js';
@@ -100,9 +101,18 @@ async function resolveSdkSession(agentId: string, channelId: string, userId: str
  * Build Ada's system prompt as a single string, mirroring the stable+volatile
  * structure of runner.ts buildSystemBlocks (the SDK handles caching internally).
  */
-async function buildSystemPrompt(opts: RunOptions): Promise<string> {
+export async function buildSystemPrompt(opts: RunOptions): Promise<string> {
   const agent = getAgent('ada')!;
-  const parts: string[] = [agent.persona, agent.instructions];
+  const parts: string[] = [];
+  // The constitution loads FIRST for every agent (per-agent opt-out via
+  // agent.yaml `constitution: false`). Ada does NOT pass through the runner's
+  // buildSystemBlocks — this is the second of the two prompt paths that must
+  // both carry it (verify gate: a real run's prompt contains "Ask, don't assume").
+  if (agent.config.constitution) {
+    const constitution = getConstitution();
+    if (constitution) parts.push(constitution);
+  }
+  parts.push(agent.persona, agent.instructions);
   for (const e of agent.extras) parts.push(e.content);
   parts.push(buildAgentDirectorySection(agent.config.display_name));
 

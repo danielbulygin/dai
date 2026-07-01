@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { getAgent, getDefaultAgent } from './registry.js';
+import { getConstitution } from './constitution.js';
 import {
   createSession,
   findSession,
@@ -156,14 +157,18 @@ function buildDateSection(): string {
   return `## Current Date\nToday is: ${berlinDay} (Europe/Berlin)\nISO date: ${isoDate}\nIMPORTANT: The current year is ${isoDate.slice(0, 4)}. Always use this date as your reference when answering questions about days of the week, time periods, or relative dates like "yesterday", "last week", etc. For precise time-of-day, rely on timestamps in tool results — you only know the date, not the clock time.`;
 }
 
-function buildSystemBlocks(
+export function buildSystemBlocks(
   persona: string,
   instructions: string,
   context: QuickContext,
   stableExtras: { name: string; content: string }[],
   volatileExtras: { name: string; content: string }[],
+  /** The constitution text ('' = agent opted out / file missing). FIRST in Block 1. */
+  constitution = '',
 ): Anthropic.TextBlockParam[] {
-  const stableParts: string[] = [persona, instructions];
+  const stableParts: string[] = constitution
+    ? [constitution, persona, instructions]
+    : [persona, instructions];
   for (const extra of stableExtras) {
     stableParts.push(extra.content);
   }
@@ -750,6 +755,9 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
     context,
     stableExtras,
     extras,
+    // The constitution rides Block 1 (stable, cached) for every agent unless
+    // its agent.yaml opts out (constitution: false).
+    agent.config.constitution ? getConstitution() : '',
   );
   const systemPromptChars = systemBlocks.reduce((s, b) => s + b.text.length, 0);
 

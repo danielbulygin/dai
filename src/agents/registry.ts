@@ -42,6 +42,8 @@ const AgentConfigSchema = z.object({
   skills: z.array(z.string()).default([]),
   /** Knowledge dirs from agents/_knowledge/<dir>/*.md to inject into the system prompt. */
   knowledge: z.array(z.string()).default([]),
+  /** Always-loaded operating principles (agents/_constitution.md) as prompt Block 1. Opt-out per agent; default ON. */
+  constitution: z.boolean().default(true),
 });
 
 // ---------------------------------------------------------------------------
