@@ -21,7 +21,7 @@ export const toolProfiles = {
     'correct_learning', 'delete_learning',
     'correct_methodology', 'delete_methodology',
     'query_tasks', 'create_task', 'update_task', 'add_task_comment', 'search_notion',
-    'query_aot_tasks', 'query_aot_adsets', 'count_aot_tasks', 'count_aot_adsets',
+    'query_aot_tasks', 'query_aot_adsets', 'count_aot_tasks', 'count_aot_adsets', 'get_ready_to_upload_backlog',
     'generate_weekly_report',
     'scan_media_library_folder', 'upload_to_media_library', 'check_preupload_status',
     'get_client_capabilities', 'preview_ad_launch', 'launch_ads',

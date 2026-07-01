@@ -2182,6 +2182,21 @@ register({
 
 register({
   definition: {
+    name: 'get_ready_to_upload_backlog',
+    description:
+      'THE canonical "Ready to Upload" view — use this for any "what / which ad sets are ready to upload" question (it is the same set the Launch Console and the twice-daily #ada digest use). Returns active "Upload and Configure" ad-set tasks, **already excluding Blocked** (and Done/Cancelled/Archived/Complete), each resolved to its parent ad set (ad_id_code, title, client, Notion url) and badged with pre-upload readiness (`ready` = pre-warmed + analyzed, `analyzing`, `blocked` = pre-upload flags, `not-prewarmed`). Grouped by client with a `total` and per-client `count`. Do NOT use query_aot_tasks/query_aot_adsets and hand-filter for this question, and do NOT count Blocked tasks as ready — this tool is the source of truth. Takes no parameters; returns the complete backlog (never truncated).',
+    input_schema: {
+      type: 'object' as const,
+      properties: {},
+    },
+  },
+  async execute() {
+    return await aotNotionTools.getReadyToUploadBacklog();
+  },
+});
+
+register({
+  definition: {
     name: 'query_aot_adsets',
     description:
       'Query the AOT production-pipeline Ad Sets Notion database. An ad set is the unit of work that travels through stages (Concept → Brief → Production → Editing → QC → Media Buying → Done). Returns ad_id_code (e.g. ADBNx3475), ad_title, stage, format, ad_delivery_date, client_code + client_status, owner_names (resolved from Notion user IDs), the currently-active task name (active_task) and its assignee (task_assignee_name), task_progress (0-1), overdue_tasks_count, task_count, brief_relation_ids, drive_folder_url, final_ads_folder_url, frameio_url, and health_check. Default excludes ad sets in dead stages (Completed/Cancelled/On Hold). **Default freshness window is 90 days** on last_edited_time — ad sets nobody has touched in 3+ months are treated as zombies and filtered out. For forensic audits of old data, explicitly pass `freshness_window_days: 0`. Use this for cadence reads ("what is each client producing this week"), capacity gaps ("what is in concept vs production"), and overdue-ad-set surfacing. Use query_aot_tasks when you need the per-task detail underneath. **Pagination is automatic**: the tool fetches every matching page up to a 5000-row safety ceiling, so results are complete by default. The response includes `truncated_at_ceiling: true` ONLY if the ceiling was hit — in that case, narrow the filter and re-query. Always cite owners by owner_names, not user IDs.',

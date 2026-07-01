@@ -80,6 +80,8 @@ export interface RunOptions {
   onTurnReset?: () => void;
   /** Called when a tool starts executing, for progress indicators. */
   onToolUse?: (toolName: string) => void;
+  /** Called with extended-thinking deltas/blocks when thinking is enabled (Launch Console chat). */
+  onThinking?: (text: string) => void;
   clientScope?: {
     clientCode: string;
     displayName: string;

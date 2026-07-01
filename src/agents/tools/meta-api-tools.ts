@@ -199,9 +199,14 @@ export async function queryMetaInsights(params: {
 // configuration (Instagram identity, page, object_story_spec, link URL, etc.)
 // ---------------------------------------------------------------------------
 
+// NOTE: effective_instagram_actor_id was removed (2026-06-21). It 400s in Graph
+// v22 — "(#100) Tried accessing nonexisting field" — on BOTH the adcreative node
+// AND the ad node (verified by probe), so it was firing on every creatives lookup.
+// IG/page identity is still covered by instagram_user_id + instagram_permalink_url
+// + page_id + object_story_spec below.
 const DEFAULT_CREATIVE_FIELDS =
   "id,name,status,effective_status," +
-  "creative{id,name,instagram_actor_id,effective_instagram_actor_id," +
+  "creative{id,name,instagram_actor_id," +
   "instagram_user_id,instagram_permalink_url," +
   "page_id,object_story_id,effective_object_story_id,object_story_spec," +
   "thumbnail_url,video_id,image_url,image_hash,title,body," +

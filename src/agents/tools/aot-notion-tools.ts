@@ -10,6 +10,7 @@
 
 import { type PageObjectResponse } from '@notionhq/client';
 import { getNotion } from '../../integrations/notion.js';
+import { getSupabase } from '../../integrations/supabase.js';
 import { env } from '../../env.js';
 import { logger } from '../../utils/logger.js';
 
@@ -1537,5 +1538,117 @@ export async function updateAotAdSetStage(params: {
     const msg = err instanceof Error ? err.message : String(err);
     logger.error({ error: msg, ad_set_id: pageId }, 'updateAotAdSetStage failed');
     return { ok: false, error: msg };
+  }
+}
+// ---------------------------------------------------------------------------
+// get_ready_to_upload_backlog — THE canonical "Ready to Upload" view.
+//
+// Mirrors monitoring/ready-to-upload-check.ts (the twice-daily #ada digest):
+//   active "Upload and Configure" tasks, EXCLUDING Blocked (status_group 'active'
+//   only drops Done/Cancelled/Archived/Complete — Blocked must be dropped here),
+//   each resolved to its parent ad set (title/code/client/url) by relation id, and
+//   badged with pre-upload readiness from ada_preupload_status. This is exactly the
+//   set the Launch Console treats as "ready to upload"; a single deterministic call
+//   so the agent never has to re-derive the filter (and never counts Blocked).
+// ---------------------------------------------------------------------------
+export async function getReadyToUploadBacklog(): Promise<string> {
+  try {
+    // Match the "Ready to Upload" Notion view EXACTLY: task name contains "upload"
+    // AND status not in {Complete group, Blocked}. The view has NO freshness window
+    // and NO dead-ad-set filter, so disable queryAotTasks' two hidden defaults
+    // (freshness_window_days 90, exclude_dead_ad_sets true) — otherwise older/stale
+    // upload tasks the view shows get silently dropped ("missed a couple of ads").
+    const raw = await queryAotTasks({
+      status_group: 'active',
+      task_name_contains: 'upload',
+      freshness_window_days: 0,
+      exclude_dead_ad_sets: false,
+    });
+    const parsed = JSON.parse(raw) as { tasks?: ExtractedTask[]; error?: string };
+    if (parsed.error) return JSON.stringify({ error: parsed.error });
+
+    // Canonical exclusion: Blocked is NOT a ready-to-upload state.
+    const tasks = (parsed.tasks ?? []).filter((t) => t.status !== 'Blocked');
+    if (tasks.length === 0) {
+      return JSON.stringify({ total: 0, by_client: [], note: 'Nothing is ready to upload right now (no active "Upload and Configure" tasks, excluding Blocked).' });
+    }
+
+    // Resolve parent ad sets by relation page-id (scale-proof — never a capped slice).
+    const parentIds = [...new Set(tasks.flatMap((t) => t.ad_set_relation_ids ?? []).filter(Boolean))];
+    let adsetById = new Map<string, ExtractedAdSet>();
+    try { adsetById = await getAotAdSetsByIds(parentIds); } catch (err) { logger.warn({ err }, 'ready-to-upload tool: ad-set resolve failed'); }
+    const adsetFor = (t: ExtractedTask): ExtractedAdSet | undefined => (t.ad_set_relation_ids ?? []).map((id) => adsetById.get(id)).find(Boolean);
+
+    // Client relation IDs → readable names.
+    const clientRelIds = new Set<string>();
+    for (const t of tasks) {
+      for (const id of t.client_relation_ids ?? []) clientRelIds.add(id);
+      for (const id of adsetFor(t)?.client_relation_ids ?? []) clientRelIds.add(id);
+    }
+    let nameMap = new Map<string, string>();
+    try { nameMap = await getClientNameMap([...clientRelIds]); } catch (err) { logger.warn({ err }, 'ready-to-upload tool: client name resolve failed'); }
+
+    // Pre-upload readiness badges (fail-soft).
+    const codes = [...new Set(tasks.map((t) => adsetFor(t)?.ad_id_code).filter(Boolean) as string[])];
+    type PreSummary = { stalled?: boolean; failed_videos?: number; failed_images?: number } | null;
+    const preMap = new Map<string, { files_total: number; analysis_complete: boolean; analysis_summary: PreSummary; flags: Array<{ type: string }> }>();
+    try {
+      if (codes.length) {
+        const { data } = await getSupabase().from('ada_preupload_status').select('asset_id, files_total, analysis_complete, analysis_summary, flags').in('asset_id', codes);
+        for (const r of (data ?? []) as Array<{ asset_id: string; files_total: number; analysis_complete: boolean; analysis_summary: PreSummary; flags: Array<{ type: string }> }>) preMap.set(r.asset_id, r);
+      }
+    } catch (err) { logger.warn({ err }, 'ready-to-upload tool: preupload status fetch failed'); }
+    const readinessFor = (code: string | null): { readiness: string; flags: string[] } => {
+      if (!code) return { readiness: 'unknown', flags: [] };
+      const s = preMap.get(code);
+      if (!s) return { readiness: 'not-prewarmed', flags: [] };
+      const flags = [...new Set((s.flags ?? []).map((f) => f.type))];
+      if (flags.length) return { readiness: 'blocked', flags };
+      if (s.analysis_complete) return { readiness: 'ready', flags: [] };
+      // Terminal analysis failures (ffmpeg / Gemini / AssemblyAI) can never self-heal,
+      // so the worker marks the summary `stalled`. Surface that as STALLED (needs a
+      // re-analyze or a human) — NEVER a perpetual "analyzing" badge. (2026-06-20.)
+      const sum = s.analysis_summary;
+      if (sum && sum.stalled) {
+        const nf = (sum.failed_videos ?? 0) + (sum.failed_images ?? 0);
+        return { readiness: 'stalled', flags: [nf ? `${nf} asset(s) failed analysis — re-analyze or check the files` : 'analysis stalled — needs attention'] };
+      }
+      if (s.files_total > 0) return { readiness: 'analyzing', flags: [] };
+      return { readiness: 'not-prewarmed', flags: [] };
+    };
+
+    const byClient = new Map<string, { client_code: string | null; sets: Record<string, unknown>[] }>();
+    for (const t of tasks) {
+      const a = adsetFor(t);
+      const client =
+        (t.client_relation_ids ?? []).map((id) => nameMap.get(id)).find(Boolean) ??
+        (a?.client_relation_ids ?? []).map((id) => nameMap.get(id)).find(Boolean) ??
+        a?.client_code ?? '(unknown client)';
+      const r = readinessFor(a?.ad_id_code ?? null);
+      if (!byClient.has(client)) byClient.set(client, { client_code: a?.client_code ?? null, sets: [] });
+      byClient.get(client)!.sets.push({
+        code: a?.ad_id_code ?? null,
+        title: a?.ad_title ?? t.task_name ?? '(untitled)',
+        client_code: a?.client_code ?? null,
+        notion_url: a?.url ?? null,
+        task_status: t.status ?? null,
+        task_due_date: t.task_due_date ?? null,
+        format: t.format ?? null,
+        readiness: r.readiness,
+        preupload_flags: r.flags,
+      });
+    }
+
+    const by_client = [...byClient.entries()]
+      .map(([client, v]) => ({ client, client_code: v.client_code, count: v.sets.length, sets: v.sets }))
+      .sort((x, y) => y.count - x.count);
+
+    return JSON.stringify({
+      definition: 'The canonical "Ready to Upload" Notion view: active "Upload and Configure" ad-set tasks, EXCLUDING Blocked (and Done/Cancelled/Archived/Complete). One row per ad set ready for the upload pipeline.',
+      total: tasks.length,
+      by_client,
+    });
+  } catch (err) {
+    return JSON.stringify({ error: err instanceof Error ? err.message : String(err) });
   }
 }

@@ -57,6 +57,10 @@ export interface SdkRunExtras {
   /** maxTurns cap (default min(config.max_turns, 20)). Production raises this — multi-tool
    *  launch chains (ready-to-upload) need more than 20 agent turns to complete reliably. */
   maxTurns?: number;
+  /** Enable extended thinking (adaptive) and surface thinking via options.onThinking. Default off. */
+  thinking?: boolean;
+  /** Emit token-level deltas (text + thinking) via includePartialMessages. Default off (block-level). */
+  streamPartial?: boolean;
   /** Collect every guard decision (for QC evidence). */
   onDecision?: (d: GuardDecision) => void;
   /** Reports the SDK's authoritative cost + result subtype + tool names used. */
@@ -186,6 +190,8 @@ export async function runAgentSDK(options: RunOptions, extras: SdkRunExtras = {}
       permissionMode: 'default',
       maxTurns,
       maxBudgetUsd: extras.maxBudgetUsd ?? 3,
+      ...(extras.thinking ? { thinking: { type: 'adaptive' as const } } : {}),
+      ...(extras.streamPartial ? { includePartialMessages: true } : {}),
       ...(session.claude_session_id ? { resume: session.claude_session_id } : {}),
     },
   });
@@ -196,13 +202,34 @@ export async function runAgentSDK(options: RunOptions, extras: SdkRunExtras = {}
   const toolsUsed: string[] = [];
 
   for await (const msg of q) {
+    // Token-level streaming (chat): handle raw partial events; the full `assistant`
+    // message that follows each turn is skipped to avoid double-emitting.
+    if (extras.streamPartial && msg.type === 'stream_event') {
+      const ev = (msg as { event?: { type?: string; content_block?: { type?: string; name?: string }; delta?: { type?: string; text?: string; thinking?: string } } }).event;
+      if (ev?.type === 'content_block_start') {
+        const cb = ev.content_block;
+        if (cb?.type === 'tool_use') {
+          lastTurnHadToolUse = true;
+          if (cb.name) { toolsUsed.push(cb.name); options.onToolUse?.(cb.name); }
+        } else if (cb?.type === 'text' && lastTurnHadToolUse) {
+          options.onTurnReset?.(); lastTurnHadToolUse = false;
+        }
+      } else if (ev?.type === 'content_block_delta') {
+        const d = ev.delta;
+        if (d?.type === 'text_delta' && d.text) { responseText += d.text; options.onText?.(d.text); }
+        else if (d?.type === 'thinking_delta' && d.thinking) { options.onThinking?.(d.thinking); }
+      }
+      continue;
+    }
     if (msg.type === 'assistant') {
+      if (extras.streamPartial) continue; // already streamed via stream_event
       // A new assistant turn after a tool turn → reset streamed text (Slack parity).
       if (lastTurnHadToolUse) { options.onTurnReset?.(); lastTurnHadToolUse = false; }
       const content = (msg as { message?: { content?: unknown[] } }).message?.content ?? [];
       for (const b of content) {
-        const blk = b as { type?: string; text?: string; name?: string };
+        const blk = b as { type?: string; text?: string; thinking?: string; name?: string };
         if (blk.type === 'text' && blk.text) { responseText += blk.text; options.onText?.(blk.text); }
+        if (blk.type === 'thinking' && blk.thinking) { options.onThinking?.(blk.thinking); }
         if (blk.type === 'tool_use') { lastTurnHadToolUse = true; if (blk.name) { toolsUsed.push(blk.name); logger.info({ tool: blk.name, sessionId: session.id }, `tool_use: ${blk.name}`); options.onToolUse?.(blk.name); } }
       }
     } else if (msg.type === 'result') {

@@ -38,6 +38,16 @@ export interface GuardPolicy {
    * anything NOT on the allow-list stay denied. Default false (spike = deny-all-writes).
    */
   allowProductionWrites: boolean;
+  /**
+   * Fine-grained option: allow ONLY the scoped Notion task-mirror writes
+   * (NOTION_TASK_WRITES — task status, ad-set stage, due date, comment, create/update
+   * task) without the rest of the production write surface. Reversible Notion writes
+   * only; grants NO Slack/memory/learning/launch/upload/delete autonomy. Independent of
+   * allowProductionWrites. NOTE: the web /launch/ada chat now runs with the broader
+   * allowProductionWrites (full Slack-Ada parity, Dan 2026-06-20); this flag is kept
+   * for any future write-limited surface. Default false.
+   */
+  allowNotionTaskWrites: boolean;
   /** Master enable for dai's two authorized external mutations. Default false. */
   allowTestMutations: boolean;
   /** Enable the paused-launch verbs (launch_ads/set_adset_marker/pause_launch/update_landing_page_mapping). */
@@ -61,6 +71,7 @@ export interface GuardDecision {
 export function defaultPolicy(overrides: Partial<GuardPolicy> = {}): GuardPolicy {
   return {
     allowProductionWrites: false,
+    allowNotionTaskWrites: false,
     allowTestMutations: false,
     allowPausedLaunch: false,
     allowMediaUpload: false,
@@ -88,7 +99,7 @@ const READ_TOOLS = new Set<string>([
   'search_meetings', 'get_meeting_summary', 'get_meeting_transcript', 'list_recent_meetings',
   // notion reads
   'query_tasks', 'search_notion', 'query_aot_tasks', 'query_aot_adsets',
-  'count_aot_tasks', 'count_aot_adsets', 'check_ads_in_meta',
+  'count_aot_tasks', 'count_aot_adsets', 'check_ads_in_meta', 'get_ready_to_upload_backlog',
   // launch READ-side (no Meta mutation)
   'preview_ad_launch', 'verify_launch', 'qc_copy', 'poll_analysis',
   'scan_media_library_folder', 'check_preupload_status',
@@ -155,6 +166,17 @@ const PRODUCTION_WRITES = new Set<string>([
   'upload_to_media_library',
 ]);
 
+/**
+ * SCOPED Notion task-mirror writes — the reversible subset enabled for the web
+ * /launch/ada chat (gated by policy.allowNotionTaskWrites). All non-destructive
+ * Notion task/stage writes; deletes (delete_task) are still hard-blocked by the
+ * delete rail above, and Slack/memory/launch/upload are NOT in this set.
+ */
+const NOTION_TASK_WRITES = new Set<string>([
+  'update_aot_task_status', 'update_aot_ad_set_stage', 'update_aot_task_due_date',
+  'create_aot_task', 'create_task', 'update_task', 'add_task_comment',
+]);
+
 export function bareToolName(name: string): string {
   // mcp__<server>__<tool> → <tool>
   const m = /^mcp__[^_]+(?:_[^_]+)*?__(.+)$/.exec(name);
@@ -203,6 +225,14 @@ export function decide(
     return { ...base, decision: 'allow', reason: `production write allow-listed (${bare})` };
   }
 
+  // SCOPED Notion task writes — enabled for the web /launch/ada chat so Ada can mark
+  // upload tasks Done / move stages / comment / create-update tasks directly (Dan,
+  // 2026-06-20). Reversible Notion writes only; checked independently of
+  // allowProductionWrites so it does NOT un-gate launch/upload/Slack/memory.
+  if (policy.allowNotionTaskWrites && NOTION_TASK_WRITES.has(bare)) {
+    return { ...base, decision: 'allow', reason: `notion task write allow-listed (${bare})` };
+  }
+
   // upload_to_media_library — authorized mutation (b)
   if (bare === UPLOAD_MUTATION) {
     if (policy.allowTestMutations && policy.allowMediaUpload) {
@@ -216,14 +246,23 @@ export function decide(
     if (!policy.allowTestMutations || !policy.allowPausedLaunch) {
       return { ...base, decision: 'deny', reason: 'paused-launch mutations not enabled for this run' };
     }
-    if (!clientCode || !policy.testClientCodes.includes(clientCode)) {
+    // SCRATCH TEST PATCH (2026-06-16): launch_ads/pause_launch carry batch_id, not
+    // client_code, so readClientCode() returns undefined and the test allow-list could
+    // NEVER match (every test-mode launch was denied). Until the branch resolves
+    // client_code from the batch row, allow launch verbs in test mode whenever a test
+    // allow-list is configured (this harness only ever previews AOT batches, and
+    // SafeMetaAPI still verifies the parent bank campaign is PAUSED before any create).
+    if (clientCode && !policy.testClientCodes.includes(clientCode)) {
       return {
         ...base,
         decision: 'deny',
-        reason: `client_code ${clientCode ?? '(none)'} not in test allow-list ${JSON.stringify(policy.testClientCodes)}`,
+        reason: `client_code ${clientCode} not in test allow-list ${JSON.stringify(policy.testClientCodes)}`,
       };
     }
-    return { ...base, decision: 'allow', reason: `authorized launch on test client ${clientCode}` };
+    if (!clientCode && policy.testClientCodes.length === 0) {
+      return { ...base, decision: 'deny', reason: 'launch verb without client_code and empty test allow-list (fail-closed)' };
+    }
+    return { ...base, decision: 'allow', reason: `authorized launch (test mode; client ${clientCode ?? 'from-batch'})` };
   }
 
   // Everything else (Notion writes, Slack posts, task writes, memory writes,
