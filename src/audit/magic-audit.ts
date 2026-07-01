@@ -6,6 +6,7 @@ import type { ToolContext } from '../agents/tool-registry.js';
 import { estimateCostUsd } from '../agents/runner.js';
 import { env } from '../env.js';
 import { logger } from '../utils/logger.js';
+import { extractJson, triageLibrary, type LibraryAd } from './library-triage.js';
 
 /**
  * Magic Audit orchestrator (master-plan B1, expanded 2026-06-11: creative /
@@ -99,14 +100,6 @@ function getAnthropic(): Anthropic {
   return anthropic;
 }
 
-function extractJson<T>(text: string): T {
-  const cleaned = text.replace(/```(?:json)?/g, '').trim();
-  const start = cleaned.indexOf('{');
-  const end = cleaned.lastIndexOf('}');
-  if (start < 0 || end <= start) throw new Error('no JSON object in synthesis output');
-  return JSON.parse(cleaned.slice(start, end + 1)) as T;
-}
-
 async function synthesizeJson<T>(
   meter: CostMeter,
   label: string,
@@ -139,7 +132,37 @@ async function synthesizeJson<T>(
     .filter((b): b is Anthropic.TextBlock => b.type === 'text')
     .map((b) => b.text)
     .join('');
-  return extractJson<T>(text);
+  try {
+    return extractJson<T>(text);
+  } catch (err) {
+    // One repair round: big accounts occasionally yield structurally-broken JSON
+    // (seen live on SS 2026-07-01). Cheaper to repair than to lose the section.
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.warn({ label, err: msg }, 'synthesis JSON parse failed — attempting one repair retry');
+    if (meter.exhausted()) throw err;
+    const repair = getAnthropic().messages.stream({
+      model: AUDIT_MODEL,
+      max_tokens: 4000,
+      system: 'You repair malformed JSON. Return ONLY the corrected, complete JSON object — no markdown, no commentary, no explanation.',
+      messages: [{ role: 'user', content: `This JSON is malformed (parser said: ${msg}). Repair it, preserving all content:\n${text}` }],
+    });
+    const fixed = await repair.finalMessage();
+    const rUsage = fixed.usage as unknown as Record<string, number>;
+    meter.add(
+      `${label}_json_repair`,
+      estimateCostUsd(AUDIT_MODEL, {
+        input: fixed.usage.input_tokens,
+        output: fixed.usage.output_tokens,
+        cacheRead: rUsage.cache_read_input_tokens ?? 0,
+        cacheCreation: rUsage.cache_creation_input_tokens ?? 0,
+      }),
+    );
+    const fixedText = fixed.content
+      .filter((b): b is Anthropic.TextBlock => b.type === 'text')
+      .map((b) => b.text)
+      .join('');
+    return extractJson<T>(fixedText);
+  }
 }
 
 const SYNTH_SYSTEM =
@@ -559,23 +582,7 @@ const APIFY_ACTOR = 'curious_coder~facebook-ads-library-scraper';
 const APIFY_BASE = 'https://api.apify.com/v2';
 const APIFY_COST_PER_AD = 0.00075;
 
-interface LibraryAd {
-  ad_archive_id?: string;
-  start_date?: number;
-  is_active?: boolean;
-  collation_count?: number;
-  total?: number;
-  snapshot?: {
-    body?: { text?: string };
-    cards?: Array<{ body?: string; title?: string; cta_type?: string; link_url?: string; video_hd_url?: string; video_sd_url?: string; original_image_url?: string }>;
-    videos?: unknown[];
-    images?: unknown[];
-    cta_type?: string;
-    link_url?: string;
-    page_name?: string;
-  };
-  page_name?: string;
-}
+// LibraryAd + triageLibrary + extractJson live in ./library-triage.ts (pure, unit-tested)
 
 async function apifyScrapePage(pageId: string, count: number, meter: CostMeter): Promise<LibraryAd[]> {
   const token = process.env.APIFY_TOKEN;
@@ -647,58 +654,6 @@ async function resolveOwnPage(clientCode: string, adAccountId: string | null): P
   return { name, pageId };
 }
 
-function triageLibrary(ads: LibraryAd[]): Record<string, unknown> {
-  const active = ads.filter((a) => a.is_active !== false);
-  const now = Date.now() / 1000;
-  const ages = active.filter((a) => a.start_date).map((a) => (now - a.start_date!) / 86400);
-  const weighted = (a: LibraryAd): number => Math.max(1, num(a.collation_count));
-
-  const cards = (a: LibraryAd) => a.snapshot?.cards ?? [];
-  const isVideo = (a: LibraryAd): boolean =>
-    cards(a).some((c) => c.video_hd_url || c.video_sd_url) || (a.snapshot?.videos?.length ?? 0) > 0;
-
-  const totalW = active.reduce((s, a) => s + weighted(a), 0) || 1;
-  const videoW = active.filter(isVideo).reduce((s, a) => s + weighted(a), 0);
-
-  const ctaCount: Record<string, number> = {};
-  const hookCount: Record<string, number> = {};
-  const lpCount: Record<string, number> = {};
-  for (const a of active) {
-    const w = weighted(a);
-    const cta = cards(a)[0]?.cta_type ?? a.snapshot?.cta_type;
-    if (cta) ctaCount[cta] = (ctaCount[cta] ?? 0) + w;
-    const body = (a.snapshot?.body?.text ?? cards(a)[0]?.body ?? '').trim();
-    if (body) {
-      const hook = body.replace(/\s+/g, ' ').slice(0, 80).toLowerCase();
-      hookCount[hook] = (hookCount[hook] ?? 0) + w;
-    }
-    const link = cards(a)[0]?.link_url ?? a.snapshot?.link_url;
-    if (link) {
-      try {
-        const u = new URL(link);
-        const key = `${u.hostname}${u.pathname}`.slice(0, 80);
-        lpCount[key] = (lpCount[key] ?? 0) + w;
-      } catch {
-        /* malformed url */
-      }
-    }
-  }
-  const topN = (rec: Record<string, number>, n: number) =>
-    Object.entries(rec).sort((a, b) => b[1] - a[1]).slice(0, n).map(([k, w]) => ({ value: k, weight: w }));
-
-  return {
-    active_ads_scraped: active.length,
-    page_total_active: active.find((a) => a.total)?.total ?? active.length,
-    oldest_active_days: ages.length ? Math.round(Math.max(...ages)) : null,
-    median_age_days: ages.length ? Math.round(ages.sort((x, y) => x - y)[Math.floor(ages.length / 2)]!) : null,
-    share_launched_last_30d_pct: ages.length ? Math.round((ages.filter((d) => d <= 30).length / ages.length) * 100) : null,
-    video_weight_share_pct: Math.round((videoW / totalW) * 100),
-    top_ctas: topN(ctaCount, 3),
-    top_hooks: topN(hookCount, 6),
-    top_landing_paths: topN(lpCount, 5),
-  };
-}
-
 interface CompetitorSynthesis {
   summary: string;
   pages: Array<{ page_name: string; velocity_read: string; dominant_messages: string[]; lp_strategy: string }>;
@@ -746,7 +701,8 @@ async function runCompetitorTeardown(
     `Public Facebook Ads Library scrape (deterministic triage, weights = ad-cluster size as spend proxy):\n` +
       `Mode: ${mode === 'own_footprint' ? `the client's OWN public footprint (page: ${perPage[0]!.name})` : 'competitor pages'}\n` +
       `Client: ${client.name}\n${JSON.stringify(perPage, null, 1)}\n\n` +
-      `Write the "Ads Library Landscape" audit section. Velocity rule: oldest active ad >120d means evergreen winners exist (name the signal); <60d means rotation cadence IS the strategy. Schema:\n` +
+      `Write the "Ads Library Landscape" audit section. Velocity rule: oldest active ad >120d means evergreen winners exist (name the signal); <60d means rotation cadence IS the strategy. ` +
+      `Catalog note: catalog_dynamic_weight_share_pct is the share of catalog/dynamic (DPA) creative — its {{...}} template tokens render per-product at serve time and are already excluded from top_hooks; NEVER describe template tokens as broken, unrendered, or a QA failure. Schema:\n` +
       `{"summary":"2-3 sentences with the headline strategic read and at least two numbers",` +
       `"pages":[per page {"page_name","velocity_read","dominant_messages":[up to 3 short strings from the top hooks],"lp_strategy":"1 sentence from the landing-path concentration"}],` +
       `"open_lanes":[up to 3 strings — angles/formats visibly NOT used that ${mode === 'own_footprint' ? 'the brand' : 'the client'} could take],` +
