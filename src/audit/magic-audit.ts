@@ -8,6 +8,11 @@ import { env } from '../env.js';
 import { logger } from '../utils/logger.js';
 import { extractJson, triageLibrary, type LibraryAd } from './library-triage.js';
 import { buildClientKnowledgeBundle } from '../agents/client-context.js';
+import {
+  computeConcentration, computeFatigue, computeCohorts, computeCostTrend, computeDayOfWeek,
+  type PackAdRow, type PackAccountRow,
+} from './report-pack.js';
+import { buildScorecard, type ScorecardInputs } from './scorecard.js';
 
 /**
  * Magic Audit orchestrator (master-plan B1, expanded 2026-06-11: creative /
@@ -30,6 +35,8 @@ export interface AuditSection {
   title: string;
   status: 'pending' | 'running' | 'complete' | 'error' | 'planned';
   summary?: string;
+  /** A labelled "Next step:" — standard element of every report (Francis's #1 theme). */
+  next_step?: string;
   data?: unknown;
   warnings?: string[];
   error?: string;
@@ -53,9 +60,17 @@ export interface LeadInsight {
   section: string;
 }
 
+// Fast (deterministic, zero-LLM) sections run FIRST — they land in seconds,
+// so the first screen already shows real findings while Opus sections cook
+// (Dan 2026-07-02: speed to the first magic moment correlates with conversion).
 const SECTION_ORDER: Array<Pick<AuditSection, 'key' | 'title' | 'status'>> = [
   { key: 'dataset_health', title: 'Data Foundation — pixel, CAPI & match quality', status: 'pending' },
   { key: 'account_structure', title: 'Account Structure & Spend Concentration', status: 'pending' },
+  { key: 'spend_concentration', title: 'Budget Concentration & Key-Man Risk', status: 'pending' },
+  { key: 'creative_fatigue', title: 'Creative Fatigue & Runway', status: 'pending' },
+  { key: 'creative_cohorts', title: 'Creative Cohorts — living off old creative?', status: 'pending' },
+  { key: 'cost_trends', title: 'CPM & Auction Pressure', status: 'pending' },
+  { key: 'timing_patterns', title: 'Day-of-Week Pattern', status: 'pending' },
   { key: 'creative_analysis', title: 'Creative Performance & Angles', status: 'pending' },
   { key: 'funnel_read', title: 'Funnel Diagnosis', status: 'pending' },
   { key: 'competitor_teardown', title: 'Ads Library Landscape', status: 'pending' },
@@ -874,12 +889,86 @@ export async function runMagicAudit(
     await updateRow({ sections, cost_usd: round2(meter.spentUsd) });
   };
 
+  // --- Fast tier (Phase C): shared deterministic pulls, fetched ONCE ---------
+  // Each dataset is fail-soft: a failed pull turns its sections into honest
+  // errors, never kills the audit.
+  const PACK_AD_COLS = 'ad_id, ad_name, date, spend, impressions, purchases, purchase_value, results, frequency, hook_rate, hold_rate';
+  let packRows90: PackAdRow[] = [];
+  let packRows180: Array<Pick<PackAdRow, 'ad_id' | 'date' | 'spend'>> = [];
+  let packAccRows90: PackAccountRow[] = [];
+  try {
+    [packRows90, packRows180, packAccRows90] = await Promise.all([
+      pageAll<PackAdRow>('ad_daily', PACK_AD_COLS, (q) => q.eq('client_id', client.id).gte('date', daysAgoISO(90)), 40_000),
+      pageAll<Pick<PackAdRow, 'ad_id' | 'date' | 'spend'>>('ad_daily', 'ad_id, date, spend', (q) => q.eq('client_id', client.id).gte('date', daysAgoISO(180)), 60_000),
+      pageAll<PackAccountRow>('account_daily', 'date, spend, impressions, link_clicks, purchases, purchase_value, results', (q) => q.eq('client_id', client.id).gte('date', daysAgoISO(90)), 200),
+    ]);
+  } catch (err) {
+    logger.warn({ err, code }, 'report-pack shared pulls failed (fast sections degrade)');
+  }
+  const rows30 = packRows90.filter((r) => r.date >= daysAgoISO(30));
+
   const RUNNERS: Record<string, () => Promise<Partial<AuditSection>>> = {
     dataset_health: () => runDatasetHealth(code),
     account_structure: () => runAccountStructure(code),
+    spend_concentration: async () => computeConcentration(rows30),
+    creative_fatigue: async () => computeFatigue(packRows90),
+    creative_cohorts: async () => computeCohorts(packRows180),
+    cost_trends: async () => computeCostTrend(packAccRows90),
+    timing_patterns: async () => computeDayOfWeek(packAccRows90),
     creative_analysis: () => runCreativeAnalysis(code, meter, client, synthSystem),
     funnel_read: () => runFunnelRead(code, meter, client, synthSystem),
     competitor_teardown: () => runCompetitorTeardown(code, meter, client, options, synthSystem),
+  };
+
+  // "Where you stand" scorecard — computed the moment the fast tier is done
+  // (seconds in), stored on the row so the page can render it up top while the
+  // LLM sections are still cooking. Fail-soft.
+  const computeAndSaveScorecard = async (): Promise<void> => {
+    try {
+      const weightedRate = (rows: PackAdRow[], key: 'hook_rate' | 'hold_rate'): { value: number; spend: number } => {
+        let num = 0; let den = 0;
+        for (const r of rows) {
+          const v = r[key];
+          if (typeof v === 'number' && v > 0 && r.spend > 0) { num += v * r.spend; den += r.spend; }
+        }
+        return { value: den > 0 ? num / den : 0, spend: den };
+      };
+      // Cohort: spend-weighted hook/hold per ACCOUNT on our desk, last 7 days.
+      // Rates cross accounts safely; money metrics never do (currency).
+      const corpus = await pageAll<{ client_id: string; spend: number; hook_rate: number | null; hold_rate: number | null }>(
+        'ad_daily', 'client_id, spend, hook_rate, hold_rate', (q) => q.gte('date', daysAgoISO(7)), 40_000,
+      );
+      const byClient = new Map<string, Array<{ spend: number; hook_rate: number | null; hold_rate: number | null }>>();
+      for (const r of corpus) {
+        const list = byClient.get(r.client_id) ?? [];
+        list.push(r);
+        byClient.set(r.client_id, list);
+      }
+      const cohortOf = (key: 'hook_rate' | 'hold_rate'): number[] =>
+        [...byClient.values()]
+          .map((rows) => weightedRate(rows as PackAdRow[], key))
+          .filter((x) => x.spend >= 100) // accounts with real video spend only
+          .map((x) => x.value);
+      const cohortLabel = `the ${byClient.size} accounts on our desk (last 7 days)`;
+
+      const ownHooks = weightedRate(rows30, 'hook_rate');
+      const ownHold = weightedRate(rows30, 'hold_rate');
+      const inputs: ScorecardInputs = {};
+      if (ownHooks.spend >= 100) inputs.hooks = { value: ownHooks.value, cohortValues: cohortOf('hook_rate'), cohortLabel };
+      if (ownHold.spend >= 100) inputs.hold = { value: ownHold.value, cohortValues: cohortOf('hold_rate'), cohortLabel };
+      const cohortsData = sections['creative_cohorts']?.data as { fresh_cohort_share_pct?: number } | undefined;
+      if (typeof cohortsData?.fresh_cohort_share_pct === 'number') inputs.freshness = { value: cohortsData.fresh_cohort_share_pct };
+      const concData = sections['spend_concentration']?.data as { top3_share_pct?: number } | undefined;
+      if (typeof concData?.top3_share_pct === 'number') inputs.concentration = { value: concData.top3_share_pct };
+      const costData = sections['cost_trends']?.data as { cpm_delta_pct?: number } | undefined;
+      if (typeof costData?.cpm_delta_pct === 'number') inputs.cpmTrend = { value: costData.cpm_delta_pct };
+
+      const scorecard = buildScorecard(inputs);
+      if (scorecard.length) await updateRow({ scorecard });
+      logger.info({ code, dimensions: scorecard.map((e) => `${e.key}:${e.band}`) }, 'scorecard computed');
+    } catch (err) {
+      logger.warn({ err, code }, 'scorecard computation failed (audit continues)');
+    }
   };
 
   let anyError = false;
@@ -906,6 +995,9 @@ export async function runMagicAudit(
       });
       logger.error({ err, section: def.key }, 'audit section failed');
     }
+    // The fast tier ends at timing_patterns — the scorecard lands NOW (seconds
+    // in), not after the LLM sections finish minutes later.
+    if (def.key === 'timing_patterns') await computeAndSaveScorecard();
   }
 
   // B3 — rank the lead insights across everything that completed
