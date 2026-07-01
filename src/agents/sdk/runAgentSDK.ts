@@ -33,7 +33,12 @@ import { extractBatchIds, getBatchStates, buildLaunchStateSection } from '../lau
 import { buildAgentDirectorySection } from '../agent-directory.js';
 import { logger } from '../../utils/logger.js';
 import { buildAdaToolBridge } from './tool-bridge.js';
-import { makePreToolUseHook, makeCanUseTool, defaultPolicy, type GuardPolicy, type GuardDecision } from './guard.js';
+import { makePreToolUseHook, makeCanUseTool, defaultPolicy, bareToolName, type GuardPolicy, type GuardDecision } from './guard.js';
+import {
+  newRunState, governWrite, noteToolOutcome, lookupDeadEnd, renderDeadEndNote, failureText,
+  type DeadEndMatchEvent,
+} from './loop-wiring.js';
+import type { GovernorVerdict } from './governor.js';
 
 /** Where the project skills dir lives (contains `.claude/skills/ada-*`). Spike default. */
 const DEFAULT_SKILLS_CWD = process.env.ADA_SDK_SKILLS_CWD ?? '/root/ada-sdk-spike/skills-root';
@@ -65,6 +70,10 @@ export interface SdkRunExtras {
   onDecision?: (d: GuardDecision) => void;
   /** Reports the SDK's authoritative cost + result subtype + tool names used. */
   onResult?: (r: { costUsd: number; subtype: string; toolsUsed: string[] }) => void;
+  /** Ada 2.0: fired on every Governor verdict over a write (decision cards / audit). */
+  onGovernorVerdict?: (v: GovernorVerdict) => void;
+  /** Ada 2.0: fired when a failed write matches a known ada_dead_ends row. */
+  onDeadEndMatch?: (m: DeadEndMatchEvent) => void;
 }
 
 const DEFAULT_ADA_SKILLS = [
@@ -161,9 +170,38 @@ export async function runAgentSDK(options: RunOptions, extras: SdkRunExtras = {}
     else logger.debug({ tool: d.bareName }, `guard allow: ${d.bareName}`);
   });
   const policy: GuardPolicy = defaultPolicy({ ...extras.policy, onDecision });
+
+  // Ada 2.0 loop wiring: per-run Governor state + failure-organ read. The bridge
+  // stays a dumb adapter; all judgment lives in loop-wiring (deterministic,
+  // unit-tested). This is where the live loop stops being blind and ungoverned.
+  const runState = newRunState();
   const bridge = buildAdaToolBridge(profile, {
     getContext: () => toolContext,
     onToolExec: (name) => options.onToolUse?.(name),
+    govern: (name) => {
+      const gate = governWrite(runState, name);
+      if (gate) {
+        logger.info(
+          { tool: gate.verdict.bareName, tier: gate.verdict.tier, blast: gate.verdict.blast, reversibility: gate.verdict.reversibility, confidence: gate.verdict.confidence, refused: !!gate.refusal, sessionId: session.id },
+          `governor: ${gate.verdict.tier} ${gate.verdict.bareName}`,
+        );
+        extras.onGovernorVerdict?.(gate.verdict);
+      }
+      return gate;
+    },
+    onToolFailure: async (name, resultText) => {
+      const match = await lookupDeadEnd(failureText(resultText));
+      noteToolOutcome(runState, name, true, match);
+      if (!match) return undefined;
+      const event = runState.deadEndMatches[runState.deadEndMatches.length - 1]!;
+      logger.info({ tool: bareToolName(name), matchedOn: event.matchedOn, deadEndId: event.deadEndId, sessionId: session.id }, 'failure-organ match');
+      extras.onDeadEndMatch?.(event);
+      return renderDeadEndNote(match);
+    },
+    onToolOutcome: (name, failed) => {
+      // Failures are recorded in onToolFailure (with the match); only successes here.
+      if (!failed) noteToolOutcome(runState, name, false);
+    },
   });
 
   const model = extras.model ?? agent.config.model;

@@ -2197,6 +2197,39 @@ register({
 
 register({
   definition: {
+    name: 'lookup_dead_end',
+    description:
+      'Look a failure/error message up in the ada_dead_ends knowledge base (the failure organ). Returns the best-matching KNOWN dead-end with its documented fix (resolution), or no_match. Use this BEFORE reasoning from scratch whenever a tool call fails with an unfamiliar error: if the failure is known, apply the documented fix and retry once; if the retry still fails, stop and report honestly. Matching keys on distinctive tokens (Meta error subcodes like 2446814, ALL-CAPS identifiers like OUTCOME_SALES), so pass the raw error text unmodified. Read-only, no side effects. NOTE: failed writes already get this lookup automatically (the note is appended to the error you see) — call it explicitly only for errors you met some other way.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        error_text: {
+          type: 'string',
+          description: 'The raw error message / failed tool result to look up (unmodified).',
+        },
+      },
+      required: ['error_text'],
+    },
+  },
+  async execute(input) {
+    const { lookupDeadEnd } = await import('./sdk/loop-wiring.js');
+    const m = await lookupDeadEnd(String(input.error_text ?? ''));
+    if (!m) {
+      return JSON.stringify({ no_match: true, note: 'No known dead-end matches this error. Reason from scratch; if you cannot recover, report the failure honestly.' });
+    }
+    return JSON.stringify({
+      matched: true,
+      kind: m.row.kind,
+      matched_on: m.matchedOn,
+      status: m.row.status ?? 'open',
+      resolution: m.row.resolution ?? null,
+      client_code: m.row.client_code ?? null,
+    });
+  },
+});
+
+register({
+  definition: {
     name: 'query_aot_adsets',
     description:
       'Query the AOT production-pipeline Ad Sets Notion database. An ad set is the unit of work that travels through stages (Concept → Brief → Production → Editing → QC → Media Buying → Done). Returns ad_id_code (e.g. ADBNx3475), ad_title, stage, format, ad_delivery_date, client_code + client_status, owner_names (resolved from Notion user IDs), the currently-active task name (active_task) and its assignee (task_assignee_name), task_progress (0-1), overdue_tasks_count, task_count, brief_relation_ids, drive_folder_url, final_ads_folder_url, frameio_url, and health_check. Default excludes ad sets in dead stages (Completed/Cancelled/On Hold). **Default freshness window is 90 days** on last_edited_time — ad sets nobody has touched in 3+ months are treated as zombies and filtered out. For forensic audits of old data, explicitly pass `freshness_window_days: 0`. Use this for cadence reads ("what is each client producing this week"), capacity gaps ("what is in concept vs production"), and overdue-ad-set surfacing. Use query_aot_tasks when you need the per-task detail underneath. **Pagination is automatic**: the tool fetches every matching page up to a 5000-row safety ceiling, so results are complete by default. The response includes `truncated_at_ceiling: true` ONLY if the ceiling was hit — in that case, narrow the filter and re-query. Always cite owners by owner_names, not user IDs.',

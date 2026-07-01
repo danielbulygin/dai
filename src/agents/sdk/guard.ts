@@ -86,6 +86,8 @@ export function defaultPolicy(overrides: Partial<GuardPolicy> = {}): GuardPolicy
 const READ_TOOLS = new Set<string>([
   // memory / search
   'recall', 'search_memories', 'search_methodology', 'search_methodology_safe',
+  // failure organ (Ada 2.0) — KB lookup, no side effects
+  'lookup_dead_end',
   // client + performance reads
   'list_clients', 'get_client_targets', 'get_client_performance', 'get_client_capabilities',
   'get_campaign_summary', 'get_campaign_performance',
@@ -185,6 +187,11 @@ export function bareToolName(name: string): string {
   const parts = name.split('__');
   if (parts[0] === 'mcp' && parts.length >= 3) return parts.slice(2).join('__');
   return name;
+}
+
+/** True for read/analysis tools (incl. safe built-ins) — the Governor skips these. */
+export function isReadTool(bare: string): boolean {
+  return READ_TOOLS.has(bare) || BUILTIN_READS.has(bare);
 }
 
 function readClientCode(input: unknown): string | undefined {

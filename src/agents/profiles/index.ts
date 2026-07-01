@@ -28,6 +28,7 @@ export const toolProfiles = {
     'pause_launch', 'update_landing_page_mapping',
     'qc_copy', 'verify_launch', 'poll_analysis', 'set_adset_marker',
     'update_aot_task_status', 'update_aot_ad_set_stage',
+    'lookup_dead_end',
   ],
   creative_strategist: [
     'recall', 'remember', 'search_memories',
