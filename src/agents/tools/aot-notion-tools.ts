@@ -1643,9 +1643,27 @@ export async function getReadyToUploadBacklog(): Promise<string> {
       .map(([client, v]) => ({ client, client_code: v.client_code, count: v.sets.length, sets: v.sets }))
       .sort((x, y) => y.count - x.count);
 
+    // Readiness split (Session D): only `ready` may be presented as ready to
+    // upload; blocked/stalled carry flags and MUST be surfaced as needing
+    // attention — the eval caught Ada blurring these into "zero blocking flags".
+    const allSets = by_client.flatMap((c) => c.sets) as Array<{ readiness?: string; preupload_flags?: string[]; code?: string | null; title?: string }>;
+    const countOf = (r: string) => allSets.filter((s) => s.readiness === r).length;
+    const readiness_summary = {
+      ready: countOf('ready'),
+      analyzing: countOf('analyzing'),
+      not_prewarmed: countOf('not-prewarmed'),
+      blocked: countOf('blocked'),
+      stalled: countOf('stalled'),
+      unknown: countOf('unknown'),
+      needs_attention: allSets
+        .filter((s) => s.readiness === 'blocked' || s.readiness === 'stalled')
+        .map((s) => ({ code: s.code ?? null, title: s.title, readiness: s.readiness, flags: s.preupload_flags ?? [] })),
+    };
+
     return JSON.stringify({
-      definition: 'The canonical "Ready to Upload" Notion view: active "Upload and Configure" ad-set tasks, EXCLUDING Blocked (and Done/Cancelled/Archived/Complete). One row per ad set ready for the upload pipeline.',
+      definition: 'The canonical "Ready to Upload" Notion view: active "Upload and Configure" ad-set tasks, EXCLUDING Notion-Blocked (and Done/Cancelled/Archived/Complete). One row per ad set in the upload pipeline. PRESENT readiness honestly: only readiness=ready is actually ready; blocked/stalled go under a separate needs-attention heading with their flags; analyzing/not-prewarmed are in progress.',
       total: tasks.length,
+      readiness_summary,
       by_client,
     });
   } catch (err) {
