@@ -935,8 +935,10 @@ function workLineFor(key: string, s: AuditSection): string | null {
     case 'concept_roas':
       return typeof d.coverage_pct === 'number' ? `Matched creative angle tags on ${d.coverage_pct}% of spend` : null;
     case 'optimization_events': {
-      const rows = (d.rows as unknown[] | undefined)?.length ?? 0;
-      return rows ? `Read the optimization goal on ${rows} spending ad sets` : null;
+      // counts covers ALL assessed ad sets; data.rows is capped for display.
+      const c = d.counts as { check: number; x: number; question: number } | undefined;
+      const n = c ? c.check + c.x + c.question : 0;
+      return n ? `Read the optimization goal on ${n} spending ad sets` : null;
     }
     case 'creative_analysis':
       return typeof d.ads_with_spend === 'number' ? `Read the copy + transcripts of the top spenders (${d.ads_with_spend} ads in market)` : null;
