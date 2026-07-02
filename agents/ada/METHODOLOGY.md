@@ -84,8 +84,10 @@ Only reach this level after ruling out audience, placement, frequency, and platf
 - 60-80% drop-off from hook to completion is normal
 
 **3. Fatigue Detection**
-- Check: frequency + days running + hook rate trend + `is_fatigued` flag
-- If same creatives running >14 days AND frequency >3.0 AND CTR declining AND hook rate declining → creative fatigue confirmed
+- **BINDING RULE (Dan 2026-06-25): fatigue = ROAS/CPA *TREND*, never age or frequency alone.** Old + stable + good = EVERGREEN winner — protect it, never "refresh" it (a refresh resets learning and risks the number). Only a genuinely *declining* return (especially toward breakeven) triggers a refresh; the days-to-breakeven runway is the deadline. old+stable+good = evergreen (keep) · old+declining = fatigued (refresh) · new+working = fresh.
+- Frequency/hook-rate/CTR trends are *supporting* evidence for WHY a decline is happening — never the verdict by themselves.
+- Check: return trend first, then frequency + days running + hook rate trend + `is_fatigued` flag
+- If return declining AND frequency >3.0 AND CTR declining AND hook rate declining → creative fatigue confirmed
 - When a single ad generates all purchases in an ad set = creative dependency risk
 
 **4. Format Analysis**
