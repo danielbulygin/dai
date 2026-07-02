@@ -84,6 +84,17 @@ describe('creative fatigue — the binding rules', () => {
     const s = computeFatigue([...adRows('b1', 'blip', 5, 50, () => 0.2), ...adRows('x', 'anchor', 30, 500, () => 2)]);
     expect((s.data.ads).find((a) => a.ad_name === 'blip')).toBeUndefined();
   });
+
+  it('FLOOR CAP: a very large account still assesses mid-size ads (NP regression)', () => {
+    // Whale account: 90d × 50k/day = 4.5M total → uncapped 1% floor (45k)
+    // excluded EVERY ad. The capped floor keeps a 6k-spend ad in scope.
+    const s = computeFatigue([
+      ...adRows('whale', 'whale-hero', 90, 50_000, () => 2),
+      ...adRows('mid', 'mid-runner', 30, 200, () => 2),
+    ]);
+    expect((s.data.ads).find((a) => a.ad_name === 'mid-runner')).toBeDefined();
+    expect((s.data.ads).length).toBeGreaterThanOrEqual(2);
+  });
 });
 
 describe('creative cohorts', () => {

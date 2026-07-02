@@ -163,6 +163,23 @@ describe('computeConceptRoas', () => {
     expect(s.next_step).toContain('Founder story');
     expect(s.next_step).toContain('out-earns');
   });
+
+  it('FLOOR CAP: a very large account still assesses mid-size angles (NP regression class)', () => {
+    // 2.03M tagged spend → uncapped 3% floor (61k) would fold a 30k angle
+    // into "other"; the capped floor keeps it assessed.
+    const rows = [
+      ...Array.from({ length: 5 }, (_, i) => adRow(`w${i}`, 400_000, 800_000)), // whale angle: 2M
+      ...Array.from({ length: 5 }, (_, i) => adRow(`m${i}`, 6_000, 15_000)),    // mid angle: 30k
+    ];
+    const angles = new Map<string, string>([
+      ...Array.from({ length: 5 }, (_, i) => [`w${i}`, 'Problem-solution'] as [string, string]),
+      ...Array.from({ length: 5 }, (_, i) => [`m${i}`, 'Founder story'] as [string, string]),
+    ]);
+    const s = computeConceptRoas(rows, angles);
+    const mid = (s.data as { angles: Array<{ angle: string; below_floor: boolean }> }).angles
+      .find((a) => a.angle === 'Founder story')!;
+    expect(mid.below_floor).toBe(false);
+  });
 });
 
 describe('computeOptimizationEvents', () => {

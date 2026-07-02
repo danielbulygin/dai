@@ -131,7 +131,14 @@ export async function auditDatasetHealth(params: { clientCode: string }): Promis
       const warnings: string[] = [];
       if (px.is_unavailable) warnings.push('Pixel is marked UNAVAILABLE.');
       if (hoursSinceFired !== null && hoursSinceFired > 24) {
-        warnings.push(`Pixel has not fired in ${hoursSinceFired}h.`);
+        // ≥30 days silent = almost certainly a legacy/dormant pixel, not a fresh
+        // tracking break — "has not fired in 14,365h" read as breakage in audits.
+        const daysSinceFired = Math.round(hoursSinceFired / 24);
+        warnings.push(
+          daysSinceFired >= 30
+            ? `Pixel last fired ~${daysSinceFired} days ago — likely a legacy/dormant pixel, not an active tracking break. Only escalate if ads or catalogs still route conversions through it.`
+            : `Pixel has not fired in ${hoursSinceFired}h.`,
+        );
       }
       if (!px.enable_automatic_matching) {
         warnings.push('Automatic advanced matching is OFF — easy EMQ win, turn it on in Events Manager.');

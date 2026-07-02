@@ -338,6 +338,11 @@ async function runAccountStructure(clientCode: string): Promise<Partial<AuditSec
   let campaigns: Array<Record<string, unknown>>;
   try {
     const parsed = JSON.parse(result) as unknown;
+    // A tool-level {error} payload is NOT an empty account — reading it as
+    // "No campaigns with spend" is how meow's real RPC error hid in the sweep.
+    if (!Array.isArray(parsed) && typeof (parsed as Record<string, unknown>).error === 'string') {
+      return { status: 'error', error: ((parsed as Record<string, unknown>).error as string).slice(0, 500) };
+    }
     campaigns = Array.isArray(parsed)
       ? (parsed as Array<Record<string, unknown>>)
       : ((parsed as Record<string, unknown>).campaigns as Array<Record<string, unknown>> ?? []);

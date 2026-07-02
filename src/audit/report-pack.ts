@@ -145,6 +145,16 @@ export interface FatigueAd {
   low_frequency_acquisition_guard: boolean;
 }
 
+/**
+ * Relative statistical floors must be capped: on a 20M-SEK/90d account the
+ * uncapped 1%-of-total fatigue floor excluded EVERY ad (NP, assessed_ads=0).
+ * Caps are currency-naive, like the 200 base floor.
+ */
+export const FATIGUE_FLOOR_CAP = 2_500;
+export const CONCEPT_FLOOR_CAP = 5_000;
+const cappedFloor = (base: number, relative: number, cap: number): number =>
+  Math.max(base, Math.min(relative, cap));
+
 export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0): PackSection & { data: { ads: FatigueAd[] } & Record<string, unknown> } {
   const mode = kpiMode(rows90);
   const byAd = new Map<string, PackAdRow[]>();
@@ -160,7 +170,7 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0): PackSe
     const spend = list.reduce((s, r) => s + r.spend, 0);
     const days = [...new Set(list.map((r) => r.date))].sort();
     // Statistical floor: enough days AND enough money to say anything.
-    if (days.length < 10 || spend < Math.max(200, totalSpend * 0.01)) continue;
+    if (days.length < 10 || spend < cappedFloor(200, totalSpend * 0.01, FATIGUE_FLOOR_CAP)) continue;
 
     const sorted = [...list].sort((a, b) => a.date.localeCompare(b.date));
     const mid = Math.floor(sorted.length / 2);
@@ -505,7 +515,7 @@ export function computeConceptRoas(
   }
 
   // Statistical floor: angles below it fold into "other" instead of pretending precision.
-  const floor = Math.max(200, taggedSpend * 0.03);
+  const floor = cappedFloor(200, taggedSpend * 0.03, CONCEPT_FLOOR_CAP);
   const angles = [...byAngle.entries()]
     .map(([angle, a]) => ({
       angle,

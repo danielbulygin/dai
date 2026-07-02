@@ -1,6 +1,8 @@
 -- Ada Intelligent Drill-Down: Summary RPCs
 -- Run in BMAD Supabase SQL Editor (bzhqvxknwvxhgpovrhlp)
 -- These RPCs aggregate daily data into 1 row per entity for overview analysis.
+-- Client lookup is case-insensitive: callers uppercase codes but clients.code
+-- is freeform ('meow' is lowercase) — exact match silently returned nothing.
 
 -- ============================================================================
 -- 1. get_campaign_summary — 1 row per campaign
@@ -36,7 +38,7 @@ DECLARE
   v_since DATE := CURRENT_DATE - p_days;
   v_last_3d DATE := CURRENT_DATE - 3;
 BEGIN
-  SELECT id INTO v_client_id FROM clients WHERE code = p_client_code;
+  SELECT id INTO v_client_id FROM clients WHERE UPPER(code) = UPPER(p_client_code);
   IF v_client_id IS NULL THEN
     RAISE EXCEPTION 'Client % not found', p_client_code;
   END IF;
@@ -167,7 +169,7 @@ DECLARE
   v_since DATE := CURRENT_DATE - p_days;
   v_last_3d DATE := CURRENT_DATE - 3;
 BEGIN
-  SELECT id INTO v_client_id FROM clients WHERE code = p_client_code;
+  SELECT id INTO v_client_id FROM clients WHERE UPPER(code) = UPPER(p_client_code);
   IF v_client_id IS NULL THEN
     RAISE EXCEPTION 'Client % not found', p_client_code;
   END IF;
@@ -313,7 +315,7 @@ DECLARE
   v_since DATE := CURRENT_DATE - p_days;
   v_last_3d DATE := CURRENT_DATE - 3;
 BEGIN
-  SELECT id INTO v_client_id FROM clients WHERE code = p_client_code;
+  SELECT id INTO v_client_id FROM clients WHERE UPPER(code) = UPPER(p_client_code);
   IF v_client_id IS NULL THEN
     RAISE EXCEPTION 'Client % not found', p_client_code;
   END IF;
