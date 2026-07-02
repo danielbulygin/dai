@@ -10,8 +10,8 @@ import { extractJson, triageLibrary, type LibraryAd } from './library-triage.js'
 import { buildClientKnowledgeBundle } from '../agents/client-context.js';
 import {
   computeConcentration, computeFatigue, computeCohorts, computeCostTrend, computeDayOfWeek,
-  computeConceptRoas, computeOptimizationEvents, buildProvisionalInsights,
-  type PackAdRow, type PackAccountRow, type AdsetConfigLite, type FatigueAd,
+  computeConceptRoas, computeOptimizationEvents, buildProvisionalInsights, computeHookCorrection,
+  type PackAdRow, type PackAccountRow, type AdsetConfigLite, type FatigueAd, type PlacementHookRow,
 } from './report-pack.js';
 import { buildScorecard, type ScorecardInputs } from './scorecard.js';
 import { buildAccountModel, mergeAccountModel, type AccountModel, type AccountModelInputs } from './account-model.js';
@@ -745,6 +745,46 @@ async function resolveOwnPage(clientCode: string, adAccountId: string | null): P
   return { name, pageId };
 }
 
+/**
+ * Placement-broken-down hook inputs for the rewarded-video correction
+ * (pro-trust layer). One account-level insights call, last 30 days — fail-soft
+ * null on any error; the correction is a bonus, never a blocker.
+ */
+async function fetchPlacementHookRows(
+  clientCode: string,
+  adAccountId: string | null,
+): Promise<PlacementHookRow[] | null> {
+  if (!adAccountId) return null;
+  const token = metaTokenFor(clientCode);
+  if (!token) return null;
+  const acct = adAccountId.startsWith('act_') ? adAccountId : `act_${adAccountId}`;
+  try {
+    const resp = await fetch(
+      `https://graph.facebook.com/v21.0/${acct}/insights?level=account&date_preset=last_30d` +
+        `&breakdowns=publisher_platform,platform_position&fields=impressions,actions&limit=500&access_token=${token}`,
+      { signal: AbortSignal.timeout(30_000) },
+    );
+    if (!resp.ok) return null;
+    const body = (await resp.json()) as {
+      data?: Array<{
+        publisher_platform?: string;
+        platform_position?: string;
+        impressions?: string;
+        actions?: Array<{ action_type: string; value: string }>;
+      }>;
+    };
+    if (!body.data?.length) return null;
+    return body.data.map((r) => ({
+      publisher_platform: r.publisher_platform ?? 'unknown',
+      platform_position: r.platform_position ?? 'unknown',
+      impressions: Number(r.impressions ?? 0),
+      video_views: Number(r.actions?.find((a) => a.action_type === 'video_view')?.value ?? 0),
+    }));
+  } catch {
+    return null;
+  }
+}
+
 interface CompetitorSynthesis {
   summary: string;
   pages: Array<{ page_name: string; velocity_read: string; dominant_messages: string[]; lp_strategy: string }>;
@@ -1163,9 +1203,9 @@ export async function runMagicAudit(
     dataset_health: () => runDatasetHealth(code),
     account_structure: () => runAccountStructure(code),
     spend_concentration: async () => computeConcentration(rows30),
-    creative_fatigue: async () => computeFatigue(packRows90),
+    creative_fatigue: async () => computeFatigue(packRows90, 1.0, client.currency),
     creative_cohorts: async () => computeCohorts(packRows180),
-    cost_trends: async () => computeCostTrend(packAccRows90),
+    cost_trends: async () => computeCostTrend(packAccRows90, client.currency),
     timing_patterns: async () => computeDayOfWeek(packAccRows90),
     concept_roas: async () => {
       const angleByAdId = await fetchAngleByAdId(client.id, new Set(rows30.map((r) => r.ad_id)));
@@ -1178,7 +1218,7 @@ export async function runMagicAudit(
         purchases: t.purchases ?? 0,
         leads: t.leads ?? 0,
         purchase_value: t.purchase_value ?? 0,
-      });
+      }, client.currency);
     },
     creative_analysis: () => runCreativeAnalysis(code, meter, client, synthSystem),
     funnel_read: () => runFunnelRead(code, meter, client, synthSystem),
@@ -1221,8 +1261,14 @@ export async function runMagicAudit(
 
       const ownHooks = weightedRate(rows30, 'hook_rate');
       const ownHold = weightedRate(rows30, 'hold_rate');
+      // Video impressions (30d) let the scorecard state the hook gap in PEOPLE
+      // on the same spend (pro-trust layer — units the metric owns, never €).
+      const videoImps30 = rows30.reduce(
+        (s, r) => s + (typeof r.hook_rate === 'number' && r.hook_rate > 0 ? r.impressions || 0 : 0),
+        0,
+      );
       const inputs: ScorecardInputs = {};
-      if (ownHooks.spend >= 100) inputs.hooks = { value: ownHooks.value, cohortValues: cohortOf('hook_rate'), cohortLabel };
+      if (ownHooks.spend >= 100) inputs.hooks = { value: ownHooks.value, cohortValues: cohortOf('hook_rate'), cohortLabel, impressions30: videoImps30 };
       if (ownHold.spend >= 100) inputs.hold = { value: ownHold.value, cohortValues: cohortOf('hold_rate'), cohortLabel };
       const cohortsData = sections['creative_cohorts']?.data as { fresh_cohort_share_pct?: number } | undefined;
       if (typeof cohortsData?.fresh_cohort_share_pct === 'number') inputs.freshness = { value: cohortsData.fresh_cohort_share_pct };
@@ -1232,6 +1278,27 @@ export async function runMagicAudit(
       if (typeof costData?.cpm_delta_pct === 'number') inputs.cpmTrend = { value: costData.cpm_delta_pct };
 
       const scorecard = buildScorecard(inputs);
+
+      // "We corrected your OWN metric down" — the rewarded-video hook-inflation
+      // check (binding ruling #5; the persona test's most trust-building move).
+      // One live placement-broken-down pull; fail-soft, only speaks when material.
+      try {
+        const hooksEntry = scorecard.find((e) => e.key === 'hooks');
+        if (hooksEntry) {
+          const placementRows = await fetchPlacementHookRows(code, client.adAccountId);
+          const correction = placementRows ? computeHookCorrection(placementRows) : null;
+          if (correction?.material) {
+            hooksEntry.correction = { corrected_value: correction.corrected_pct, note: correction.note };
+            await logWork(
+              `Checked ${correction.forced_share_pct}% of impressions on forced-view placements — corrected the hook rate ${correction.reported_pct}% → ${correction.corrected_pct}%`,
+            );
+            logger.info({ code, correction }, 'hook-rate correction applied (rewarded video)');
+          }
+        }
+      } catch (err) {
+        logger.warn({ err, code }, 'hook correction failed (scorecard continues uncorrected)');
+      }
+
       if (scorecard.length) await updateRow({ scorecard });
       logger.info({ code, dimensions: scorecard.map((e) => `${e.key}:${e.band}`) }, 'scorecard computed');
 

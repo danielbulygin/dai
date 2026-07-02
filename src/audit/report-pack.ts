@@ -52,7 +52,17 @@ export interface PackSection {
   next_step: string;
   data: Record<string, unknown>;
   warnings?: string[];
+  /**
+   * "How we got this" — the derivation shown behind an expandable on the page
+   * (pro-trust layer, UX review §5.5; Francis: "show fatigue days derivation").
+   * Plain operator voice: window, inputs, floors, formula — no mystique.
+   */
+  derivation?: string;
 }
+
+/** Label a rounded money amount with the account currency (currency-naive when unset). */
+const money = (v: number, currency: string): string =>
+  `${Math.round(v).toLocaleString('en-US')}${currency ? ` ${currency}` : ''}`;
 
 const r2 = (v: number): number => Math.round(v * 100) / 100;
 const r1 = (v: number): number => Math.round(v * 10) / 10;
@@ -123,6 +133,10 @@ export function computeConcentration(rows30: PackAdRow[]): PackSection {
       top_ads: ads.slice(0, 10).map((a) => ({ ad_name: a.name, spend: Math.round(a.spend), share_pct: pct(a.spend, total) })),
     },
     warnings: warnings.length ? warnings : undefined,
+    derivation:
+      `Summed each ad's spend over the last 30 days of delivery data (${ads.length} ads spent anything), ` +
+      `ranked them, and took the top-1/3/10 share of the total. The bands come from what we see across accounts: ` +
+      `top-3 under 40% = healthy spread, 40–60% = elevated, over 60% = key-man risk.`,
   };
 }
 
@@ -143,6 +157,8 @@ export interface FatigueAd {
   class: 'evergreen' | 'fatiguing' | 'fresh' | 'stable';
   days_to_breakeven: number | null;
   low_frequency_acquisition_guard: boolean;
+  /** Avg spend/day over the ad's last 14 active days — its CURRENT run-rate. */
+  recent_daily_spend: number;
 }
 
 /**
@@ -155,7 +171,7 @@ export const CONCEPT_FLOOR_CAP = 5_000;
 const cappedFloor = (base: number, relative: number, cap: number): number =>
   Math.max(base, Math.min(relative, cap));
 
-export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0): PackSection & { data: { ads: FatigueAd[] } & Record<string, unknown> } {
+export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currency = ''): PackSection & { data: { ads: FatigueAd[] } & Record<string, unknown> } {
   const mode = kpiMode(rows90);
   const byAd = new Map<string, PackAdRow[]>();
   for (const r of rows90) {
@@ -193,6 +209,8 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0): PackSe
     const lastDate = Date.parse(days[days.length - 1]!);
     const recentRows = sorted.filter((r) => lastDate - Date.parse(r.date) < 14 * 86_400_000);
     const recent = rate(recentRows);
+    const recentDays = new Set(recentRows.map((r) => r.date)).size;
+    const recentDailySpend = recentDays > 0 ? recentRows.reduce((s, r) => s + r.spend, 0) / recentDays : 0;
     const freqVals = list.map((r) => r.frequency).filter((f): f is number => typeof f === 'number' && f > 0);
     const avgFreq = freqVals.length ? r2(freqVals.reduce((s, f) => s + f, 0) / freqVals.length) : null;
 
@@ -230,6 +248,7 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0): PackSe
       class: cls,
       days_to_breakeven: runway,
       low_frequency_acquisition_guard: lowFreqGuard,
+      recent_daily_spend: Math.round(recentDailySpend),
     });
   }
 
@@ -243,12 +262,16 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0): PackSe
   const soonest = fatiguing.filter((a) => a.days_to_breakeven != null).sort((a, b) => a.days_to_breakeven! - b.days_to_breakeven!)[0];
 
   const kpiWord = mode === 'roas' ? 'ROAS' : 'results per spend';
+  // The fatiguing set's CURRENT run-rate — the honest "money riding on declining
+  // creative" number (pro-trust layer). A run-rate, not a loss claim.
+  const fatiguingDailyBurn = Math.round(fatiguing.reduce((s, a) => s + a.recent_daily_spend, 0));
   const summaryParts: string[] = [];
   if (fatiguing.length) {
     summaryParts.push(
       `${fatiguing.length} ad${fatiguing.length > 1 ? 's' : ''} carrying ${fatiguingShare}% of assessed spend ` +
       `${fatiguing.length > 1 ? 'are' : 'is'} genuinely fatiguing — ${kpiWord} down 25%+ from the first half of its run to the second` +
-      (soonest?.days_to_breakeven ? `; at the current decline "${soonest.ad_name}" crosses breakeven in roughly ${soonest.days_to_breakeven} days` : '') + '.',
+      (soonest?.days_to_breakeven && soonest.days_to_breakeven > 1 ? `; at the current decline "${soonest.ad_name}" crosses breakeven in roughly ${soonest.days_to_breakeven} days` : soonest?.days_to_breakeven === 1 ? `; at the current decline "${soonest.ad_name}" crosses breakeven within a day` : '') + '.' +
+      (fatiguingDailyBurn > 0 ? ` Right now ≈${money(fatiguingDailyBurn, currency)}/day runs on this declining set — that's the budget the replacements inherit.` : ''),
     );
   } else {
     summaryParts.push(`No ad with meaningful spend shows a real fatigue pattern right now (${kpiWord} trend, not age — long-running ads that still hold their number don't count).`);
@@ -278,9 +301,17 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0): PackSe
       assessed_ads: ads.length,
       fatiguing_spend_share_pct: fatiguingShare,
       evergreen_spend_share_pct: evergreenShare,
+      fatiguing_daily_burn: fatiguingDailyBurn,
+      currency: currency || undefined,
       ads: ads.slice(0, 20),
     },
     warnings: warnings.length ? warnings : undefined,
+    derivation:
+      `For every ad with 10+ active days and real spend in the last 90 days, we split its run into a first and second half ` +
+      `and compared ${kpiWord} between them — a 25%+ drop that also holds in the last 14 active days reads as fatigue. ` +
+      `Age alone never flags an ad: old creative whose number still holds is evergreen and gets protected. ` +
+      `The runway extrapolates the observed per-day decline from the ad's last-14-day level down to breakeven — a deadline estimate, not a guarantee. ` +
+      `The daily figure is each fatiguing ad's average spend over its own last 14 active days, summed.`,
   };
 }
 
@@ -349,6 +380,10 @@ export function computeCohorts(rows180: Array<Pick<PackAdRow, 'ad_id' | 'date' |
       fresh_cohort_share_pct: r1(freshShare),
       series,
     },
+    derivation:
+      `Each ad's launch month is approximated by its first day with spend inside the ${series.length}-month window ` +
+      `(ads already running when the window opens are grouped as "${month(windowStart)} or earlier" — we can't see further back). ` +
+      `Each month's spend is then split by those launch cohorts; freshness = the last full month's share going to creatives launched in that month or the one before.`,
   };
 }
 
@@ -356,7 +391,7 @@ export function computeCohorts(rows180: Array<Pick<PackAdRow, 'ad_id' | 'date' |
 // 4. CPM / auction-pressure trend (is it the market, or your creative?)
 // ---------------------------------------------------------------------------
 
-export function computeCostTrend(accRows90: PackAccountRow[]): PackSection {
+export function computeCostTrend(accRows90: PackAccountRow[], currency = ''): PackSection {
   const sorted = [...accRows90].sort((a, b) => a.date.localeCompare(b.date));
   // weekly buckets
   const weeks = new Map<string, { spend: number; imps: number; clicks: number }>();
@@ -374,7 +409,7 @@ export function computeCostTrend(accRows90: PackAccountRow[]): PackSection {
   const series = [...weeks.entries()]
     .sort((a, b) => a[0].localeCompare(b[0]))
     .filter(([, w]) => w.imps > 0)
-    .map(([week, w]) => ({ week, cpm: r2(div(w.spend * 1000, w.imps)), ctr_link_pct: r2(pct(w.clicks, w.imps)), spend: Math.round(w.spend) }));
+    .map(([week, w]) => ({ week, cpm: r2(div(w.spend * 1000, w.imps)), ctr_link_pct: r2(pct(w.clicks, w.imps)), spend: Math.round(w.spend), impressions: w.imps }));
 
   if (series.length < 4) {
     return {
@@ -391,22 +426,48 @@ export function computeCostTrend(accRows90: PackAccountRow[]): PackSection {
   const cpmDelta = pct(avg(lastQ.map((s) => s.cpm)) - avg(firstQ.map((s) => s.cpm)), avg(firstQ.map((s) => s.cpm)));
   const ctrDelta = pct(avg(lastQ.map((s) => s.ctr_link_pct)) - avg(firstQ.map((s) => s.ctr_link_pct)), avg(firstQ.map((s) => s.ctr_link_pct)) || 1);
 
+  // Quantify the drift honestly (pro-trust layer): what the LAST quarter of
+  // weeks' impressions actually cost vs what they'd have cost at the window's
+  // opening CPM. A "same impressions, today's prices" comparison — not a loss
+  // claim, and never summed with other reports' numbers.
+  const openingCpm = avg(firstQ.map((s) => s.cpm));
+  const recentImps = lastQ.reduce((s, w) => s + w.impressions, 0);
+  const recentSpend = lastQ.reduce((s, w) => s + w.spend, 0);
+  const recentWeeks = lastQ.length;
+  const extraCost = Math.round(recentSpend - (recentImps * openingCpm) / 1000);
+
   // Decompose: CPM up + CTR holding = auction/market. CPM up + CTR down = the creative is earning worse delivery.
   let read: string;
   if (cpmDelta > 10 && ctrDelta < -10) read = `costs are up ${r1(cpmDelta)}% AND link CTR is down ${r1(-ctrDelta)}% — that combination points at the creative earning worse auctions, not just a pricier market`;
   else if (cpmDelta > 10) read = `CPM is up ${r1(cpmDelta)}% while CTR held — that reads as auction/market pressure, not something your creative did wrong`;
   else if (cpmDelta < -10) read = `CPM is DOWN ${r1(-cpmDelta)}% across the window — the market is getting cheaper for you`;
   else read = `CPM has been flat (within ±10%) across the window — cost pressure is not the story here`;
+  const quantified =
+    cpmDelta > 10 && extraCost > 0
+      ? ` The last ${recentWeeks} weeks' impressions cost ≈${money(extraCost, currency)} more than the same impressions at your start-of-window CPM.`
+      : '';
 
   return {
-    summary: `Over the last ${series.length} weeks: ${read}. (Weekly averages, account level.)`,
+    summary: `Over the last ${series.length} weeks: ${read}.${quantified} (Weekly averages, account level.)`,
     next_step:
       cpmDelta > 10 && ctrDelta < -10
         ? `Treat this as a creative problem first: fresher hooks lift CTR, better CTR buys cheaper auctions. Re-check CPM two weeks after new creative lands.`
         : cpmDelta > 10
           ? `Nothing to fix on your side — budget for the pricier auction or shift spend toward the placements/dayparts where CPM held.`
           : `No action needed — keep this chart as the baseline for the next audit.`,
-    data: { series, cpm_delta_pct: r1(cpmDelta), ctr_delta_pct: r1(ctrDelta) },
+    data: {
+      series,
+      cpm_delta_pct: r1(cpmDelta),
+      ctr_delta_pct: r1(ctrDelta),
+      cpm_extra_cost_recent: cpmDelta > 10 && extraCost > 0 ? extraCost : undefined,
+      cpm_extra_cost_weeks: cpmDelta > 10 && extraCost > 0 ? recentWeeks : undefined,
+      currency: currency || undefined,
+    },
+    derivation:
+      `Daily account delivery is bucketed into calendar weeks; CPM = spend ÷ impressions × 1000 per week. ` +
+      `The trend compares the average of the first third of weeks against the last third. ` +
+      `The cost figure prices the last ${recentWeeks} weeks' actual impressions at the opening CPM and takes the difference — ` +
+      `"same impressions, opening prices". It shares the CPM's causes (market AND creative), so we never add it to other reports' numbers.`,
   };
 }
 
@@ -463,6 +524,10 @@ export function computeDayOfWeek(accRows90: PackAccountRow[]): PackSection {
         ? `Worth acting on: shift a slice of budget toward ${best.day}/${ranked[1]!.day} via a campaign schedule or manual weekly rhythm, and re-measure in 30 days.`
         : `The gap is modest — don't build schedule complexity for ${r1(gap)}%; just keep it on the watchlist.`,
     data: { kpi_mode: mode, kpi_label: kpiLabel, rows, best_day: best.day, worst_day: worst.day, gap_pct: r1(gap) },
+    derivation:
+      `90 days of account-level delivery grouped by weekday (~13 of each), ${kpiLabel} computed per weekday from the summed spend and results. ` +
+      `Daily granularity only — Meta doesn't give us clean hourly history, so this is day-of-week, not dayparting. ` +
+      `Gaps under 25% stay on the watchlist rather than becoming schedule advice.`,
   };
 }
 
@@ -570,6 +635,10 @@ export function computeConceptRoas(
       discount_flag: discountFlag,
     },
     warnings: warnings.length ? warnings : undefined,
+    derivation:
+      `Every analyzed ad carries a messaging-angle tag from our creative analysis (what the ad argues, not what it looks like). ` +
+      `Last-30-day spend and returns are grouped by that tag — tags cover ${coverage}% of spend, and angles below a statistical floor ` +
+      `fold away rather than pretend precision. ${kpiLabel} per angle = the group's summed returns against its summed spend.`,
   };
 }
 
@@ -593,6 +662,7 @@ export function computeOptimizationEvents(
   adsets: AdsetConfigLite[],
   spendByAdset: Map<string, number>,
   totals30: { purchases: number; leads: number; purchase_value: number },
+  currency = '',
 ): PackSection {
   // What SHOULD this account optimize for? Revenue accounts → Purchase;
   // lead accounts → Lead. Mirrors the account-model classification.
@@ -666,7 +736,7 @@ export function computeOptimizationEvents(
   return {
     summary: xs === 0
       ? `All ${rows.length} spending ad sets optimize for the right thing (${targetWord}-class events). This is the foundational setting most accounts get wrong — yours is clean.`
-      : `${xs} of ${rows.length} spending ad sets optimize for the WRONG event — ${pct(misSpend, totalSpend)}% of spend (${Math.round(misSpend).toLocaleString('en-US')}) is telling Meta to hunt something other than ${targetWord.toLowerCase()}s.`,
+      : `${xs} of ${rows.length} spending ad sets optimize for the WRONG event — ${pct(misSpend, totalSpend)}% of spend (${money(misSpend, currency)} over 30 days) is telling Meta to hunt something other than ${targetWord.toLowerCase()}s.`,
     next_step: xs === 0
       ? `Nothing to change here — keep new ad sets on the same optimization event.`
       : `Switch the flagged ad sets to ${targetWord} optimization (or fold their budget into the correctly-set ones). Expect a learning reset — do it per ad set, not all at once.`,
@@ -675,9 +745,16 @@ export function computeOptimizationEvents(
       target_event: targetWord,
       counts: { check: checks, x: xs, question: qs },
       misoptimized_spend_share_pct: pct(misSpend, totalSpend),
+      misoptimized_spend_30d: Math.round(misSpend),
+      currency: currency || undefined,
       rows: rows.slice(0, 15),
     },
     warnings: qs > 0 ? [`${qs} ad set(s) marked "?" — plausible-but-unusual configs we won't guess about.`] : undefined,
+    derivation:
+      `We read each spending ad set's optimization goal and conversion event straight from its Meta config and judged it against ` +
+      `what this account actually sells (${targetWord}-class events, inferred from 30 days of recorded conversions). ` +
+      `The flagged amount is those ad sets' summed 30-day spend — spend pointed at the wrong target, not money already lost. ` +
+      `Configs that could be a deliberate learning-volume choice get a "?" instead of a verdict.`,
   };
 }
 
@@ -774,4 +851,72 @@ export function buildProvisionalInsights(
   }
 
   return out.slice(0, 3);
+}
+
+// ---------------------------------------------------------------------------
+// 9. Hook-rate inflation correction (Audience Network / rewarded video)
+// ---------------------------------------------------------------------------
+
+/**
+ * BINDING (design ruling #5, 2026-06-25): rewarded-video placements force the
+ * view, so their "3-second plays" inflate the hook rate. The most trust-building
+ * move in the persona test was correcting the client's OWN metric DOWN — so we
+ * report the real hook rate with forced views stripped out.
+ *
+ * Pure: placement-broken-down insight rows in (from a live Meta pull), a
+ * correction verdict out. Only speaks when the correction is material.
+ */
+export interface PlacementHookRow {
+  publisher_platform: string;
+  platform_position: string;
+  impressions: number;
+  /** 3-second video plays (Meta `video_view` action). */
+  video_views: number;
+}
+
+export interface HookCorrection {
+  /** Hook rate across ALL placements, % (what Meta's UI implies). */
+  reported_pct: number;
+  /** Hook rate with forced-view placements stripped, % (the real number). */
+  corrected_pct: number;
+  /** Share of impressions on forced-view placements (rewarded video), %. */
+  forced_share_pct: number;
+  /** Share of impressions on Audience Network overall, %. */
+  an_share_pct: number;
+  material: boolean;
+  note: string;
+}
+
+const FORCED_VIEW = (row: PlacementHookRow): boolean =>
+  row.platform_position.toLowerCase().includes('rewarded');
+
+export function computeHookCorrection(rows: PlacementHookRow[]): HookCorrection | null {
+  const sum = (xs: PlacementHookRow[], k: 'impressions' | 'video_views') => xs.reduce((s, r) => s + (r[k] || 0), 0);
+  const allImps = sum(rows, 'impressions');
+  if (allImps < 10_000) return null; // too thin to correct anything honestly
+  const clean = rows.filter((r) => !FORCED_VIEW(r));
+  const cleanImps = sum(clean, 'impressions');
+  if (cleanImps <= 0) return null;
+
+  const reported = (sum(rows, 'video_views') / allImps) * 100;
+  const corrected = (sum(clean, 'video_views') / cleanImps) * 100;
+  const forcedShare = pct(allImps - cleanImps, allImps);
+  const anShare = pct(sum(rows.filter((r) => r.publisher_platform.toLowerCase() === 'audience_network'), 'impressions'), allImps);
+  // Material when forced views move the number by ≥1pp AND ≥5% relative.
+  const material = forcedShare > 0 && reported - corrected >= 1 && reported > 0 && (reported - corrected) / reported >= 0.05;
+
+  return {
+    reported_pct: r1(reported),
+    corrected_pct: r1(corrected),
+    forced_share_pct: forcedShare,
+    an_share_pct: anShare,
+    material,
+    note: material
+      ? `Rewarded-video placements (${forcedShare}% of impressions) force the view, so they count as "3-second plays" no one chose to watch. ` +
+        `Stripping them, your real hook rate is ${r1(corrected)}% — not the ${r1(reported)}% the raw numbers imply. ` +
+        `Judge your creative on the corrected number (the cohort comparison stays on raw-vs-raw, so it's still apples to apples).`
+      : forcedShare > 0
+        ? `Rewarded-video placements are ${forcedShare}% of impressions — not enough to move your hook rate meaningfully.`
+        : `No forced-view placements in the window — the reported hook rate needs no correction.`,
+  };
 }

@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
   computeConcentration, computeFatigue, computeCohorts, computeCostTrend, computeDayOfWeek, kpiMode,
-  type PackAdRow, type PackAccountRow,
+  computeHookCorrection,
+  type PackAdRow, type PackAccountRow, type PlacementHookRow,
 } from '../src/audit/report-pack.js';
 import { buildScorecard, cohortPosition } from '../src/audit/scorecard.js';
 
@@ -85,6 +86,25 @@ describe('creative fatigue — the binding rules', () => {
     expect((s.data.ads).find((a) => a.ad_name === 'blip')).toBeUndefined();
   });
 
+  it('PRO-TRUST: fatiguing set reports its current daily burn in account currency', () => {
+    const s = computeFatigue(
+      [...adRows('f1', 'decayer', 60, 300, (i) => 3.0 - (1.8 * i) / 59), ...adRows('x', 'noise', 30, 100, () => 2)],
+      1.0,
+      'SEK',
+    );
+    const d = s.data as { fatiguing_daily_burn: number; currency?: string };
+    expect(d.fatiguing_daily_burn).toBe(300); // the decayer spends 300/day, incl. its last 14 days
+    expect(d.currency).toBe('SEK');
+    expect(s.summary).toContain('SEK/day');
+    expect(s.derivation).toContain('last 14 active days');
+  });
+
+  it('runway of exactly 1 day says "within a day", never "1 days"', () => {
+    // steep decline: recent level just above breakeven, falling fast
+    const s = computeFatigue([...adRows('f1', 'cliff', 60, 300, (i) => 3.0 - (1.9 * i) / 59), ...adRows('x', 'noise', 30, 100, () => 2)]);
+    expect(s.summary).not.toMatch(/\b1 days\b/);
+  });
+
   it('FLOOR CAP: a very large account still assesses mid-size ads (NP regression)', () => {
     // Whale account: 90d × 50k/day = 4.5M total → uncapped 1% floor (45k)
     // excluded EVERY ad. The capped floor keeps a 6k-spend ad in scope.
@@ -127,10 +147,20 @@ describe('cost trend', () => {
     expect(s.next_step).toContain('creative problem');
   });
 
-  it('flat CPM = no action, honest', () => {
+  it('flat CPM = no action, honest, and NO invented cost figure', () => {
     const rows = Array.from({ length: 84 }, (_, i) => accRow(i, 9, 1.2));
-    const s = computeCostTrend(rows);
+    const s = computeCostTrend(rows, 'EUR');
     expect(s.summary).toContain('flat');
+    expect((s.data as { cpm_extra_cost_recent?: number }).cpm_extra_cost_recent).toBeUndefined();
+  });
+
+  it('PRO-TRUST: rising CPM quantifies the drift as "same impressions, opening prices"', () => {
+    const rows = Array.from({ length: 84 }, (_, i) => accRow(i, 8 + (6 * i) / 83, 1.5));
+    const s = computeCostTrend(rows, 'EUR');
+    const d = s.data as { cpm_extra_cost_recent?: number };
+    expect(d.cpm_extra_cost_recent).toBeGreaterThan(0);
+    expect(s.summary).toContain('EUR more than the same impressions');
+    expect(s.derivation).toContain('opening prices');
   });
 
   it('under 4 weeks is suppressed, not guessed', () => {
@@ -190,5 +220,69 @@ describe('scorecard', () => {
       expect(e.next_step.length).toBeGreaterThan(5);
       expect(e.section_key.length).toBeGreaterThan(3);
     }
+  });
+
+  it('PRO-TRUST: every entry carries a derivation ("how we got this")', () => {
+    const entries = buildScorecard({
+      hooks: { value: 12, cohortValues: [18, 22, 25, 28, 30, 35], cohortLabel: 'the 6 accounts on our desk (last 7 days)' },
+      concentration: { value: 65 }, freshness: { value: 8 }, cpmTrend: { value: 22 },
+    });
+    for (const e of entries) expect((e.derivation ?? '').length).toBeGreaterThan(20);
+  });
+
+  it('PRO-TRUST: a weak hook entry quantifies the gap in PEOPLE, never currency', () => {
+    const entries = buildScorecard({
+      hooks: { value: 12, cohortValues: [18, 22, 25, 28, 30, 35], cohortLabel: 'the 6 accounts on our desk (last 7 days)', impressions30: 1_000_000 },
+    });
+    const hooks = entries.find((e) => e.key === 'hooks')!;
+    // cohort median (small-cohort quantile) 28% − you 12% = 16pp × 1M imps = 160,000 more people past 3s
+    expect(hooks.quantified).toContain('160,000');
+    expect(hooks.quantified).toContain('people');
+    expect(hooks.quantified).not.toMatch(/[€$£]|EUR|SEK|USD/);
+  });
+
+  it('PRO-TRUST: a strong hook entry gets no gap line, and tiny gaps stay silent', () => {
+    const strong = buildScorecard({
+      hooks: { value: 35, cohortValues: [18, 22, 25, 28, 30, 33], cohortLabel: 'x accounts (last 7 days)', impressions30: 1_000_000 },
+    });
+    expect(strong.find((e) => e.key === 'hooks')!.quantified).toBeUndefined();
+    const tiny = buildScorecard({
+      hooks: { value: 24.9, cohortValues: [18, 22, 25, 28, 30, 33], cohortLabel: 'x accounts (last 7 days)', impressions30: 2_000 },
+    });
+    expect(tiny.find((e) => e.key === 'hooks')?.quantified).toBeUndefined();
+  });
+});
+
+describe('hook-rate correction (rewarded video — binding ruling #5)', () => {
+  const row = (platform: string, position: string, imps: number, views: number): PlacementHookRow => ({
+    publisher_platform: platform, platform_position: position, impressions: imps, video_views: views,
+  });
+
+  it('corrects the hook rate DOWN when rewarded video is material', () => {
+    const c = computeHookCorrection([
+      row('facebook', 'feed', 80_000, 16_000), // 20% real
+      row('audience_network', 'rewarded_video', 20_000, 19_000), // ~95% forced
+    ])!;
+    expect(c.material).toBe(true);
+    expect(c.reported_pct).toBe(35);
+    expect(c.corrected_pct).toBe(20);
+    expect(c.forced_share_pct).toBe(20);
+    expect(c.an_share_pct).toBe(20);
+    expect(c.note).toContain('force the view');
+  });
+
+  it('immaterial forced share stays honest — no correction claimed', () => {
+    const c = computeHookCorrection([
+      row('facebook', 'feed', 99_000, 19_800),
+      row('audience_network', 'rewarded_video', 1_000, 950),
+    ])!;
+    expect(c.material).toBe(false);
+  });
+
+  it('no forced views → says so; thin data → null', () => {
+    const clean = computeHookCorrection([row('facebook', 'feed', 50_000, 10_000)])!;
+    expect(clean.material).toBe(false);
+    expect(clean.note).toContain('no correction');
+    expect(computeHookCorrection([row('facebook', 'feed', 500, 100)])).toBeNull();
   });
 });

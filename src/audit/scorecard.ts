@@ -45,6 +45,18 @@ export interface ScorecardEntry {
   /** Which audit section carries the detail. */
   section_key: string;
   cohort: CohortBand | null;
+  /** "How we got this" (pro-trust layer) — rendered behind an expandable. */
+  derivation?: string;
+  /**
+   * The gap made concrete in the metric's OWN units (people, not invented
+   * currency) — persona fix #1: quantify each gap separately, never sum.
+   */
+  quantified?: string;
+  /**
+   * "We corrected your own metric down" (rewarded-video forced views) — the
+   * counter-vendor honesty beat. Set by the orchestrator when material.
+   */
+  correction?: { corrected_value: number; note: string };
 }
 
 const r1 = (v: number): number => Math.round(v * 10) / 10;
@@ -59,7 +71,7 @@ export function cohortPosition(value: number, cohort: number[]): { pctile: numbe
 
 export interface ScorecardInputs {
   /** Spend-weighted hook rate %, and the per-account cohort values (rates cross accounts safely). */
-  hooks?: { value: number; cohortValues: number[]; cohortLabel: string };
+  hooks?: { value: number; cohortValues: number[]; cohortLabel: string; impressions30?: number };
   hold?: { value: number; cohortValues: number[]; cohortLabel: string };
   /** From the cohort report: % of this month's spend on creatives launched in the last ~2 months. */
   freshness?: { value: number };
@@ -106,6 +118,10 @@ export function buildScorecard(inp: ScorecardInputs): ScorecardEntry[] {
             : `A genuine strength — protect what's producing it.`,
       section_key: sectionKey,
       cohort: { label: d.cohortLabel, n: d.cohortValues.length, median: r1(pos.median), p25: r1(pos.p25), p75: r1(pos.p75) },
+      derivation:
+        `Your number is spend-weighted across every ad with video delivery in the last 30 days — big spenders count for more, ` +
+        `exactly as your budget experiences it. The cohort is ${d.cohortLabel}, each account computed the same way. ` +
+        `Bands: top 40% of the cohort reads strong, bottom 35% weak.`,
     });
   };
 
@@ -116,6 +132,18 @@ export function buildScorecard(inp: ScorecardInputs): ScorecardEntry[] {
       `Closing the hook gap to the cohort median means meaningfully more people past 3 seconds on the SAME spend — new openings on your top spenders is the single lever.`,
       'creative_analysis',
     );
+    // Make the gap concrete in PEOPLE on the same spend (never invented
+    // currency — the persona test killed speculative € conversions).
+    const entry = entries.find((e) => e.key === 'hooks');
+    const imps = inp.hooks.impressions30;
+    if (entry && entry.band !== 'strong' && entry.cohort && imps && imps > 0 && entry.cohort.median > entry.value) {
+      const extraViewers = Math.round(((entry.cohort.median - entry.value) / 100) * imps);
+      if (extraViewers >= 100) {
+        entry.quantified =
+          `At your last-30-day volume, closing the gap to the cohort median is ≈${extraViewers.toLocaleString('en-US')} more people ` +
+          `past 3 seconds every month — same budget, different openings.`;
+      }
+    }
   }
   if (inp.hold) {
     benchmarked(
@@ -139,6 +167,7 @@ export function buildScorecard(inp: ScorecardInputs): ScorecardEntry[] {
       next_step: band === 'weak' ? `Set a monthly launch quota — the fatigue cliff builds exactly here.` : band === 'middle' ? `Nudge the launch cadence up; watch the cohort chart month over month.` : `Keep the cadence.`,
       section_key: 'creative_cohorts',
       cohort: null,
+      derivation: `The share of this month's spend on creatives that first spent in the last ~2 months — full method in the launch-cohorts report below.`,
     });
   }
   if (inp.concentration) {
@@ -155,6 +184,7 @@ export function buildScorecard(inp: ScorecardInputs): ScorecardEntry[] {
       next_step: band === 'weak' ? `Get 2-3 genuinely different concepts live this month.` : band === 'middle' ? `Keep one new concept entering test every other week.` : `Keep the testing cadence.`,
       section_key: 'spend_concentration',
       cohort: null,
+      derivation: `Your top 3 ads' share of the last 30 days' spend — full ranking in the concentration report below.`,
     });
   }
   if (inp.cpmTrend) {
@@ -171,6 +201,7 @@ export function buildScorecard(inp: ScorecardInputs): ScorecardEntry[] {
       next_step: band === 'weak' ? `Read the CPM section: if CTR fell with it, it's a creative problem first.` : `Baseline for the next audit.`,
       section_key: 'cost_trends',
       cohort: null,
+      derivation: `Your own weekly CPM, first third of the 90-day window vs the last third — never another account's prices. Decomposition in the cost report below.`,
     });
   }
 
