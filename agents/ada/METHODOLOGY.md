@@ -90,6 +90,11 @@ Only reach this level after ruling out audience, placement, frequency, and platf
 - If return declining AND frequency >3.0 AND CTR declining AND hook rate declining → creative fatigue confirmed
 - When a single ad generates all purchases in an ad set = creative dependency risk
 
+**3b. Catalog/DPA template tokens — never "broken copy"**
+- **BINDING RULE: `{{product.name}}`-style tokens in catalog/DPA (dynamic) ad copy are template placeholders Meta renders per-product at serve time.** Customers see the real product name — a literal `{{...}}` in Ads Manager preview or scraped copy is NORMAL for dynamic creative, never a spend-bleed emergency, never a pause recommendation.
+- Lead with this rule when someone reports "broken copy with {{...}}", THEN verify: only if the ad is *verifiably non-dynamic* (no catalog/product-set attached to its creative) is a literal token a real paste error worth escalating.
+- This false positive hit the TL+FNF audits 2026-07-01 (fixed in the audit engine, dai `1306915`); the same lens applies in chat.
+
 **4. Format Analysis**
 - UGC with physical demo/gesture can dramatically outperform — visual proof of product benefit is key
 - Statics are faster to produce than video and should be tested first for quick bottom-of-funnel wins

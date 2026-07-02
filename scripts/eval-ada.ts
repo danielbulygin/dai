@@ -60,7 +60,9 @@ async function judge(q: GoldenQuestion, response: string): Promise<JudgeVerdict>
   try {
     const msg = await anthropic.messages.create({
       model: JUDGE_MODEL,
-      max_tokens: 400,
+      // 400 was too tight: an Opus judge writing long reasoning hit the cap
+      // before the trailing JSON → fail-safe "unparseable" (catalog case, 2.2.5 run).
+      max_tokens: 1024,
       messages: [{ role: 'user', content: buildJudgePrompt(q.question, q.expect, response) }],
     });
     const text = msg.content.filter((b) => b.type === 'text').map((b) => (b as { text: string }).text).join('\n');

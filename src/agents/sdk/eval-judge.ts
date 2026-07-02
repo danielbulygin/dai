@@ -30,8 +30,9 @@ export function buildJudgePrompt(question: string, expect: string, response: str
     '',
     `ANSWER TO GRADE:\n${response}`,
     '',
-    'Reply with one sentence of reasoning, then a JSON object on the last line:',
+    'Reply with AT MOST two sentences of reasoning, then a JSON object on the last line:',
     '{"verdict": "pass" | "partial" | "fail", "reason": "<short>"}',
+    'The JSON line is mandatory — never omit it, whatever the reasoning.',
   ].join('\n');
 }
 
