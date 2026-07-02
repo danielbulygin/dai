@@ -19,7 +19,7 @@
     {
       "id": "press-monthly-spend",
       "question": "How much is Press London spending on Meta per month? Please look at ad spend back until January 2026.",
-      "expect": "Monthly spend breakdown for PL since Jan 2026; covers both Press accounts if applicable; states source + freshness. (Vanessa's 2026-06-05 ask.)"
+      "expect": "Monthly Meta spend breakdown for BOTH Press accounts from the first month with delivery (Naturally Better from Apr 30, V2 from May 19); states plainly that Jan–Mar 2026 had ZERO ad delivery on both accounts (account reality, verified against Meta directly 2026-07-02 — not missing/unsynced data); states source + freshness. Wrong: apologizing for a 'data limit', or inventing Jan–Mar numbers. (Vanessa's 2026-06-05 ask; ground truth re-established Session D via read-only Meta backfill — 0 rows in every Jan–Apr chunk.)"
     },
     {
       "id": "capability-rename",
