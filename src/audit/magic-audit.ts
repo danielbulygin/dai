@@ -10,9 +10,11 @@ import { extractJson, triageLibrary, type LibraryAd } from './library-triage.js'
 import { buildClientKnowledgeBundle } from '../agents/client-context.js';
 import {
   computeConcentration, computeFatigue, computeCohorts, computeCostTrend, computeDayOfWeek,
-  type PackAdRow, type PackAccountRow,
+  computeConceptRoas, computeOptimizationEvents, buildProvisionalInsights,
+  type PackAdRow, type PackAccountRow, type AdsetConfigLite, type FatigueAd,
 } from './report-pack.js';
 import { buildScorecard, type ScorecardInputs } from './scorecard.js';
+import { buildAccountModel, mergeAccountModel, type AccountModel, type AccountModelInputs } from './account-model.js';
 
 /**
  * Magic Audit orchestrator (master-plan B1, expanded 2026-06-11: creative /
@@ -71,6 +73,8 @@ const SECTION_ORDER: Array<Pick<AuditSection, 'key' | 'title' | 'status'>> = [
   { key: 'creative_cohorts', title: 'Creative Cohorts — living off old creative?', status: 'pending' },
   { key: 'cost_trends', title: 'CPM & Auction Pressure', status: 'pending' },
   { key: 'timing_patterns', title: 'Day-of-Week Pattern', status: 'pending' },
+  { key: 'concept_roas', title: 'Creative Angles — spend vs return by concept', status: 'pending' },
+  { key: 'optimization_events', title: 'Optimization Events — is Meta hunting the right thing?', status: 'pending' },
   { key: 'creative_analysis', title: 'Creative Performance & Angles', status: 'pending' },
   { key: 'funnel_read', title: 'Funnel Diagnosis', status: 'pending' },
   { key: 'competitor_teardown', title: 'Ads Library Landscape', status: 'pending' },
@@ -528,7 +532,7 @@ function funnelStages(t: Record<string, number>, currency: string): Array<{ stag
     ['Add to cart', t.add_to_carts ?? 0],
     ['Checkout initiated', t.checkouts_initiated ?? 0],
     ['Purchases', t.purchases ?? 0],
-  ].filter(([, v]) => v > 0 || true);
+  ];
   return chain.map(([stage, value], i) => ({
     stage,
     value,
@@ -684,14 +688,18 @@ async function apifyScrapePage(pageId: string, count: number, meter: CostMeter):
   return items.filter((a) => a && !('error' in a));
 }
 
+function metaTokenFor(clientCode: string): string | undefined {
+  const e = process.env;
+  const GROWTHSQUAD = new Set(['LA', 'LA2', 'TL']);
+  return GROWTHSQUAD.has(clientCode.toUpperCase()) && e.META_ACCESS_TOKEN_GROWTHSQUAD
+    ? e.META_ACCESS_TOKEN_GROWTHSQUAD
+    : env.META_ACCESS_TOKEN;
+}
+
 /** Resolve the client's own FB page from a live ad's effective_object_story_id. */
 async function resolveOwnPage(clientCode: string, adAccountId: string | null): Promise<{ name: string; pageId: string } | null> {
   if (!adAccountId) return null;
-  const e = process.env;
-  const GROWTHSQUAD = new Set(['LA', 'LA2', 'TL']);
-  const token = GROWTHSQUAD.has(clientCode.toUpperCase()) && e.META_ACCESS_TOKEN_GROWTHSQUAD
-    ? e.META_ACCESS_TOKEN_GROWTHSQUAD
-    : env.META_ACCESS_TOKEN;
+  const token = metaTokenFor(clientCode);
   if (!token) return null;
   const acct = adAccountId.startsWith('act_') ? adAccountId : `act_${adAccountId}`;
   const resp = await fetch(
@@ -786,6 +794,162 @@ async function runCompetitorTeardown(
 }
 
 // ---------------------------------------------------------------------------
+// Session D — read-only adset configs, angle map, account model, recognition
+// ---------------------------------------------------------------------------
+
+/** READ-ONLY GET of ad-set optimization configs. Audits never write to Meta. */
+async function fetchAdsetConfigs(clientCode: string, adAccountId: string | null): Promise<AdsetConfigLite[]> {
+  if (!adAccountId) return [];
+  const token = metaTokenFor(clientCode);
+  if (!token) return [];
+  const acct = adAccountId.startsWith('act_') ? adAccountId : `act_${adAccountId}`;
+  const out: AdsetConfigLite[] = [];
+  let url =
+    `https://graph.facebook.com/v21.0/${acct}/adsets` +
+    `?fields=id,name,optimization_goal,effective_status,promoted_object{custom_event_type}` +
+    `&limit=200&access_token=${token}`;
+  for (let page = 0; page < 5 && url; page++) {
+    const resp = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+    if (!resp.ok) throw new Error(`adsets read failed: ${resp.status}`);
+    const body = (await resp.json()) as {
+      data?: Array<{ id: string; name: string; optimization_goal?: string; effective_status?: string; promoted_object?: { custom_event_type?: string } }>;
+      paging?: { next?: string };
+    };
+    for (const a of body.data ?? []) {
+      out.push({
+        adset_id: a.id,
+        adset_name: a.name,
+        optimization_goal: a.optimization_goal ?? null,
+        custom_event_type: a.promoted_object?.custom_event_type ?? null,
+        effective_status: a.effective_status ?? null,
+      });
+    }
+    url = body.paging?.next ?? '';
+  }
+  return out;
+}
+
+/** messaging-angle per ad_id: creatives (hash cols) → creative_analysis.ai_analysis. */
+async function fetchAngleByAdId(clientId: string, adIds: Set<string>): Promise<Map<string, string>> {
+  const angleByAd = new Map<string, string>();
+  if (adIds.size === 0) return angleByAd;
+  const creatives = await pageAll<{ ad_id: string; video_hash: string | null; video_id: string | null; image_hash: string | null }>(
+    'creatives',
+    'ad_id, video_hash, video_id, image_hash',
+    (q) => q.eq('client_id', clientId),
+    20_000,
+  );
+  const hashByAd = new Map<string, string>();
+  for (const c of creatives) {
+    if (!adIds.has(String(c.ad_id))) continue;
+    const h = c.video_hash ?? (c.video_id != null ? String(c.video_id) : null) ?? c.image_hash;
+    if (h) hashByAd.set(String(c.ad_id), String(h));
+  }
+  const hashes = [...new Set(hashByAd.values())];
+  const angleByHash = new Map<string, string>();
+  // Chunked .in() — hundreds of hashes in one GET would blow the URL length.
+  for (let i = 0; i < hashes.length; i += 100) {
+    const { data, error } = await getSupabase()
+      .from('creative_analysis')
+      .select('content_hash, ai_analysis')
+      .in('content_hash', hashes.slice(i, i + 100));
+    if (error) throw new Error(`creative_analysis query failed: ${error.message}`);
+    for (const row of (data ?? []) as Array<{ content_hash: string; ai_analysis: Record<string, unknown> | null }>) {
+      const angle = row.ai_analysis?.['messaging_angle'];
+      if (typeof angle === 'string' && angle.trim()) angleByHash.set(String(row.content_hash), angle.trim());
+    }
+  }
+  for (const [adId, h] of hashByAd) {
+    const angle = angleByHash.get(h);
+    if (angle) angleByAd.set(adId, angle);
+  }
+  return angleByAd;
+}
+
+/** Instant recognition strip — one cheap account_daily query, lands with the row insert. */
+async function quickRecognition(clientId: string, currency: string): Promise<Record<string, unknown> | null> {
+  try {
+    const rows = await pageAll<{ date: string; spend: number }>(
+      'account_daily', 'date, spend', (q) => q.eq('client_id', clientId).gte('date', daysAgoISO(90)), 200,
+    );
+    if (rows.length === 0) return null;
+    const spend = rows.reduce((s, r) => s + num(r.spend), 0);
+    return { window_days: 90, days_covered: rows.length, spend_90d: Math.round(spend), currency };
+  } catch {
+    return null;
+  }
+}
+
+/** Upsert the Account Model — human_stated facts survive re-inference (merge rule). */
+async function upsertAccountModel(clientCode: string, auditId: string, model: AccountModel): Promise<void> {
+  const supabase = getSupabase();
+  const { data: prev } = await supabase
+    .from('account_models')
+    .select('id, facts, version')
+    .eq('client_code', clientCode)
+    .maybeSingle();
+  const merged = mergeAccountModel(
+    prev ? { facts: ((prev.facts as AccountModel['facts']) ?? []) } : null,
+    model,
+  );
+  const payload = {
+    client_code: clientCode,
+    audit_id: auditId,
+    business_model: merged.business_model,
+    facts: merged.facts,
+    open_questions: merged.open_questions,
+    version: prev ? ((prev.version as number) ?? 1) + 1 : 1,
+    updated_at: new Date().toISOString(),
+  };
+  const { error } = prev
+    ? await supabase.from('account_models').update(payload).eq('id', prev.id as string)
+    : await supabase.from('account_models').insert(payload);
+  if (error) throw new Error(`account_models upsert failed: ${error.message}`);
+}
+
+/** One honest work-receipt line per finished section — real numbers, no theater. */
+function workLineFor(key: string, s: AuditSection): string | null {
+  if (s.status !== 'complete') return null;
+  const d = (s.data ?? {}) as Record<string, unknown>;
+  switch (key) {
+    case 'dataset_health': {
+      const pixels = (d.pixels as unknown[] | undefined)?.length ?? 0;
+      return pixels ? `Checked ${pixels} pixel dataset${pixels > 1 ? 's' : ''} — events, CAPI split, match keys` : null;
+    }
+    case 'account_structure': {
+      const n = (d.campaigns as unknown[] | undefined)?.length ?? 0;
+      return n ? `Mapped ${n} campaigns and how budget flows through them` : null;
+    }
+    case 'spend_concentration':
+      return typeof d.ads_with_spend === 'number' ? `Measured spend concentration across ${d.ads_with_spend} active ads` : null;
+    case 'creative_fatigue':
+      return typeof d.assessed_ads === 'number' ? `Ran 90-day fatigue trends on ${d.assessed_ads} ads` : null;
+    case 'creative_cohorts':
+      return typeof d.window_months === 'number' ? `Rebuilt ${d.window_months} months of creative launch cohorts` : null;
+    case 'cost_trends': {
+      const n = (d.series as unknown[] | undefined)?.length ?? 0;
+      return n ? `Read ${n} weeks of CPM × CTR history` : null;
+    }
+    case 'timing_patterns':
+      return `Split 90 days of results by weekday`;
+    case 'concept_roas':
+      return typeof d.coverage_pct === 'number' ? `Matched creative angle tags on ${d.coverage_pct}% of spend` : null;
+    case 'optimization_events': {
+      const rows = (d.rows as unknown[] | undefined)?.length ?? 0;
+      return rows ? `Read the optimization goal on ${rows} spending ad sets` : null;
+    }
+    case 'creative_analysis':
+      return typeof d.ads_with_spend === 'number' ? `Read the copy + transcripts of the top spenders (${d.ads_with_spend} ads in market)` : null;
+    case 'funnel_read':
+      return `Walked the funnel stage by stage (30 days)`;
+    case 'competitor_teardown':
+      return `Scanned the public Ads Library footprint`;
+    default:
+      return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // B3 — lead-insight ranking across all completed sections
 // ---------------------------------------------------------------------------
 
@@ -868,9 +1032,13 @@ export async function runMagicAudit(
   const sections: Record<string, AuditSection> = {};
   for (const s of SECTION_ORDER) sections[s.key] = { ...s, status: skip.has(s.key) ? 'planned' : s.status };
 
+  // Recognition strip — seeded AT insert so the very first paint already says
+  // "that's MY account" (UX review §2.1: recognition is the first magic beat).
+  const recognition = await quickRecognition(client.id, client.currency);
+
   const { data: row, error } = await supabase
     .from('magic_audits')
-    .insert({ token, client_code: code, client_name: client.name, sections })
+    .insert({ token, client_code: code, client_name: client.name, sections, recognition })
     .select('id')
     .single();
   if (error || !row) throw new Error(`audit row insert failed: ${error?.message}`);
@@ -889,23 +1057,70 @@ export async function runMagicAudit(
     await updateRow({ sections, cost_usd: round2(meter.spentUsd) });
   };
 
+  // Work narration → permanent work receipt (UX review §2.3: progress IS value;
+  // every line carries a real number from work actually done).
+  const workLog: Array<{ at: string; line: string }> = [];
+  const logWork = async (line: string | null): Promise<void> => {
+    if (!line) return;
+    workLog.push({ at: new Date().toISOString(), line });
+    await updateRow({ work_log: workLog });
+  };
+
   // --- Fast tier (Phase C): shared deterministic pulls, fetched ONCE ---------
   // Each dataset is fail-soft: a failed pull turns its sections into honest
   // errors, never kills the audit.
-  const PACK_AD_COLS = 'ad_id, ad_name, date, spend, impressions, purchases, purchase_value, results, frequency, hook_rate, hold_rate';
+  const PACK_AD_COLS = 'ad_id, ad_name, adset_id, date, spend, impressions, purchases, purchase_value, results, frequency, hook_rate, hold_rate';
   let packRows90: PackAdRow[] = [];
   let packRows180: Array<Pick<PackAdRow, 'ad_id' | 'date' | 'spend'>> = [];
   let packAccRows90: PackAccountRow[] = [];
+  let accFull30: Array<Record<string, unknown>> = [];
+  let landing30: Array<{ spend: number; landing_page_market: string | null; landing_page_path: string | null }> = [];
   try {
-    [packRows90, packRows180, packAccRows90] = await Promise.all([
+    [packRows90, packRows180, packAccRows90, accFull30, landing30] = await Promise.all([
       pageAll<PackAdRow>('ad_daily', PACK_AD_COLS, (q) => q.eq('client_id', client.id).gte('date', daysAgoISO(90)), 40_000),
       pageAll<Pick<PackAdRow, 'ad_id' | 'date' | 'spend'>>('ad_daily', 'ad_id, date, spend', (q) => q.eq('client_id', client.id).gte('date', daysAgoISO(180)), 60_000),
       pageAll<PackAccountRow>('account_daily', 'date, spend, impressions, link_clicks, purchases, purchase_value, results', (q) => q.eq('client_id', client.id).gte('date', daysAgoISO(90)), 200),
+      pageAll<Record<string, unknown>>(
+        'account_daily',
+        'date, spend, impressions, clicks, link_clicks, content_views, add_to_carts, checkouts_initiated, purchases, purchase_value, leads, complete_registrations, results',
+        (q) => q.eq('client_id', client.id).gte('date', daysAgoISO(30)),
+        200,
+      ),
+      pageAll<{ spend: number; landing_page_market: string | null; landing_page_path: string | null }>(
+        'ad_daily',
+        'spend, landing_page_market, landing_page_path',
+        (q) => q.eq('client_id', client.id).gte('date', daysAgoISO(30)),
+        40_000,
+      ),
     ]);
   } catch (err) {
     logger.warn({ err, code }, 'report-pack shared pulls failed (fast sections degrade)');
   }
   const rows30 = packRows90.filter((r) => r.date >= daysAgoISO(30));
+  const accountTotals30 = accFull30.length > 0 ? aggregateDaily(accFull30) : null;
+
+  // The recognition strip gets its ads count the moment we know it (seconds in).
+  {
+    const adsCount = new Set(packRows90.map((r) => r.ad_id)).size;
+    const daysCount = new Set(packRows90.map((r) => r.date)).size;
+    if (recognition && adsCount > 0) {
+      await updateRow({ recognition: { ...recognition, ads_count: adsCount } });
+    }
+    await logWork(
+      adsCount > 0
+        ? `Read ${adsCount} ads × ${daysCount} days of ad-level delivery history`
+        : `Read the account's delivery history`,
+    );
+  }
+
+  // Optimization-event configs feed BOTH the correctness report and the
+  // Account Model's "what Meta is told to optimize for" fact.
+  let adsetConfigsForModel: AdsetConfigLite[] = [];
+  const spendByAdset = new Map<string, number>();
+  for (const r of rows30) {
+    if (!r.adset_id) continue;
+    spendByAdset.set(String(r.adset_id), (spendByAdset.get(String(r.adset_id)) ?? 0) + (r.spend || 0));
+  }
 
   const RUNNERS: Record<string, () => Promise<Partial<AuditSection>>> = {
     dataset_health: () => runDatasetHealth(code),
@@ -915,6 +1130,19 @@ export async function runMagicAudit(
     creative_cohorts: async () => computeCohorts(packRows180),
     cost_trends: async () => computeCostTrend(packAccRows90),
     timing_patterns: async () => computeDayOfWeek(packAccRows90),
+    concept_roas: async () => {
+      const angleByAdId = await fetchAngleByAdId(client.id, new Set(rows30.map((r) => r.ad_id)));
+      return computeConceptRoas(rows30, angleByAdId);
+    },
+    optimization_events: async () => {
+      adsetConfigsForModel = await fetchAdsetConfigs(code, client.adAccountId);
+      const t = accountTotals30 ?? { purchases: 0, leads: 0, purchase_value: 0 };
+      return computeOptimizationEvents(adsetConfigsForModel, spendByAdset, {
+        purchases: t.purchases ?? 0,
+        leads: t.leads ?? 0,
+        purchase_value: t.purchase_value ?? 0,
+      });
+    },
     creative_analysis: () => runCreativeAnalysis(code, meter, client, synthSystem),
     funnel_read: () => runFunnelRead(code, meter, client, synthSystem),
     competitor_teardown: () => runCompetitorTeardown(code, meter, client, options, synthSystem),
@@ -966,8 +1194,69 @@ export async function runMagicAudit(
       const scorecard = buildScorecard(inputs);
       if (scorecard.length) await updateRow({ scorecard });
       logger.info({ code, dimensions: scorecard.map((e) => `${e.key}:${e.band}`) }, 'scorecard computed');
+
+      // Provisional top-3 lead insights the moment the fast tier lands — the
+      // top of the page must never be the LAST thing to arrive (UX review
+      // §2.2). The end-of-audit LLM ranking overwrites these.
+      const provisional = buildProvisionalInsights(
+        scorecard,
+        sections['creative_fatigue']?.data as { ads?: FatigueAd[] } | undefined,
+        sections['spend_concentration']?.data as Record<string, never> | undefined,
+      );
+      if (provisional.length) await updateRow({ lead_insights: provisional });
     } catch (err) {
       logger.warn({ err, code }, 'scorecard computation failed (audit continues)');
+    }
+  };
+
+  // The Account Model — the audit WRITES durable context, not just a report
+  // (context design C1: the audit is the context bootstrap). Fail-soft.
+  const writeAccountModelSafely = async (): Promise<void> => {
+    try {
+      if (!accountTotals30) return;
+      const marketAgg = new Map<string, number>();
+      const pathAgg = new Map<string, number>();
+      for (const r of landing30) {
+        if (r.landing_page_market) marketAgg.set(r.landing_page_market, (marketAgg.get(r.landing_page_market) ?? 0) + num(r.spend));
+        if (r.landing_page_path) pathAgg.set(r.landing_page_path, (pathAgg.get(r.landing_page_path) ?? 0) + num(r.spend));
+      }
+      const goalAgg = new Map<string, number>();
+      for (const a of adsetConfigsForModel) {
+        const spend = spendByAdset.get(a.adset_id) ?? 0;
+        if (spend <= 0) continue;
+        const goal = (a.optimization_goal ?? 'UNKNOWN') + (a.custom_event_type ? ` → ${a.custom_event_type}` : '');
+        goalAgg.set(goal, (goalAgg.get(goal) ?? 0) + spend);
+      }
+      const structData = sections['account_structure']?.data as { campaigns?: Array<{ name: string; spend: number }> } | undefined;
+      const creativeSpend = rows30.reduce((s, r) => s + (r.spend || 0), 0);
+      const videoSpend = rows30.filter((r) => (r.hook_rate ?? 0) > 0 || (r.hold_rate ?? 0) > 0).reduce((s, r) => s + (r.spend || 0), 0);
+      const inputs: AccountModelInputs = {
+        currency: client.currency,
+        observedAt: new Date().toISOString(),
+        totals30: {
+          spend: accountTotals30.spend ?? 0,
+          impressions: accountTotals30.impressions ?? 0,
+          purchases: accountTotals30.purchases ?? 0,
+          purchase_value: accountTotals30.purchase_value ?? 0,
+          leads: accountTotals30.leads ?? 0,
+          complete_registrations: accountTotals30.complete_registrations ?? 0,
+          add_to_carts: accountTotals30.add_to_carts ?? 0,
+          checkouts_initiated: accountTotals30.checkouts_initiated ?? 0,
+          content_views: accountTotals30.content_views ?? 0,
+        },
+        adsWithSpend30: new Set(rows30.filter((r) => (r.spend || 0) > 0).map((r) => r.ad_id)).size,
+        videoSpendSharePct: creativeSpend > 0 ? Math.round((videoSpend / creativeSpend) * 100) : null,
+        campaigns: structData?.campaigns ?? [],
+        markets: [...marketAgg.entries()].map(([market, spend]) => ({ market, spend })),
+        landingPaths: [...pathAgg.entries()].map(([path, spend]) => ({ path, spend })),
+        optimizationGoals: goalAgg.size > 0 ? [...goalAgg.entries()].map(([goal, spend]) => ({ goal, spend })) : undefined,
+      };
+      const model = buildAccountModel(inputs);
+      await upsertAccountModel(code, auditId, model);
+      await logWork(`Wrote down what we understood about your business (${model.facts.length} facts) — check the "correct us" section`);
+      logger.info({ code, facts: model.facts.length, businessModel: model.business_model }, 'account model written');
+    } catch (err) {
+      logger.warn({ err, code }, 'account model write failed (audit continues)');
     }
   };
 
@@ -986,6 +1275,7 @@ export async function runMagicAudit(
         completed_at: new Date().toISOString(),
       });
       if (partial.status === 'error') anyError = true;
+      else await logWork(workLineFor(def.key, sections[def.key]!));
     } catch (err) {
       anyError = true;
       await saveSection({
@@ -995,9 +1285,13 @@ export async function runMagicAudit(
       });
       logger.error({ err, section: def.key }, 'audit section failed');
     }
-    // The fast tier ends at timing_patterns — the scorecard lands NOW (seconds
-    // in), not after the LLM sections finish minutes later.
+    // The 5-report fast tier ends at timing_patterns — the scorecard +
+    // provisional lead insights land NOW (seconds in), not after the LLM
+    // sections finish minutes later.
     if (def.key === 'timing_patterns') await computeAndSaveScorecard();
+    // All deterministic evidence is in after the ad-set config read — write
+    // the Account Model here so the "correct us" section renders early too.
+    if (def.key === 'optimization_events') await writeAccountModelSafely();
   }
 
   // B3 — rank the lead insights across everything that completed

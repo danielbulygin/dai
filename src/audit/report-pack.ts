@@ -33,6 +33,8 @@ export interface PackAdRow {
   frequency: number | null;
   hook_rate: number | null;
   hold_rate: number | null;
+  /** Present on the 90d pull since Session D (optimization-event spend mapping). */
+  adset_id?: string | null;
 }
 
 export interface PackAccountRow {
@@ -452,4 +454,314 @@ export function computeDayOfWeek(accRows90: PackAccountRow[]): PackSection {
         : `The gap is modest — don't build schedule complexity for ${r1(gap)}%; just keep it on the watchlist.`,
     data: { kpi_mode: mode, kpi_label: kpiLabel, rows, best_day: best.day, worst_day: worst.day, gap_pct: r1(gap) },
   };
+}
+
+// ---------------------------------------------------------------------------
+// 6. Creative concept/angle ROAS (Dan's confirmed set — Session D)
+// ---------------------------------------------------------------------------
+
+/**
+ * Group 30d spend/return by the Gemini messaging-angle tag. The join
+ * (ad_id → content_hash → ai_analysis.messaging_angle) happens in the
+ * orchestrator; this stays pure.
+ *
+ * BINDING (design spec, Francis "be smarter" fix): if the best-returning angle
+ * is a discount/offer angle, do NOT say "do more discounts" — over-indexing on
+ * discounts empties the funnel and trains the audience to wait. The report
+ * flags it instead of scaling it.
+ */
+const DISCOUNT_ANGLE = /discount|offer|sale|promo|rabatt|deal|coupon|voucher|%\s*off|prozent/i;
+
+export function computeConceptRoas(
+  rows30: PackAdRow[],
+  angleByAdId: Map<string, string>,
+): PackSection {
+  const mode = kpiMode(rows30);
+  const byAngle = new Map<string, { spend: number; value: number; results: number; purchases: number; ads: Set<string> }>();
+  let total = 0;
+  let taggedSpend = 0;
+  for (const r of rows30) {
+    total += r.spend || 0;
+    const angle = angleByAdId.get(r.ad_id);
+    if (!angle) continue;
+    taggedSpend += r.spend || 0;
+    const a = byAngle.get(angle) ?? { spend: 0, value: 0, results: 0, purchases: 0, ads: new Set<string>() };
+    a.spend += r.spend || 0;
+    a.value += r.purchase_value || 0;
+    a.results += r.results || 0;
+    a.purchases += r.purchases || 0;
+    a.ads.add(r.ad_id);
+    byAngle.set(angle, a);
+  }
+  const coverage = pct(taggedSpend, total);
+
+  if (byAngle.size < 2 || coverage < 25) {
+    return {
+      summary: `Not enough angle-tagged creative to read concept performance (${coverage}% of spend has an analyzed angle tag).`,
+      next_step: `Run the creative-intelligence analyzer across the account's active ads, then re-audit — this report needs the Gemini angle tags.`,
+      data: { coverage_pct: coverage, angles: [] },
+      warnings: ['Thin angle coverage — concept read suppressed rather than guessed.'],
+    };
+  }
+
+  // Statistical floor: angles below it fold into "other" instead of pretending precision.
+  const floor = Math.max(200, taggedSpend * 0.03);
+  const angles = [...byAngle.entries()]
+    .map(([angle, a]) => ({
+      angle,
+      spend: Math.round(a.spend),
+      spend_share_pct: pct(a.spend, taggedSpend),
+      kpi: mode === 'roas' ? r2(div(a.value, a.spend)) : r2(div(a.spend, a.results || 1)),
+      ads: a.ads.size,
+      results: mode === 'roas' ? a.purchases : a.results,
+      below_floor: a.spend < floor,
+    }))
+    .sort((a, b) => b.spend - a.spend);
+  const assessed = angles.filter((a) => !a.below_floor);
+  const kpiLabel = mode === 'roas' ? 'Meta ROAS' : 'cost per result';
+  const better = (a: { kpi: number }, b: { kpi: number }) => (mode === 'roas' ? b.kpi - a.kpi : a.kpi - b.kpi);
+  const ranked = [...assessed].sort(better);
+  const best = ranked[0];
+  const biggest = assessed[0];
+
+  const warnings: string[] = [];
+  let discountFlag = false;
+  if (best && DISCOUNT_ANGLE.test(best.angle)) {
+    discountFlag = true;
+    warnings.push(
+      `Best ${kpiLabel} sits on a discount/offer angle ("${best.angle}") — that is NOT a green light to scale discounts. ` +
+      `Discount creative usually harvests demand the other angles created; over-indexing on it empties the funnel and trains buyers to wait for deals.`,
+    );
+  }
+  if (coverage < 60) {
+    warnings.push(`Angle tags cover ${coverage}% of spend — the untagged remainder is not represented here.`);
+  }
+
+  const underfunded = best && biggest && best.angle !== biggest.angle && !discountFlag ? best : null;
+
+  return {
+    summary: best && biggest
+      ? `${assessed.length} creative angles carry real spend. Biggest budget: "${biggest.angle}" (${biggest.spend_share_pct}% of tagged spend, ${kpiLabel} ${biggest.kpi}). ` +
+        (best.angle === biggest.angle
+          ? `It's also the best performer — budget and performance agree here.`
+          : `Best performer: "${best.angle}" (${kpiLabel} ${best.kpi} on ${best.spend_share_pct}% of tagged spend).`)
+      : `Angle performance computed on ${coverage}% tag coverage.`,
+    next_step: discountFlag
+      ? `Scale the best NON-discount angle instead, and keep the discount angle as a harvest layer — watch new-customer share if you push it.`
+      : underfunded
+        ? `"${underfunded.angle}" out-earns the biggest budget line — shift test budget toward it and brief 2 new variations on that angle.`
+        : `Budget already follows performance across angles — keep the current allocation and test a genuinely new angle for diversity.`,
+    data: {
+      window_days: 30,
+      kpi_mode: mode,
+      kpi_label: kpiLabel,
+      coverage_pct: coverage,
+      angles: angles.slice(0, 10),
+      discount_flag: discountFlag,
+    },
+    warnings: warnings.length ? warnings : undefined,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 7. Optimization-event correctness (the "1 check / 2 X" panel)
+// ---------------------------------------------------------------------------
+
+export interface AdsetConfigLite {
+  adset_id: string;
+  adset_name: string;
+  optimization_goal: string | null;
+  custom_event_type: string | null;
+  effective_status: string | null;
+}
+
+/** Soft signals that never pay the bills when real conversions exist. */
+const SOFT_GOALS = new Set(['LINK_CLICKS', 'LANDING_PAGE_VIEWS', 'THRUPLAY', 'POST_ENGAGEMENT', 'REACH', 'IMPRESSIONS', 'PAGE_LIKES', 'VIDEO_VIEWS']);
+const MID_FUNNEL_EVENTS = new Set(['ADD_TO_CART', 'INITIATED_CHECKOUT', 'CONTENT_VIEW', 'ADD_TO_WISHLIST', 'SEARCH']);
+
+export function computeOptimizationEvents(
+  adsets: AdsetConfigLite[],
+  spendByAdset: Map<string, number>,
+  totals30: { purchases: number; leads: number; purchase_value: number },
+): PackSection {
+  // What SHOULD this account optimize for? Revenue accounts → Purchase;
+  // lead accounts → Lead. Mirrors the account-model classification.
+  const wantsPurchase = totals30.purchase_value > 0 && totals30.purchases > 0;
+  const wantsLead = !wantsPurchase && totals30.leads > totals30.purchases;
+  const targetWord = wantsPurchase ? 'Purchase' : wantsLead ? 'Lead' : 'your real conversion';
+  // Enough weekly conversion volume that optimizing on the real event is viable
+  // (Meta's ~50/week learning heuristic, halved to be conservative per ad set).
+  const conversionVolume = wantsPurchase ? totals30.purchases : totals30.leads;
+  const volumeOk = conversionVolume >= 100; // ~25/week account-wide
+
+  const rows = adsets
+    .map((a) => {
+      const spend = spendByAdset.get(a.adset_id) ?? 0;
+      const goal = (a.optimization_goal ?? 'UNKNOWN').toUpperCase();
+      const event = (a.custom_event_type ?? '').toUpperCase();
+      let verdict: 'check' | 'x' | 'question';
+      let reason: string;
+      if (goal === 'OFFSITE_CONVERSIONS' && (event === 'PURCHASE' || (!wantsPurchase && event === 'LEAD'))) {
+        verdict = 'check';
+        reason = `Optimizing for ${event.toLowerCase()} — matches what the account actually sells.`;
+      } else if (goal === 'OFFSITE_CONVERSIONS' && wantsPurchase && event === 'LEAD') {
+        verdict = 'x';
+        reason = `Optimizing for Lead on a revenue account — Meta hunts form-fillers, not buyers.`;
+      } else if (goal === 'OFFSITE_CONVERSIONS' && MID_FUNNEL_EVENTS.has(event)) {
+        verdict = volumeOk ? 'x' : 'question';
+        reason = volumeOk
+          ? `Optimizing for ${event.replace(/_/g, ' ').toLowerCase()} while the account records ${conversionVolume} ${targetWord.toLowerCase()}s in 30 days — Meta will find carts, not ${targetWord.toLowerCase()}s. Move to ${targetWord}.`
+          : `Mid-funnel event — sometimes a deliberate learning-volume choice at ${conversionVolume} ${targetWord.toLowerCase()}s/30d; confirm it's intentional.`;
+      } else if (SOFT_GOALS.has(goal)) {
+        verdict = conversionVolume >= 30 ? 'x' : 'question';
+        reason = conversionVolume >= 30
+          ? `Optimizing for ${goal.replace(/_/g, ' ').toLowerCase()} while the pixel records real ${targetWord.toLowerCase()}s — this buys the cheapest clicks, not customers.`
+          : `Soft goal — with thin conversion volume this may be deliberate; confirm the intent.`;
+      } else if (goal === 'OFFSITE_CONVERSIONS' && !event) {
+        verdict = 'question';
+        reason = `Conversion-optimized but the event could not be read from the config.`;
+      } else if (goal === 'APP_INSTALLS' || goal === 'VALUE' || goal === 'OFFSITE_CONVERSIONS' || goal === 'CONVERSATIONS' || goal === 'LEAD_GENERATION' || goal === 'QUALITY_LEAD') {
+        verdict = 'check';
+        reason = `Conversion-class goal (${goal.replace(/_/g, ' ').toLowerCase()}).`;
+      } else {
+        verdict = 'question';
+        reason = `Unrecognized goal "${goal}" — read it manually before judging.`;
+      }
+      return {
+        adset_name: a.adset_name,
+        goal: goal + (event ? ` → ${event}` : ''),
+        spend_30d: Math.round(spend),
+        verdict,
+        reason,
+      };
+    })
+    .filter((r) => r.spend_30d > 0)
+    .sort((a, b) => b.spend_30d - a.spend_30d);
+
+  if (rows.length === 0) {
+    return {
+      summary: `No ad sets with spend could be matched to a readable optimization config.`,
+      next_step: `Check the ad-set config read — this report needs it.`,
+      data: { rows: [] },
+      warnings: ['Ad-set config read returned nothing usable — report suppressed.'],
+    };
+  }
+
+  const totalSpend = rows.reduce((s, r) => s + r.spend_30d, 0);
+  const misSpend = rows.filter((r) => r.verdict === 'x').reduce((s, r) => s + r.spend_30d, 0);
+  const checks = rows.filter((r) => r.verdict === 'check').length;
+  const xs = rows.filter((r) => r.verdict === 'x').length;
+  const qs = rows.filter((r) => r.verdict === 'question').length;
+
+  return {
+    summary: xs === 0
+      ? `All ${rows.length} spending ad sets optimize for the right thing (${targetWord}-class events). This is the foundational setting most accounts get wrong — yours is clean.`
+      : `${xs} of ${rows.length} spending ad sets optimize for the WRONG event — ${pct(misSpend, totalSpend)}% of spend (${Math.round(misSpend).toLocaleString('en-US')}) is telling Meta to hunt something other than ${targetWord.toLowerCase()}s.`,
+    next_step: xs === 0
+      ? `Nothing to change here — keep new ad sets on the same optimization event.`
+      : `Switch the flagged ad sets to ${targetWord} optimization (or fold their budget into the correctly-set ones). Expect a learning reset — do it per ad set, not all at once.`,
+    data: {
+      window_days: 30,
+      target_event: targetWord,
+      counts: { check: checks, x: xs, question: qs },
+      misoptimized_spend_share_pct: pct(misSpend, totalSpend),
+      rows: rows.slice(0, 15),
+    },
+    warnings: qs > 0 ? [`${qs} ad set(s) marked "?" — plausible-but-unusual configs we won't guess about.`] : undefined,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 8. Provisional lead insights (choreography — the top of the page must never
+//    be the LAST thing to arrive)
+// ---------------------------------------------------------------------------
+
+/**
+ * Deterministic top-3 the moment the fast tier lands (UX review §2.2): worst
+ * scorecard dimension · the fatiguing ad with its runway · concentration risk,
+ * with strengths as fallback. The end-of-audit LLM ranking OVERWRITES these —
+ * they are honest placeholders built from real numbers, flagged provisional so
+ * the page can say "first read".
+ */
+export interface ProvisionalInsight {
+  headline: string;
+  detail: string;
+  severity: 'risk' | 'opportunity' | 'info';
+  section: string;
+  provisional: true;
+}
+
+export function buildProvisionalInsights(
+  scorecard: Array<{ dimension: string; band: string; position: string; lever: string; next_step: string; section_key: string }>,
+  fatigueData: { ads?: FatigueAd[] } | undefined,
+  concentrationData: { top3_share_pct?: number; band?: string; top_ads?: Array<{ ad_name: string; share_pct: number }> } | undefined,
+): ProvisionalInsight[] {
+  const out: ProvisionalInsight[] = [];
+
+  const worst = scorecard.find((e) => e.band === 'weak');
+  if (worst) {
+    out.push({
+      headline: worst.position,
+      detail: `${worst.lever} ${worst.next_step}`,
+      severity: 'risk',
+      section: worst.section_key,
+      provisional: true,
+    });
+  }
+
+  const soonest = (fatigueData?.ads ?? [])
+    .filter((a) => a.class === 'fatiguing' && a.days_to_breakeven != null)
+    .sort((a, b) => a.days_to_breakeven! - b.days_to_breakeven!)[0];
+  if (soonest) {
+    out.push({
+      headline: `"${soonest.ad_name}" crosses breakeven in ~${soonest.days_to_breakeven} days at its current decline`,
+      detail: `It carries ${soonest.spend.toLocaleString('en-US')} of 90-day spend and its return has dropped ${Math.abs(soonest.trend_pct)}% from the first half of its run to the second. The runway number is the deadline for its replacement.`,
+      severity: 'risk',
+      section: 'creative_fatigue',
+      provisional: true,
+    });
+  }
+
+  const conc = concentrationData;
+  if (out.length < 3 && conc && typeof conc.top3_share_pct === 'number' && (conc.band === 'high' || conc.band === 'elevated')) {
+    const hero = conc.top_ads?.[0];
+    out.push({
+      headline: `Your top 3 ads carry ${conc.top3_share_pct}% of all spend`,
+      detail: hero
+        ? `"${hero.ad_name}" alone takes ${hero.share_pct}% — if it fatigues, most of the account goes with it. Concentration this high is a key-man risk, not a strategy.`
+        : `Concentration this high is a key-man risk, not a strategy.`,
+      severity: 'risk',
+      section: 'spend_concentration',
+      provisional: true,
+    });
+  }
+
+  // Fallbacks so the strip still says something real on a healthy account.
+  if (out.length < 3) {
+    const evergreens = (fatigueData?.ads ?? []).filter((a) => a.class === 'evergreen');
+    if (evergreens.length) {
+      const share = evergreens.reduce((s, a) => s + a.spend, 0);
+      out.push({
+        headline: `${evergreens.length} evergreen winner${evergreens.length > 1 ? 's' : ''} — 60+ days old and still holding their number`,
+        detail: `${Math.round(share).toLocaleString('en-US')} of assessed spend runs on proven creative that is NOT fatiguing. Protect these ads; whatever they do right is this account's style guide.`,
+        severity: 'opportunity',
+        section: 'creative_fatigue',
+        provisional: true,
+      });
+    }
+  }
+  if (out.length < 3) {
+    const strength = [...scorecard].reverse().find((e) => e.band === 'strong');
+    if (strength) {
+      out.push({
+        headline: strength.position,
+        detail: `${strength.lever} A genuine strength — protect what's producing it.`,
+        severity: 'opportunity',
+        section: strength.section_key,
+        provisional: true,
+      });
+    }
+  }
+
+  return out.slice(0, 3);
 }
