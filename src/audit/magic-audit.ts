@@ -1155,13 +1155,16 @@ export async function runMagicAudit(
   // LLM sections are still cooking. Fail-soft.
   const computeAndSaveScorecard = async (): Promise<void> => {
     try {
+      // ad_daily stores hook_rate/hold_rate as FRACTIONS (avg ~0.24 = 24%);
+      // the scorecard's unit is '%', so convert here — "median 0.2%" on the
+      // page was the fraction leaking through the % label (fixed Session D).
       const weightedRate = (rows: PackAdRow[], key: 'hook_rate' | 'hold_rate'): { value: number; spend: number } => {
         let num = 0; let den = 0;
         for (const r of rows) {
           const v = r[key];
           if (typeof v === 'number' && v > 0 && r.spend > 0) { num += v * r.spend; den += r.spend; }
         }
-        return { value: den > 0 ? num / den : 0, spend: den };
+        return { value: den > 0 ? (num / den) * 100 : 0, spend: den };
       };
       // Cohort: spend-weighted hook/hold per ACCOUNT on our desk, last 7 days.
       // Rates cross accounts safely; money metrics never do (currency).
