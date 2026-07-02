@@ -35,6 +35,12 @@ export interface PackAdRow {
   hold_rate: number | null;
   /** Present on the 90d pull since Session D (optimization-event spend mapping). */
   adset_id?: string | null;
+  /**
+   * Ad-level leads extracted from the actions JSONB (`leads:actions->lead`) —
+   * `ad_daily.results` is NULL for most lead-gen accounts (GG read "cost per
+   * result 30,480" = raw spend before this fallback, 2026-07-02).
+   */
+  leads?: number | null;
 }
 
 export interface PackAccountRow {
@@ -563,7 +569,7 @@ export function computeConceptRoas(
     const a = byAngle.get(angle) ?? { spend: 0, value: 0, results: 0, purchases: 0, ads: new Set<string>() };
     a.spend += r.spend || 0;
     a.value += r.purchase_value || 0;
-    a.results += r.results || 0;
+    a.results += r.results || r.leads || 0;
     a.purchases += r.purchases || 0;
     a.ads.add(r.ad_id);
     byAngle.set(angle, a);
@@ -594,6 +600,36 @@ export function computeConceptRoas(
     .sort((a, b) => b.spend - a.spend);
   const assessed = angles.filter((a) => !a.below_floor);
   const kpiLabel = mode === 'roas' ? 'Meta ROAS' : 'cost per result';
+
+  // Some lead-gen accounts carry NO ad-level result mapping at all (results
+  // NULL and no lead actions) — "cost per result" would silently degrade to
+  // raw spend per angle. Say what we can (the spend split) and stop there.
+  if (mode === 'cpr' && assessed.length > 0 && assessed.every((a) => a.results === 0)) {
+    const top = assessed[0]!;
+    return {
+      summary:
+        `${assessed.length} creative angles carry real spend — biggest budget: "${top.angle}" (${top.spend_share_pct}% of tagged spend). ` +
+        `No ad-level results are mapped for this account, so this is a spend split, not a performance ranking.`,
+      next_step: `Fix the ad-level result mapping for this account (the daily sync carries no per-ad result events), then re-audit — angle ranking needs it.`,
+      data: {
+        window_days: 30,
+        kpi_mode: mode,
+        kpi_label: kpiLabel,
+        coverage_pct: coverage,
+        angles: angles.slice(0, 10).map((a) => ({ ...a, kpi: null })),
+        discount_flag: false,
+      },
+      warnings: [
+        `No ad-level result mapping — angle ranking suppressed rather than guessed.`,
+        ...(coverage < 60 ? [`Angle tags cover ${coverage}% of spend — the untagged remainder is not represented here.`] : []),
+      ],
+      derivation:
+        `Every analyzed ad carries a messaging-angle tag from our creative analysis. Last-30-day spend is grouped by that tag ` +
+        `(tags cover ${coverage}% of spend), but every angle summed to zero mapped results — so the per-angle ${kpiLabel} is withheld ` +
+        `instead of dividing spend by nothing.`,
+    };
+  }
+
   const better = (a: { kpi: number }, b: { kpi: number }) => (mode === 'roas' ? b.kpi - a.kpi : a.kpi - b.kpi);
   const ranked = [...assessed].sort(better);
   const best = ranked[0];

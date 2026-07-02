@@ -180,6 +180,42 @@ describe('computeConceptRoas', () => {
       .find((a) => a.angle === 'Founder story')!;
     expect(mid.below_floor).toBe(false);
   });
+
+  it('lead-gen: falls back to actions-derived leads when ad_daily.results is empty (GG regression)', () => {
+    // purchase_value 0 → CPR mode; results empty but per-row lead actions present.
+    const rows = [
+      ...Array.from({ length: 5 }, (_, i) => adRow(`edu${i}`, 1000, 0, { purchases: 0, results: 0, leads: 20 })),
+      ...Array.from({ length: 5 }, (_, i) => adRow(`ben${i}`, 500, 0, { purchases: 0, results: 0, leads: 5 })),
+    ];
+    const angles = new Map<string, string>([
+      ...Array.from({ length: 5 }, (_, i) => [`edu${i}`, 'education'] as [string, string]),
+      ...Array.from({ length: 5 }, (_, i) => [`ben${i}`, 'benefit'] as [string, string]),
+    ]);
+    const s = computeConceptRoas(rows, angles);
+    const edu = (s.data as { angles: Array<{ angle: string; kpi: number | null }> }).angles
+      .find((a) => a.angle === 'education')!;
+    expect(edu.kpi).toBe(50); // 5,000 spend / 100 leads — not raw spend
+    expect(s.summary).toContain('cost per result');
+  });
+
+  it('lead-gen with NO result mapping at all → spend split only, ranking withheld (GG regression)', () => {
+    // GG 2026-07-02: results NULL and no lead actions → kpi degraded to raw
+    // spend ("cost per result 30,479.94"). Must suppress, never guess.
+    const rows = [
+      ...Array.from({ length: 5 }, (_, i) => adRow(`edu${i}`, 1000, 0, { purchases: 0, results: 0 })),
+      ...Array.from({ length: 5 }, (_, i) => adRow(`ben${i}`, 500, 0, { purchases: 0, results: 0 })),
+    ];
+    const angles = new Map<string, string>([
+      ...Array.from({ length: 5 }, (_, i) => [`edu${i}`, 'education'] as [string, string]),
+      ...Array.from({ length: 5 }, (_, i) => [`ben${i}`, 'benefit'] as [string, string]),
+    ]);
+    const s = computeConceptRoas(rows, angles);
+    expect(s.summary).toContain('spend split');
+    expect(s.warnings?.some((w) => w.includes('suppressed'))).toBe(true);
+    const angleRows = (s.data as { angles: Array<{ kpi: number | null }> }).angles;
+    expect(angleRows.length).toBeGreaterThan(0);
+    expect(angleRows.every((a) => a.kpi === null)).toBe(true);
+  });
 });
 
 describe('computeOptimizationEvents', () => {

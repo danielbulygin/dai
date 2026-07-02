@@ -1135,7 +1135,9 @@ export async function runMagicAudit(
   // --- Fast tier (Phase C): shared deterministic pulls, fetched ONCE ---------
   // Each dataset is fail-soft: a failed pull turns its sections into honest
   // errors, never kills the audit.
-  const PACK_AD_COLS = 'ad_id, ad_name, adset_id, date, spend, impressions, purchases, purchase_value, results, frequency, hook_rate, hold_rate';
+  // leads:actions->lead — ad_daily.results is NULL for most lead-gen accounts;
+  // the lead count lives only in the actions JSONB (concept-roas CPR fallback).
+  const PACK_AD_COLS = 'ad_id, ad_name, adset_id, date, spend, impressions, purchases, purchase_value, results, leads:actions->lead, frequency, hook_rate, hold_rate';
   let packRows90: PackAdRow[] = [];
   let packRows180: Array<Pick<PackAdRow, 'ad_id' | 'date' | 'spend'>> = [];
   let packAccRows90: PackAccountRow[] = [];
