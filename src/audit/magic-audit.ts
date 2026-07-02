@@ -120,6 +120,25 @@ function getAnthropic(): Anthropic {
   return anthropic;
 }
 
+/**
+ * One retry on Anthropic capacity errors (overloaded/529) after a pause.
+ * A single API blip killed the LLM sections of 5 consecutive sweep audits on
+ * 2026-07-02 — the deterministic tier survived, the narratives didn't.
+ */
+async function finalMessageWithOverloadRetry(
+  params: Parameters<Anthropic['messages']['stream']>[0],
+): Promise<Anthropic.Message> {
+  try {
+    return await getAnthropic().messages.stream(params).finalMessage();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!/overloaded|529/i.test(msg)) throw err;
+    logger.warn({ err: msg }, 'anthropic overloaded — retrying once in 45s');
+    await new Promise((r) => setTimeout(r, 45_000));
+    return await getAnthropic().messages.stream(params).finalMessage();
+  }
+}
+
 async function synthesizeJson<T>(
   meter: CostMeter,
   label: string,
@@ -130,14 +149,13 @@ async function synthesizeJson<T>(
     logger.warn({ label, spent: meter.spentUsd, cap: meter.capUsd }, 'audit cost cap reached — skipping synthesis');
     return null;
   }
-  const stream = getAnthropic().messages.stream({
+  const final = await finalMessageWithOverloadRetry({
     model: AUDIT_MODEL,
     max_tokens: 4000,
     thinking: { type: 'adaptive' },
     system: [{ type: 'text' as const, text: system, cache_control: { type: 'ephemeral' as const } }],
     messages: [{ role: 'user', content: user }],
   });
-  const final = await stream.finalMessage();
   const usage = final.usage as unknown as Record<string, number>;
   meter.add(
     label,
@@ -160,13 +178,12 @@ async function synthesizeJson<T>(
     const msg = err instanceof Error ? err.message : String(err);
     logger.warn({ label, err: msg }, 'synthesis JSON parse failed — attempting one repair retry');
     if (meter.exhausted()) throw err;
-    const repair = getAnthropic().messages.stream({
+    const fixed = await finalMessageWithOverloadRetry({
       model: AUDIT_MODEL,
       max_tokens: 4000,
       system: 'You repair malformed JSON. Return ONLY the corrected, complete JSON object — no markdown, no commentary, no explanation.',
       messages: [{ role: 'user', content: `This JSON is malformed (parser said: ${msg}). Repair it, preserving all content:\n${text}` }],
     });
-    const fixed = await repair.finalMessage();
     const rUsage = fixed.usage as unknown as Record<string, number>;
     meter.add(
       `${label}_json_repair`,
@@ -1024,7 +1041,9 @@ export async function runMagicAudit(
   } catch (err) {
     logger.warn({ err, code }, 'days-with-data preflight failed (audit continues)');
   }
-  const synthSystem = buildSynthSystem(clientKnowledge, dataCaveat);
+  // `let` — the pack pulls below can append a truncation caveat, after which
+  // the synth system is rebuilt (runners read it at call time via closure).
+  let synthSystem = buildSynthSystem(clientKnowledge, dataCaveat);
   logger.info(
     { code, knowledgeChars: clientKnowledge.length, daysWithData, thinWindow: !!dataCaveat },
     'audit client context assembled',
@@ -1078,9 +1097,13 @@ export async function runMagicAudit(
   let accFull30: Array<Record<string, unknown>> = [];
   let landing30: Array<{ spend: number; landing_page_market: string | null; landing_page_path: string | null }> = [];
   try {
+    // Caps sized to the LARGEST account on the desk (NP: 144k ad-day rows/90d).
+    // The old 40k cap silently truncated NP to 28% of its rows — concentration
+    // and fatigue were computed on an arbitrary subset (caught by the sweep's
+    // reconcile check 2026-07-02). If a pull ever hits its cap again, we say so.
     [packRows90, packRows180, packAccRows90, accFull30, landing30] = await Promise.all([
-      pageAll<PackAdRow>('ad_daily', PACK_AD_COLS, (q) => q.eq('client_id', client.id).gte('date', daysAgoISO(90)), 40_000),
-      pageAll<Pick<PackAdRow, 'ad_id' | 'date' | 'spend'>>('ad_daily', 'ad_id, date, spend', (q) => q.eq('client_id', client.id).gte('date', daysAgoISO(180)), 60_000),
+      pageAll<PackAdRow>('ad_daily', PACK_AD_COLS, (q) => q.eq('client_id', client.id).gte('date', daysAgoISO(90)), 250_000),
+      pageAll<Pick<PackAdRow, 'ad_id' | 'date' | 'spend'>>('ad_daily', 'ad_id, date, spend', (q) => q.eq('client_id', client.id).gte('date', daysAgoISO(180)), 400_000),
       pageAll<PackAccountRow>('account_daily', 'date, spend, impressions, link_clicks, purchases, purchase_value, results', (q) => q.eq('client_id', client.id).gte('date', daysAgoISO(90)), 200),
       pageAll<Record<string, unknown>>(
         'account_daily',
@@ -1092,9 +1115,16 @@ export async function runMagicAudit(
         'ad_daily',
         'spend, landing_page_market, landing_page_path',
         (q) => q.eq('client_id', client.id).gte('date', daysAgoISO(30)),
-        40_000,
+        250_000,
       ),
     ]);
+    if (packRows90.length >= 250_000 || packRows180.length >= 400_000) {
+      dataCaveat = [dataCaveat, 'the ad-level pull hit its row cap — 90d aggregates may be incomplete for this very large account; say so when citing them.']
+        .filter(Boolean)
+        .join(' ');
+      synthSystem = buildSynthSystem(clientKnowledge, dataCaveat);
+      logger.error({ code, rows90: packRows90.length, rows180: packRows180.length }, 'report-pack pull hit row cap — aggregates incomplete');
+    }
   } catch (err) {
     logger.warn({ err, code }, 'report-pack shared pulls failed (fast sections degrade)');
   }
