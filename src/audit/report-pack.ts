@@ -178,7 +178,7 @@ export const CONCEPT_FLOOR_CAP = 5_000;
 const cappedFloor = (base: number, relative: number, cap: number): number =>
   Math.max(base, Math.min(relative, cap));
 
-export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currency = ''): PackSection & { data: { ads: FatigueAd[] } & Record<string, unknown> } {
+export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currency = '', grossMarginPct: number | null = null): PackSection & { data: { ads: FatigueAd[] } & Record<string, unknown> } {
   const mode = kpiMode(rows90);
   const byAd = new Map<string, PackAdRow[]>();
   for (const r of rows90) {
@@ -270,6 +270,11 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currenc
   const soonest = fatiguing.filter((a) => a.days_to_breakeven != null).sort((a, b) => a.days_to_breakeven! - b.days_to_breakeven!)[0];
 
   const kpiWord = mode === 'roas' ? 'ROAS' : 'results per spend';
+  // Attribution rule (founder-sim debt, 2026-07-04): when the owner gave us
+  // their gross margin, the breakeven line is THEIRS — say so wherever it's
+  // cited. Without a margin, 1.0× stays the honest default with the honest
+  // caveat that the true line is higher.
+  const breakevenWord = grossMarginPct != null && breakevenRoas > 1.0 ? `its ${breakevenRoas}× breakeven` : 'breakeven';
   // The fatiguing set's CURRENT run-rate — the honest "money riding on declining
   // creative" number (pro-trust layer). A run-rate, not a loss claim.
   const fatiguingDailyBurn = Math.round(fatiguing.reduce((s, a) => s + a.recent_daily_spend, 0));
@@ -278,7 +283,7 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currenc
     summaryParts.push(
       `${fatiguing.length} ad${fatiguing.length > 1 ? 's' : ''} carrying ${fatiguingShare}% of assessed spend ` +
       `${fatiguing.length > 1 ? 'are' : 'is'} genuinely fatiguing — ${kpiWord} down 25%+ from the first half of its run to the second` +
-      (soonest?.days_to_breakeven && soonest.days_to_breakeven > 1 ? `; at the current decline "${soonest.ad_name}" crosses breakeven in roughly ${soonest.days_to_breakeven} days` : soonest?.days_to_breakeven === 1 ? `; at the current decline "${soonest.ad_name}" crosses breakeven within a day` : '') + '.' +
+      (soonest?.days_to_breakeven && soonest.days_to_breakeven > 1 ? `; at the current decline "${soonest.ad_name}" crosses ${breakevenWord} in roughly ${soonest.days_to_breakeven} days` : soonest?.days_to_breakeven === 1 ? `; at the current decline "${soonest.ad_name}" crosses ${breakevenWord} within a day` : '') + '.' +
       (fatiguingDailyBurn > 0 ? ` Right now ≈${money(fatiguingDailyBurn, currency)}/day runs on this declining set — that's the budget the replacements inherit.` : ''),
     );
   } else {
@@ -307,6 +312,8 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currenc
       window_days: 90,
       kpi_mode: mode,
       assessed_ads: ads.length,
+      breakeven_roas: breakevenRoas,
+      gross_margin_pct: grossMarginPct ?? undefined,
       fatiguing_spend_share_pct: fatiguingShare,
       evergreen_spend_share_pct: evergreenShare,
       fatiguing_daily_burn: fatiguingDailyBurn,
@@ -318,6 +325,13 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currenc
       `For every ad with 10+ active days and real spend in the last 90 days, we split its run into a first and second half ` +
       `and compared ${kpiWord} between them — a 25%+ drop that also holds in the last 14 active days reads as fatigue. ` +
       `Age alone never flags an ad: old creative whose number still holds is evergreen and gets protected. ` +
+      (mode === 'roas'
+        ? grossMarginPct != null && breakevenRoas > 1.0
+          ? `Breakeven line = ${breakevenRoas}× ROAS — your breakeven at the ${grossMarginPct}% gross margin you gave us (1 ÷ margin); runways and below-breakeven calls are measured against your line, not a generic 1.0×. `
+          : breakevenRoas > 1.0
+            ? `Breakeven line = ${breakevenRoas}× ROAS, as set for this account. `
+            : `Breakeven line = 1.0× ROAS — the honest default when we don't know your gross margin; your true breakeven is higher (roughly 1 ÷ gross margin), so treat these runways as optimistic. `
+        : '') +
       `The runway extrapolates the observed per-day decline from the ad's last-14-day level down to breakeven — a deadline estimate, not a guarantee. ` +
       `The daily figure is each fatiguing ad's average spend over its own last 14 active days, summed.`,
   };
@@ -773,8 +787,8 @@ export function computeOptimizationEvents(
 
   return {
     summary: xs === 0
-      ? `All ${rows.length} spending ad sets optimize for the right thing (${targetWord}-class events). This is the foundational setting most accounts get wrong — yours is clean.`
-      : `${xs} of ${rows.length} spending ad sets optimize for the WRONG event — ${pct(misSpend, totalSpend)}% of spend (${money(misSpend, currency)} over 30 days) is telling Meta to hunt something other than ${targetWord.toLowerCase()}s.`,
+      ? `All ${rows.length} ad sets that spent in the last 30 days optimize for the right thing (${targetWord}-class events). This is the foundational setting most accounts get wrong — yours is clean.`
+      : `${xs} of the ${rows.length} ad sets that spent in the last 30 days optimize for the WRONG event — ${pct(misSpend, totalSpend)}% of spend (${money(misSpend, currency)} over 30 days) is telling Meta to hunt something other than ${targetWord.toLowerCase()}s.`,
     next_step: xs === 0
       ? `Nothing to change here — keep new ad sets on the same optimization event.`
       : `Switch the flagged ad sets to ${targetWord} optimization (or fold their budget into the correctly-set ones). Expect a learning reset — do it per ad set, not all at once.`,
@@ -789,7 +803,9 @@ export function computeOptimizationEvents(
     },
     warnings: qs > 0 ? [`${qs} ad set(s) marked "?" — plausible-but-unusual configs we won't guess about.`] : undefined,
     derivation:
-      `We read each spending ad set's optimization goal and conversion event straight from its Meta config and judged it against ` +
+      `Population: every ad set that spent in the last 30 days — whether or not it is still active (the learning-phase check ` +
+      `next door covers only the currently active subset, which is why its count can be smaller). ` +
+      `We read each ad set's optimization goal and conversion event straight from its Meta config and judged it against ` +
       `what this account actually sells (${targetWord}-class events, inferred from 30 days of recorded conversions). ` +
       `The flagged amount is those ad sets' summed 30-day spend — spend pointed at the wrong target, not money already lost. ` +
       `Configs that could be a deliberate learning-volume choice get a "?" instead of a verdict.`,

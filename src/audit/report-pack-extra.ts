@@ -351,7 +351,13 @@ export function computeLearningLimited(
   spendByAdset: Map<string, number>,
   currency: string,
 ): PackSection {
-  const active = adsets.filter((a) => a.effective_status === 'ACTIVE' && (spendByAdset.get(a.adset_id) ?? 0) > 0);
+  // Count-scope bookkeeping (founder-sim debt, 2026-07-04): the optimization
+  // report judges EVERY ad set that spent in the last 30 days; this check only
+  // covers the ones still ACTIVE (a paused set can't be in learning). Print
+  // both populations so the two sections' headline counts reconcile on-page.
+  const spenders = adsets.filter((a) => (spendByAdset.get(a.adset_id) ?? 0) > 0);
+  const active = spenders.filter((a) => a.effective_status === 'ACTIVE');
+  const inactiveSpenders = spenders.length - active.length;
   const totalSpend = active.reduce((s, a) => s + (spendByAdset.get(a.adset_id) ?? 0), 0);
   if (active.length === 0 || totalSpend < 100) {
     return {
@@ -379,26 +385,46 @@ export function computeLearningLimited(
   const starvedSpend = starved.reduce((s, r) => s + r.spend_30d, 0);
   const starvedSharePct = pct(starvedSpend, totalSpend);
 
+  const scopeClause =
+    inactiveSpenders > 0
+      ? ` (${spenders.length} ad sets spent in the last 30 days; ${inactiveSpenders} ${inactiveSpenders === 1 ? 'is' : 'are'} no longer active and ${inactiveSpenders === 1 ? 'is' : 'are'} excluded here — a paused set can't be in learning.)`
+      : '';
   return {
     summary:
       starved.length === 0
-        ? `All ${rows.length} active ad sets clear Meta's ~50-events-a-week learning bar — the algorithm has enough signal everywhere.`
-        : `${starved.length} of ${rows.length} active ad sets run below Meta's ~50-events-a-week learning bar — ` +
-          `${starvedSharePct}% of active spend (${money(starvedSpend, currency)}/30d) is optimizing on thin signal.`,
+        ? `All ${rows.length} currently active ad sets with spend clear Meta's ~50-events-a-week learning bar — the algorithm has enough signal everywhere.${scopeClause}`
+        : `${starved.length} of the ${rows.length} currently active ad sets with spend run below Meta's ~50-events-a-week learning bar — ` +
+          `${starvedSharePct}% of active spend (${money(starvedSpend, currency)}/30d) is optimizing on thin signal.${scopeClause}`,
     next_step:
       starved.length === 0
         ? `Keep new ad sets consolidated enough to clear the bar — splitting budgets thinner than ~50 events/week re-enters learning.`
         : `Consolidate: merge the starved ad sets into fewer, broader ones so Meta gets ≥50 events a week per set — fragmentation is paying learning tax on ${starvedSharePct}% of spend.`,
-    data: { window_days: 30, bar_per_week: BAR, currency, rows: rows.slice(0, 15), starved_count: starved.length, starved_spend_share_pct: starvedSharePct },
+    data: {
+      window_days: 30,
+      bar_per_week: BAR,
+      currency,
+      rows: rows.slice(0, 15),
+      // The honest population counts — data.rows above is display-capped at 15,
+      // so every consumer (work log included) must count from these fields.
+      assessed_adsets: rows.length,
+      spending_adsets_30d: spenders.length,
+      inactive_spenders_excluded: inactiveSpenders,
+      starved_count: starved.length,
+      starved_spend_share_pct: starvedSharePct,
+    },
     warnings:
       starvedSharePct >= 30
         ? [`${starvedSharePct}% of active spend sits in ad sets that can't exit learning — this is structural, not creative.`]
         : undefined,
     derivation:
-      `Per active ad set: its optimization-type events (purchases, or leads on lead-gen accounts) from the last 30 days of ` +
+      `Population: every ad set that is currently ACTIVE and spent in the last 30 days` +
+      (inactiveSpenders > 0
+        ? ` — ${inactiveSpenders} ad set${inactiveSpenders === 1 ? '' : 's'} that spent but ${inactiveSpenders === 1 ? 'is' : 'are'} no longer active ${inactiveSpenders === 1 ? 'is' : 'are'} judged in the optimization report, not here`
+        : '') +
+      `. Per ad set: its optimization-type events (purchases, or leads on lead-gen accounts) from the last 30 days of ` +
       `ad-level delivery, averaged to a weekly rate and compared against Meta's documented ~50-conversions-per-week ` +
-      `learning-phase exit bar. The event count is our closest proxy for the set's true optimization event — treat borderline ` +
-      `rows as directional.`,
+      `learning-phase exit bar. The table shows the top 15 by spend; the counts cover all assessed ad sets. ` +
+      `The event count is our closest proxy for the set's true optimization event — treat borderline rows as directional.`,
   };
 }
 
@@ -736,6 +762,40 @@ export interface AccountFactsInputs {
   currency: string;
 }
 
+/**
+ * The longest first→last delivery span (days) among ads that still delivered
+ * within the window's final 7 days. Shared by computeAccountFacts ("your
+ * longest-running ad") and the Ads-Library age bridge, so the account-side
+ * number is the SAME wherever the page cites it (count-scope debt 2026-07-04).
+ */
+export function longestStillSpendingSpan(
+  rows: Array<Pick<PackAdRow, 'ad_id' | 'date' | 'spend'>>,
+): { adId: string; first: string; spanDays: number } | null {
+  if (rows.length === 0) return null;
+  const byAd = new Map<string, { first: string; last: string }>();
+  let lastDay = '';
+  for (const r of rows) {
+    const d = String(r.date).slice(0, 10);
+    const a = byAd.get(r.ad_id) ?? { first: d, last: d };
+    if (d < a.first) a.first = d;
+    if (d > a.last) a.last = d;
+    byAd.set(r.ad_id, a);
+    if (d > lastDay) lastDay = d;
+  }
+  const recentCut = new Date(new Date(lastDay + 'T00:00:00Z').getTime() - 7 * 86400_000).toISOString().slice(0, 10);
+  const still = [...byAd.entries()].filter(([, a]) => a.last >= recentCut);
+  if (still.length === 0) return null;
+  const longest = still.sort(
+    (x, y) =>
+      new Date(y[1].last).getTime() - new Date(y[1].first).getTime() - (new Date(x[1].last).getTime() - new Date(x[1].first).getTime()),
+  )[0]!;
+  return {
+    adId: longest[0],
+    first: longest[1].first,
+    spanDays: Math.round((new Date(longest[1].last).getTime() - new Date(longest[1].first).getTime()) / 86400_000),
+  };
+}
+
 export function computeAccountFacts(inp: AccountFactsInputs): PackSection {
   const { rows180, adNames, currency } = inp;
   if (rows180.length === 0) {
@@ -765,24 +825,17 @@ export function computeAccountFacts(inp: AccountFactsInputs): PackSection {
 
   const days = [...byDay.keys()].sort();
   const lastDay = days[days.length - 1]!;
-  const recentCut = new Date(new Date(lastDay + 'T00:00:00Z').getTime() - 7 * 86400_000).toISOString().slice(0, 10);
 
   const facts: Array<{ fact: string; detail: string }> = [];
 
-  // Longest-running ad still spending
-  const stillSpending = [...byAd.entries()].filter(([, a]) => a.last >= recentCut);
-  if (stillSpending.length > 0) {
-    const longest = stillSpending.sort(
-      (x, y) =>
-        new Date(y[1].last).getTime() - new Date(y[1].first).getTime() - (new Date(x[1].last).getTime() - new Date(x[1].first).getTime()),
-    )[0]!;
-    const span = Math.round((new Date(longest[1].last).getTime() - new Date(longest[1].first).getTime()) / 86400_000);
-    if (span >= 30) {
-      facts.push({
-        fact: `Your longest-running ad has been live ${span} days — and it's still spending.`,
-        detail: `${adNames.get(longest[0]) ?? longest[0]} (first seen ${longest[1].first} in this window). Check the fatigue report: if its number holds, that's an evergreen, not a liability.`,
-      });
-    }
+  // Longest-running ad still spending (shared helper — the Ads-Library bridge
+  // cites the same number, so the two sections can never disagree silently).
+  const longest = longestStillSpendingSpan(rows180);
+  if (longest && longest.spanDays >= 30) {
+    facts.push({
+      fact: `Your longest-running ad has been live ${longest.spanDays} days — and it's still spending.`,
+      detail: `${adNames.get(longest.adId) ?? longest.adId} (first seen ${longest.first} in this window). Check the fatigue report: if its number holds, that's an evergreen, not a liability.`,
+    });
   }
 
   // Spend on old creative
@@ -825,9 +878,11 @@ export function computeAccountFacts(inp: AccountFactsInputs): PackSection {
     });
   }
 
-  // Portfolio churn
+  // Portfolio churn ("still spending" = delivered within 7 days of the newest
+  // data day — the same cut longestStillSpendingSpan uses)
+  const recentCut = new Date(new Date(lastDay + 'T00:00:00Z').getTime() - 7 * 86400_000).toISOString().slice(0, 10);
   const adsCount = byAd.size;
-  const activeRecent = stillSpending.length;
+  const activeRecent = [...byAd.values()].filter((a) => a.last >= recentCut).length;
   facts.push({
     fact: `${adsCount} ads spent something in ~6 months; ${activeRecent} still spend today.`,
     detail: `${pct(adsCount - activeRecent, adsCount)}% of everything launched has already been retired — that's the real test-and-kill rate.`,

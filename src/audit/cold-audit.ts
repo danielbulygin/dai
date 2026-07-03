@@ -40,16 +40,20 @@ export async function runColdAudit(args: {
   );
 
   // The lead's stated goal = the synthetic target (no client-knowledge bundle).
+  // gross_margin_pct (nullable, 0<x<100 — DDL applied 2026-07-04): when the
+  // lead states it, the fatigue breakeven re-bases from 1.0× to 1 ÷ margin.
   let goalMetric: string | null = null;
   let goalValue: number | null = null;
+  let grossMarginPct: number | null = null;
   try {
     const { data: lead } = await getSupabase()
       .from('ada_leads')
-      .select('goal_metric, goal_value')
+      .select('goal_metric, goal_value, gross_margin_pct')
       .eq('user_id', userId)
       .maybeSingle();
     goalMetric = (lead?.goal_metric as string | null) ?? null;
     goalValue = lead?.goal_value != null ? Number(lead.goal_value) : null;
+    grossMarginPct = lead?.gross_margin_pct != null ? Number(lead.gross_margin_pct) : null;
   } catch (err) {
     logger.warn({ err, userId }, 'lead goal read failed (audit runs without a target anchor)');
   }
@@ -77,6 +81,7 @@ export async function runColdAudit(args: {
       rows,
       goalMetric,
       goalValue,
+      grossMarginPct,
     },
   });
 

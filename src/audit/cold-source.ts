@@ -281,3 +281,68 @@ export function buildColdRows(input: BuildColdRowsInput): ColdRows {
     daysCovered: new Set(norm.filter((n) => n.date >= cut30).map((n) => n.date)).size,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Stated-economics helpers (margin re-basing + attribution, 2026-07-04).
+// Founder-sim debt #1: the audit page cited the lead's own signup target as if
+// it were ours ("unsourced number on a show-your-work page"). These are pure so
+// the breakeven math and the attribution contract are unit-testable.
+// ---------------------------------------------------------------------------
+
+/**
+ * 1 ÷ gross margin, 2dp — e.g. a stated 45% margin → 2.22× breakeven ROAS.
+ * Invalid or missing margins (≤0, ≥100, null) fall back to the honest 1.0×
+ * default, which computeFatigue then caveats as "your true breakeven is higher".
+ */
+export function coldBreakeven(grossMarginPct: number | null | undefined): { grossMarginPct: number | null; breakevenRoas: number } {
+  const pct = typeof grossMarginPct === 'number' && Number.isFinite(grossMarginPct) && grossMarginPct > 0 && grossMarginPct < 100
+    ? grossMarginPct
+    : null;
+  return { grossMarginPct: pct, breakevenRoas: pct != null ? Math.round((100 / pct) * 100) / 100 : 1.0 };
+}
+
+/**
+ * The cold-path clientKnowledge block for every synthesis call. The contract:
+ * anything the owner stated at signup is cited AS THEIRS, in-text, every time —
+ * and anything they did NOT state is never invented, assumed, or implied.
+ */
+export function buildColdKnowledge(args: {
+  goalMetric?: string | null;
+  goalValue?: number | null;
+  grossMarginPct: number | null;
+  breakevenRoas: number;
+}): string {
+  const hasGoal = !!args.goalMetric && args.goalValue != null;
+  const parts: string[] = [];
+  if (hasGoal) {
+    const metric = args.goalMetric!.toUpperCase();
+    parts.push(
+      `The account owner set this target themselves at signup: ${metric} of ${args.goalValue}. ` +
+        `When you cite it, ALWAYS attribute it in-text — e.g. "the ${metric} ${args.goalValue} target you set when you connected" — ` +
+        `never present it as our estimate, a Meta value, or an industry number.`,
+    );
+  }
+  if (args.grossMarginPct != null) {
+    parts.push(
+      `The account owner stated their gross margin at signup: ${args.grossMarginPct}%, which puts their true breakeven at ` +
+        `${args.breakevenRoas}x ROAS (1 ÷ margin). Same attribution rule — cite it as theirs, e.g. "at your stated ` +
+        `${args.grossMarginPct}% margin", never as our estimate or an industry number.`,
+    );
+  }
+  if (parts.length === 0) {
+    parts.push(
+      `The owner gave us NO target, margin, or breakeven. NEVER invent, assume, or imply one. ` +
+        `Anchor judgments to the account's own observed figures and, where a target would matter, ` +
+        `say plainly that no target has been set yet.`,
+    );
+  } else {
+    if (!hasGoal) {
+      parts.push(`No performance target was given — never invent or imply one; where a target would matter, say plainly that none has been set yet.`);
+    }
+    if (args.grossMarginPct == null) {
+      parts.push(`No gross margin was given — never invent or imply a margin or breakeven figure.`);
+    }
+  }
+  parts.push(`No other client history is available — this is a first-time audit of a freshly connected account.`);
+  return parts.join(' ');
+}

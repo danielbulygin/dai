@@ -6,7 +6,7 @@ import type { ToolContext } from '../agents/tool-registry.js';
 import { estimateCostUsd } from '../agents/runner.js';
 import { env } from '../env.js';
 import { logger } from '../utils/logger.js';
-import { extractJson, triageLibrary, type LibraryAd } from './library-triage.js';
+import { extractJson, triageLibrary, libraryAgeBridge, type LibraryAd } from './library-triage.js';
 import { buildClientKnowledgeBundle } from '../agents/client-context.js';
 import {
   computeConcentration, computeFatigue, computeCohorts, computeCostTrend, computeDayOfWeek,
@@ -18,12 +18,12 @@ import { buildScorecard, type ScorecardInputs, type ScorecardEntry } from './sco
 import {
   computePlacementBreakdown, computeAudienceBreakdown, computeTargetingSplit, computeLearningLimited,
   computeSaturation, computeCreativeDiversity, computeCohortWave, computeWhatsWorking, computeLandingPages,
-  computeAccountFacts,
+  computeAccountFacts, longestStillSpendingSpan,
   type PlacementInsightRow, type DemoInsightRow, type GeoInsightRow, type TargetingSpecLite,
   type WeeklyReachRow, type LandingAdRow, type DeadUrlCheck,
 } from './report-pack-extra.js';
 import { buildAccountModel, mergeAccountModel, type AccountModel, type AccountModelInputs } from './account-model.js';
-import type { ColdRows } from './cold-source.js';
+import { coldBreakeven, buildColdKnowledge, type ColdRows } from './cold-source.js';
 import { runColdCreativeAnalysis, type OwnLibraryScrape } from './cold-creative.js';
 
 /**
@@ -84,6 +84,9 @@ export interface ColdInjection {
   rows: ColdRows;
   goalMetric?: string | null;
   goalValue?: number | null;
+  /** Lead-stated gross margin % (ada_leads.gross_margin_pct, 0<x<100 or null).
+   * When set, the fatigue breakeven re-bases from 1.0× to 1 ÷ margin. */
+  grossMarginPct?: number | null;
 }
 
 /** Sections that read warehouse tables a stranger doesn't have.
@@ -1123,6 +1126,10 @@ async function runCompetitorTeardown(
   options: AuditOptions,
   synthSystem: string,
   getOwnLibrary?: () => Promise<OwnLibraryScrape>,
+  /** Account-API context for the own-footprint age bridge (count-scope debt
+   * 2026-07-04): the Library's "oldest active" vs the account's true longest
+   * run measure different populations — the page must say so. */
+  accountAge?: { adsCount: number; longestRunningDays: number | null },
 ): Promise<Partial<AuditSection>> {
   const targets = options.competitorPages ?? [];
   let mode: 'competitors' | 'own_footprint' = 'competitors';
@@ -1156,6 +1163,10 @@ async function runCompetitorTeardown(
     return { status: 'error', error: scrapeWarnings.join('; ') || 'no pages scraped' };
   }
 
+  // Deterministic age-scope bridge (own footprint only): reconciles the
+  // Library's "oldest active ad" with the account API's longest-running ad.
+  const ageBridge = mode === 'own_footprint' ? libraryAgeBridge(perPage[0]!.triage, accountAge) : null;
+
   const synth = await synthesizeJson<CompetitorSynthesis>(
     meter,
     'competitor_teardown',
@@ -1163,6 +1174,10 @@ async function runCompetitorTeardown(
     `Public Facebook Ads Library scrape (deterministic triage, weights = ad-cluster size as spend proxy):\n` +
       `Mode: ${mode === 'own_footprint' ? `the client's OWN public footprint (page: ${perPage[0]!.name})` : 'competitor pages'}\n` +
       `Client: ${client.name}\n${JSON.stringify(perPage, null, 1)}\n\n` +
+      (ageBridge
+        ? `Population note (private account data): ${accountAge!.adsCount} ads delivered in the audit window; the longest-running still-spending ad is ${accountAge!.longestRunningDays} days old. ` +
+          `The Library only shows currently-active PUBLIC ads — never present its oldest_active_days as the account's true oldest ad, and never mix the two populations' counts.\n\n`
+        : '') +
       `Write the "Ads Library Landscape" audit section. Velocity rule: oldest active ad >120d means evergreen winners exist (name the signal); <60d means rotation cadence IS the strategy. ` +
       `Catalog note: catalog_dynamic_weight_share_pct is the share of catalog/dynamic (DPA) creative — its {{...}} template tokens render per-product at serve time and are already excluded from top_hooks; NEVER describe template tokens as broken, unrendered, or a QA failure. Schema:\n` +
       `{"summary":"2-3 sentences with the headline strategic read and at least two numbers",` +
@@ -1171,18 +1186,25 @@ async function runCompetitorTeardown(
       `"warnings":[up to 2 strings]}`,
   );
 
-  const data = { mode, pages: perPage, narrative: synth ? { pages: synth.pages, open_lanes: synth.open_lanes } : undefined };
+  const data = { mode, pages: perPage, age_bridge: ageBridge ?? undefined, narrative: synth ? { pages: synth.pages, open_lanes: synth.open_lanes } : undefined };
 
   if (!synth) {
     const p = perPage[0]!;
     return {
       status: 'complete',
-      summary: `${p.name}: ${String((p.triage as { page_total_active?: unknown }).page_total_active)} active ads in the public library (cost cap reached before narrative synthesis).`,
+      summary:
+        `${p.name}: ${String((p.triage as { page_total_active?: unknown }).page_total_active)} active ads in the public library (cost cap reached before narrative synthesis).` +
+        (ageBridge ? ` ${ageBridge}` : ''),
       data,
       warnings: scrapeWarnings,
     };
   }
-  return { status: 'complete', summary: synth.summary, data, warnings: [...(synth.warnings ?? []), ...scrapeWarnings] };
+  return {
+    status: 'complete',
+    summary: ageBridge ? `${synth.summary} ${ageBridge}` : synth.summary,
+    data,
+    warnings: [...(synth.warnings ?? []), ...scrapeWarnings],
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1338,7 +1360,7 @@ function workLineFor(key: string, s: AuditSection): string | null {
       // counts covers ALL assessed ad sets; data.rows is capped for display.
       const c = d.counts as { check: number; x: number; question: number } | undefined;
       const n = c ? c.check + c.x + c.question : 0;
-      return n ? `Read the optimization goal on ${n} spending ad sets` : null;
+      return n ? `Read the optimization goal on all ${n} ad sets that spent in the last 30 days` : null;
     }
     case 'creative_analysis':
       // Cold path: we watched the actual downloaded creatives with Gemini.
@@ -1363,8 +1385,11 @@ function workLineFor(key: string, s: AuditSection): string | null {
     case 'whats_working':
       return `Assembled the protect list — what NOT to touch`;
     case 'learning_limited': {
-      const n = (d.rows as unknown[] | undefined)?.length ?? 0;
-      return n ? `Checked ${n} active ad sets against Meta's learning-phase bar` : null;
+      // data.rows is display-capped at 15 — the honest population count is
+      // assessed_adsets (count-scope debt 2026-07-04: the work log said "15"
+      // while the section said "42 of 42").
+      const n = typeof d.assessed_adsets === 'number' ? d.assessed_adsets : ((d.rows as unknown[] | undefined)?.length ?? 0);
+      return n ? `Checked all ${n} currently active spending ad sets against Meta's learning-phase bar` : null;
     }
     case 'targeting_split': {
       const n = (d.classes as unknown[] | undefined)?.length ?? 0;
@@ -1443,18 +1468,29 @@ export async function runMagicAudit(
     : await resolveClient(code);
   if (!client) throw new Error(`client ${code} not found`);
 
+  // Stated-economics re-basing (founder-sim debt #1, 2026-07-04): a cold
+  // lead's stated gross margin turns the fatigue breakeven from the honest
+  // 1.0× default into their real line (1 ÷ margin, e.g. 45% → 2.22×). The
+  // warehouse path stays at 1.0× — agency clients' real targets live in the
+  // knowledge bundle, not this param.
+  const { grossMarginPct, breakevenRoas } = coldBreakeven(cold?.grossMarginPct);
+
   // Phase B (context layer): assemble this client's knowledge bundle ONCE
   // (targets/KPI config + client-scoped learnings + the intelligence file) and
   // the days-with-data preflight; every synthesis call sees both via the
   // system prompt. Fail-soft — an audit without context still runs.
-  // Cold path: a stranger has no knowledge bundle — the lead's stated goal
-  // (ada_leads.goal_metric/value) is the synthetic target so "below target"
-  // judgments still anchor.
+  // Cold path: a stranger has no knowledge bundle — the lead's stated goal +
+  // margin (ada_leads.goal_metric/value/gross_margin_pct) anchor judgments,
+  // and the attribution contract (cite them AS the owner's, never ours) rides
+  // in via buildColdKnowledge.
   let clientKnowledge = '';
   if (cold) {
-    clientKnowledge = cold.goalMetric && cold.goalValue != null
-      ? `The account owner's stated target: ${cold.goalMetric.toUpperCase()} of ${cold.goalValue}. Anchor "above/below target" judgments to this. No other client history is available — this is a first-time audit of a freshly connected account.`
-      : 'No client history is available — this is a first-time audit of a freshly connected account. Anchor judgments to observable account data only.';
+    clientKnowledge = buildColdKnowledge({
+      goalMetric: cold.goalMetric,
+      goalValue: cold.goalValue,
+      grossMarginPct,
+      breakevenRoas,
+    });
   } else {
     try {
       clientKnowledge = await buildClientKnowledgeBundle(code);
@@ -1654,7 +1690,9 @@ export async function runMagicAudit(
     dataset_health: () => runDatasetHealth(code),
     account_structure: () => runAccountStructure(code),
     spend_concentration: async () => computeConcentration(rows30),
-    creative_fatigue: async () => computeFatigue(packRows90, 1.0, client.currency),
+    // breakevenRoas is 1.0 unless the cold lead stated a gross margin (see
+    // coldBreakeven above) — warehouse audits are unchanged.
+    creative_fatigue: async () => computeFatigue(packRows90, breakevenRoas, client.currency, grossMarginPct),
     creative_cohorts: async () => {
       const s = computeCohorts(packRows180);
       // Second cohort view (design batch 4): absolute monthly cohorts over time.
@@ -1823,7 +1861,19 @@ export async function runMagicAudit(
       for (const r of packRows90) if (r.ad_name) adNames.set(r.ad_id, r.ad_name);
       return computeAccountFacts({ rows180: packRows180, adNames, partnershipSpendPct: partnershipPct, currency: client.currency });
     },
-    competitor_teardown: () => runCompetitorTeardown(code, meter, client, options, synthSystem, getOwnLibrary),
+    competitor_teardown: () => {
+      // Account-side age context for the Library bridge — computed from the
+      // SAME rows + helper as the account_facts "longest-running ad" fact, so
+      // the two sections can never cite different account-side numbers.
+      const accountAge =
+        packRows180.length > 0
+          ? {
+              adsCount: new Set(packRows180.map((r) => r.ad_id)).size,
+              longestRunningDays: longestStillSpendingSpan(packRows180)?.spanDays ?? null,
+            }
+          : undefined;
+      return runCompetitorTeardown(code, meter, client, options, synthSystem, getOwnLibrary, accountAge);
+    },
   };
 
   // "Where you stand" scorecard — computed the moment the fast tier is done

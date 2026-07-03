@@ -11,6 +11,7 @@ import {
   computeWhatsWorking,
   computeLandingPages,
   computeAccountFacts,
+  longestStillSpendingSpan,
   type PlacementInsightRow,
   type TargetingSpecLite,
   type WeeklyReachRow,
@@ -239,5 +240,89 @@ describe('computeAccountFacts', () => {
     const facts = (s.data as { facts: Array<{ fact: string }> }).facts;
     expect(facts.some((f) => f.fact.includes('longest-running'))).toBe(true);
     expect(facts.some((f) => f.fact.includes('partnership'))).toBe(true);
+  });
+});
+
+describe('computeLearningLimited — count-scope reconciliation (founder-sim debt, 2026-07-04)', () => {
+  const adset = (id: string, status = 'ACTIVE'): AdsetConfigLite => ({
+    adset_id: id, adset_name: `set-${id}`, optimization_goal: 'OFFSITE_CONVERSIONS',
+    custom_event_type: 'PURCHASE', effective_status: status,
+  });
+
+  it('assessed_adsets is the FULL population even though data.rows is display-capped at 15', () => {
+    const ids = Array.from({ length: 20 }, (_, i) => `s${i}`);
+    const s = computeLearningLimited(
+      ids.map((id) => adset(id)),
+      new Map(ids.map((id) => [id, 100])),
+      new Map(ids.map((id) => [id, 1000])),
+      'EUR',
+    );
+    const d = s.data as { rows: unknown[]; assessed_adsets: number; spending_adsets_30d: number; inactive_spenders_excluded: number };
+    expect(d.rows).toHaveLength(15); // display cap
+    expect(d.assessed_adsets).toBe(20); // the honest count — work log reads THIS
+    expect(d.spending_adsets_30d).toBe(20);
+    expect(d.inactive_spenders_excluded).toBe(0);
+    expect(s.summary).toContain('All 20 currently active ad sets');
+  });
+
+  it('a spender that is no longer active is bridged inline, not silently dropped', () => {
+    const s = computeLearningLimited(
+      [adset('a'), adset('b'), adset('c', 'PAUSED')],
+      new Map([['a', 10], ['b', 10]]),
+      new Map([['a', 6000], ['b', 4000], ['c', 9999]]),
+      'EUR',
+    );
+    const d = s.data as { assessed_adsets: number; spending_adsets_30d: number; inactive_spenders_excluded: number };
+    expect(d.assessed_adsets).toBe(2);
+    expect(d.spending_adsets_30d).toBe(3);
+    expect(d.inactive_spenders_excluded).toBe(1);
+    expect(s.summary).toContain('2 of the 2 currently active ad sets');
+    expect(s.summary).toContain('(3 ad sets spent in the last 30 days; 1 is no longer active');
+    expect(s.derivation).toContain('judged in the optimization report, not here');
+  });
+
+  it('all-active population carries no bridge noise', () => {
+    const s = computeLearningLimited([adset('a')], new Map([['a', 120]]), new Map([['a', 5000]]), 'EUR');
+    expect(s.summary).not.toContain('no longer active');
+  });
+});
+
+describe('longestStillSpendingSpan — the shared account-side ad-age number', () => {
+  const d = (i: number) => `2026-06-${String(i).padStart(2, '0')}`;
+  const row = (adId: string, date: string, spend = 100): Pick<PackAdRow, 'ad_id' | 'date' | 'spend'> => ({ ad_id: adId, date, spend });
+
+  it('returns the longest first→last span among ads still delivering in the final 7 days', () => {
+    const rows = [
+      row('veteran', d(1)), row('veteran', d(28)), // 27-day span, still spending
+      row('retired', d(1)), row('retired', d(10)), // longer? no — 9 days, and retired anyway
+      row('young', d(25)), row('young', d(28)),
+    ];
+    expect(longestStillSpendingSpan(rows)).toEqual({ adId: 'veteran', first: d(1), spanDays: 27 });
+  });
+
+  it('an ad that stopped delivering >7 days before the window end never wins', () => {
+    const rows = [
+      row('dead-veteran', d(1)), row('dead-veteran', d(15)), // 14-day span but retired
+      row('live', d(20)), row('live', d(28)),
+    ];
+    expect(longestStillSpendingSpan(rows)).toEqual({ adId: 'live', first: d(20), spanDays: 8 });
+  });
+
+  it('empty input → null', () => {
+    expect(longestStillSpendingSpan([])).toBeNull();
+  });
+
+  it('computeAccountFacts cites the SAME number (the two sections can never disagree)', () => {
+    const rows: Array<Pick<PackAdRow, 'ad_id' | 'date' | 'spend'>> = [];
+    for (let i = 1; i <= 28; i++) rows.push({ ad_id: 'veteran', date: d(i), spend: 100 } as PackAdRow);
+    for (let i = 20; i <= 28; i++) rows.push({ ad_id: 'young', date: d(i), spend: 50 } as PackAdRow);
+    const span = longestStillSpendingSpan(rows)!.spanDays; // 27 — under the 30d fact floor
+    expect(span).toBe(27);
+    // stretch veteran past the floor and assert the fact quotes the helper's number
+    rows.push({ ad_id: 'veteran', date: '2026-07-05', spend: 100 } as PackAdRow);
+    const s = computeAccountFacts({ rows180: rows, adNames: new Map(), partnershipSpendPct: null, currency: 'EUR' });
+    const expected = longestStillSpendingSpan(rows)!.spanDays;
+    const fact = (s.data as { facts: Array<{ fact: string }> }).facts.find((f) => f.fact.includes('longest-running'))!;
+    expect(fact.fact).toContain(`live ${expected} days`);
   });
 });

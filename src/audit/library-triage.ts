@@ -93,6 +93,31 @@ export function triageLibrary(ads: LibraryAd[]): Record<string, unknown> {
   };
 }
 
+/**
+ * Count-scope bridge (founder-sim debt, 2026-07-04): the public Ads Library
+ * only shows a page's currently-active public ads, so its "oldest active ad"
+ * routinely disagrees with the account API's longest-running ad (which sees
+ * every ad that delivered in the pull window, including paused ones). When
+ * both numbers exist and differ, emit ONE deterministic sentence reconciling
+ * them — derived strictly from data already present, never inventing counts.
+ */
+export function libraryAgeBridge(
+  triage: { oldest_active_days?: number | null; active_ads_scraped?: number; page_total_active?: number },
+  account: { adsCount: number; longestRunningDays: number | null } | null | undefined,
+): string | null {
+  if (!account || account.longestRunningDays == null || triage.oldest_active_days == null) return null;
+  if (triage.oldest_active_days === account.longestRunningDays) return null;
+  const scraped = triage.active_ads_scraped ?? 0;
+  const pageTotal = num(triage.page_total_active ?? scraped);
+  return (
+    `Scope note: the public Ads Library shows only this page's currently active ads` +
+    (scraped > 0 ? ` (${scraped} read${pageTotal > scraped ? ` of ${pageTotal} active` : ''})` : '') +
+    `, while the account data covers all ${account.adsCount} ads that delivered in the audit window — ` +
+    `so the Library's oldest active ad (${triage.oldest_active_days} days) and the account's longest-running ad ` +
+    `(${account.longestRunningDays} days) measure different populations. Both are correct for their scope.`
+  );
+}
+
 export function extractJson<T>(text: string): T {
   const cleaned = text.replace(/```(?:json)?/g, '').trim();
   const start = cleaned.indexOf('{');

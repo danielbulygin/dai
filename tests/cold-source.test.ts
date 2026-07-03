@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildColdRows, type RawAdDay } from '../src/audit/cold-source.js';
+import { buildColdRows, coldBreakeven, buildColdKnowledge, type RawAdDay } from '../src/audit/cold-source.js';
 
 /**
  * The cold-path mapper turns a live Graph level=ad,time_increment=1 pull into
@@ -185,5 +185,62 @@ describe('buildColdRows — edge cases', () => {
     expect(rows.landing30).toEqual([]);
     expect(rows.rowCount).toBe(0);
     expect(rows.daysCovered).toBe(0);
+  });
+});
+
+describe('coldBreakeven (stated-margin re-basing, 2026-07-04)', () => {
+  it('45% margin → 2.22× breakeven ROAS (1 ÷ margin, 2dp)', () => {
+    expect(coldBreakeven(45)).toEqual({ grossMarginPct: 45, breakevenRoas: 2.22 });
+    expect(coldBreakeven(50)).toEqual({ grossMarginPct: 50, breakevenRoas: 2 });
+    expect(coldBreakeven(80)).toEqual({ grossMarginPct: 80, breakevenRoas: 1.25 });
+  });
+
+  it('missing or invalid margins fall back to the honest 1.0× default', () => {
+    for (const bad of [null, undefined, 0, -5, 100, 150, NaN]) {
+      expect(coldBreakeven(bad as number | null | undefined)).toEqual({ grossMarginPct: null, breakevenRoas: 1.0 });
+    }
+  });
+});
+
+describe('buildColdKnowledge (attribution contract — founder-sim debt #1)', () => {
+  it('a stated target is ALWAYS the owner\'s, with an in-text attribution instruction', () => {
+    const k = buildColdKnowledge({ goalMetric: 'cpa', goalValue: 30, grossMarginPct: null, breakevenRoas: 1.0 });
+    expect(k).toContain('The account owner set this target themselves at signup: CPA of 30.');
+    expect(k).toContain('ALWAYS attribute it in-text');
+    expect(k).toContain('the CPA 30 target you set when you connected');
+    expect(k).toContain('never present it as our estimate, a Meta value, or an industry number');
+    // margin NOT stated → the model must not invent one
+    expect(k).toContain('No gross margin was given — never invent or imply a margin or breakeven figure.');
+  });
+
+  it('a stated margin carries the derived breakeven with the same attribution rule', () => {
+    const k = buildColdKnowledge({ goalMetric: 'cpa', goalValue: 30, grossMarginPct: 45, breakevenRoas: 2.22 });
+    expect(k).toContain('gross margin at signup: 45%');
+    expect(k).toContain('true breakeven at 2.22x ROAS');
+    expect(k).toContain('at your stated 45% margin');
+    expect(k).not.toContain('No gross margin was given');
+  });
+
+  it('margin without a target: attribution for the margin, never-invent for the target', () => {
+    const k = buildColdKnowledge({ goalMetric: null, goalValue: null, grossMarginPct: 45, breakevenRoas: 2.22 });
+    expect(k).toContain('at your stated 45% margin');
+    expect(k).toContain('No performance target was given — never invent or imply one');
+  });
+
+  it('NEITHER stated: never invent a target, margin, or breakeven — anchor to observed figures', () => {
+    const k = buildColdKnowledge({ goalMetric: null, goalValue: null, grossMarginPct: null, breakevenRoas: 1.0 });
+    expect(k).toContain('NEVER invent, assume, or imply one');
+    expect(k).toContain("account's own observed figures");
+    expect(k).toContain('no target has been set yet');
+    expect(k).not.toContain('stated');
+  });
+
+  it('every variant keeps the first-time-audit framing', () => {
+    for (const args of [
+      { goalMetric: 'roas', goalValue: 3, grossMarginPct: 45, breakevenRoas: 2.22 },
+      { goalMetric: null, goalValue: null, grossMarginPct: null, breakevenRoas: 1.0 },
+    ]) {
+      expect(buildColdKnowledge(args)).toContain('first-time audit of a freshly connected account');
+    }
   });
 });

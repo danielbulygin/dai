@@ -349,3 +349,69 @@ describe('mergeAdPreviews (ad identity + visual enrichment — pure merge)', () 
     expect(out).toEqual(rows);
   });
 });
+
+describe('creative fatigue — margin re-basing (stated-economics, 2026-07-04)', () => {
+  // One decliner: ROAS 4.5 → 2.5 over 60 days. Halves: h1≈4.01, h2≈2.99
+  // (trend ≈ −25.4%, genuinely declining); last-14-day level ≈ 2.72.
+  const decliner = adRows('r1', 'rebase-me', 60, 300, (i) => 4.5 - (2.0 * i) / 59);
+
+  it('a higher breakeven flags ads the 1.0× default calls stable (nearFloor re-bases)', () => {
+    const at1 = computeFatigue(decliner);
+    const at45 = computeFatigue(decliner, 2.22, 'GBP', 45);
+    const a1 = (at1.data.ads as FatigueAd[]).find((a) => a.ad_id === 'r1')!;
+    const a45 = (at45.data.ads as FatigueAd[]).find((a) => a.ad_id === 'r1')!;
+    // recent ≈2.72: not near a 1.0× floor (stable), but well inside 1.5× of 2.22× (fatiguing)
+    expect(a1.class).toBe('stable');
+    expect(a45.class).toBe('fatiguing');
+    expect((at45.data as { fatiguing_daily_burn: number }).fatiguing_daily_burn).toBe(300);
+    expect((at1.data as { fatiguing_daily_burn: number }).fatiguing_daily_burn).toBe(0);
+  });
+
+  it('a higher breakeven shortens the runway — same decline, closer line', () => {
+    const a1 = (computeFatigue(decliner).data.ads as FatigueAd[]).find((a) => a.ad_id === 'r1')!;
+    const a45 = (computeFatigue(decliner, 2.22, 'GBP', 45).data.ads as FatigueAd[]).find((a) => a.ad_id === 'r1')!;
+    expect(a1.days_to_breakeven).toBe(51); // (2.72 − 1.0) ÷ 0.034/day
+    expect(a45.days_to_breakeven).toBe(15); // (2.72 − 2.22) ÷ 0.034/day
+    expect(a45.days_to_breakeven!).toBeLessThan(a1.days_to_breakeven!);
+  });
+
+  it('ATTRIBUTION: with a stated margin the copy names the line AND whose margin it is', () => {
+    const s = computeFatigue(decliner, 2.22, 'GBP', 45);
+    expect(s.derivation).toContain('2.22× ROAS');
+    expect(s.derivation).toContain('45% gross margin you gave us');
+    expect(s.summary).toContain('crosses its 2.22× breakeven');
+    const d = s.data as { breakeven_roas: number; gross_margin_pct?: number };
+    expect(d.breakeven_roas).toBe(2.22);
+    expect(d.gross_margin_pct).toBe(45);
+  });
+
+  it('ATTRIBUTION: without a margin the 1.0× default keeps its honest caveat', () => {
+    const s = computeFatigue(decliner);
+    expect(s.derivation).toContain('1.0× ROAS');
+    expect(s.derivation).toContain('true breakeven is higher');
+    expect(s.derivation).not.toContain('you gave us');
+    const d = s.data as { breakeven_roas: number; gross_margin_pct?: number };
+    expect(d.breakeven_roas).toBe(1.0);
+    expect(d.gross_margin_pct).toBeUndefined();
+  });
+
+  it('LOW-FREQUENCY GUARD re-bases too: below the stated-margin line at freq<1.5 still warns, never kills', () => {
+    const rows = [...adRows('p1', 'prospector', 40, 200, () => 2.0, 1.1), ...adRows('x', 'noise', 30, 100, () => 3)];
+    // 2.0 ROAS is above a 1.0× line (no guard) but below the 2.22× stated line (guard fires)
+    const at1 = (computeFatigue(rows).data.ads as FatigueAd[]).find((a) => a.ad_id === 'p1')!;
+    expect(at1.low_frequency_acquisition_guard).toBe(false);
+    const s45 = computeFatigue(rows, 2.22, 'GBP', 45);
+    const a45 = (s45.data.ads as FatigueAd[]).find((a) => a.ad_id === 'p1')!;
+    expect(a45.low_frequency_acquisition_guard).toBe(true);
+    expect(s45.warnings?.some((w) => w.includes('low frequency'))).toBe(true);
+  });
+
+  it('EVERGREEN protection is unchanged by the re-based line: old + holding stays protected', () => {
+    const s = computeFatigue(
+      [...adRows('e1', 'evergreen-hero', 80, 300, () => 4.0), ...adRows('x', 'noise', 30, 100, () => 3)],
+      2.22, 'GBP', 45,
+    );
+    const e = (s.data.ads as FatigueAd[]).find((a) => a.ad_id === 'e1')!;
+    expect(e.class).toBe('evergreen');
+  });
+});
