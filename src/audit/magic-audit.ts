@@ -84,8 +84,12 @@ export interface ColdInjection {
   goalValue?: number | null;
 }
 
-/** Sections that read warehouse tables a stranger doesn't have. */
-const COLD_SKIP_SECTIONS = ['dataset_health', 'account_structure', 'creative_analysis'];
+/** Sections that read warehouse tables a stranger doesn't have.
+ * concept_roas/creative_diversity need angle tags from creative_analysis —
+ * without them they render as "0% tagged" dead weight (Dan, first live cold
+ * audit 2026-07-03). Future: a cold angle-tagger (LLM over top ad names +
+ * creative bodies) can un-skip them. */
+const COLD_SKIP_SECTIONS = ['dataset_health', 'account_structure', 'creative_analysis', 'concept_roas', 'creative_diversity'];
 
 export interface LeadInsight {
   headline: string;
