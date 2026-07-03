@@ -1,5 +1,46 @@
-import { describe, it, expect, afterEach } from 'vitest';
-import { normalizeAdAccountId, pickAdAccount, envTokenFor } from '../src/integrations/meta-token.js';
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import { normalizeAdAccountId, pickAdAccount, envTokenFor, getTokenForClient } from '../src/integrations/meta-token.js';
+
+/**
+ * Supabase mock for the getTokenForClient resolution tests: `state` controls
+ * what the two lookups (meta_connections, clients) return. The query builder
+ * is chainable and resolves at maybeSingle(), like the real client.
+ */
+const { state } = vi.hoisted(() => ({
+  state: {
+    connection: null as Record<string, unknown> | null,
+    client: { id: 'client-uuid', ad_account_id: '123456' } as Record<string, unknown> | null,
+  },
+}));
+
+vi.mock('../src/integrations/supabase.js', () => ({
+  getSupabase: () => ({
+    from: (table: string) => {
+      let selected = '';
+      const q = {
+        select: (s: string) => { selected = s; return q; },
+        eq: () => q,
+        ilike: () => q,
+        order: () => q,
+        limit: () => q,
+        maybeSingle: async () => {
+          if (table === 'meta_connections') return { data: state.connection, error: null };
+          if (table === 'clients') {
+            if (!state.client) return { data: null, error: null };
+            return {
+              data: selected.includes('ad_account_id')
+                ? { ad_account_id: state.client.ad_account_id }
+                : { id: state.client.id },
+              error: null,
+            };
+          }
+          return { data: null, error: null };
+        },
+      };
+      return q;
+    },
+  }),
+}));
 
 /**
  * The token bridge's pure selection logic (the DB lookup is integration-tested
@@ -67,5 +108,53 @@ describe('envTokenFor', () => {
     expect(envTokenFor('AB')).not.toBe('gs-token');
     expect(envTokenFor('GG')).not.toBe('gs-token');
     expect(envTokenFor('SS')).not.toBe('gs-token');
+  });
+});
+
+describe('getTokenForClient — resolution order + fallback guard', () => {
+  const orig = process.env.META_ACCESS_TOKEN_GROWTHSQUAD;
+  afterEach(() => {
+    process.env.META_ACCESS_TOKEN_GROWTHSQUAD = orig;
+    state.connection = null;
+    state.client = { id: 'client-uuid', ad_account_id: '123456' };
+  });
+
+  it('uses the connection FIRST, even when a clientCode with an env token is also given', async () => {
+    process.env.META_ACCESS_TOKEN_GROWTHSQUAD = 'gs-token';
+    state.connection = {
+      id: 'conn-1', client_id: null, access_token: 'user-oauth-token',
+      ad_account_ids: ['111', '222'], mode: 'readonly', status: 'active',
+    };
+    const res = await getTokenForClient({ userId: 'u1', clientCode: 'LA' });
+    expect(res?.source).toBe('connection');
+    expect(res?.token).toBe('user-oauth-token');
+    expect(res?.adAccountId).toBe('act_111'); // funnel parity: first granted, normalised
+    expect(res?.mode).toBe('readonly');
+  });
+
+  it('honours a pinned granted account on the connection', async () => {
+    state.connection = {
+      id: 'conn-1', client_id: null, access_token: 'user-oauth-token',
+      ad_account_ids: ['111', '222'], mode: 'readonly', status: 'active',
+    };
+    const res = await getTokenForClient({ userId: 'u1', adAccountId: 'act_222' });
+    expect(res?.adAccountId).toBe('act_222');
+  });
+
+  it('HARD GUARD: a userId lookup with no usable connection returns null — never the env token', async () => {
+    process.env.META_ACCESS_TOKEN_GROWTHSQUAD = 'gs-token';
+    state.connection = null; // stranger's connection missing/expired
+    const res = await getTokenForClient({ userId: 'u1', clientCode: 'LA' });
+    expect(res).toBeNull();
+  });
+
+  it('falls back to the env token + clients row for a clientCode-only (legacy) lookup', async () => {
+    process.env.META_ACCESS_TOKEN_GROWTHSQUAD = 'gs-token';
+    state.connection = null;
+    const res = await getTokenForClient({ clientCode: 'LA' });
+    expect(res?.source).toBe('env');
+    expect(res?.mode).toBe('legacy');
+    expect(res?.token).toBe('gs-token');
+    expect(res?.adAccountId).toBe('act_123456'); // from clients row, normalised
   });
 });

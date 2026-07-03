@@ -166,6 +166,13 @@ export async function getTokenForClient(lookup: TokenLookup): Promise<MetaTokenR
 
   // 2) Legacy env token — only meaningful with a client code (env token is
   //    agency-wide; the account comes from the clients row).
+  //    HARD GUARD: a userId lookup is a self-serve identity. If their
+  //    connection is missing/expired/unusable we FAIL — a stranger's audit must
+  //    never ride an agency token, even when a clientCode is also supplied.
+  if (lookup.userId) {
+    logger.warn({ hadClientCode: Boolean(lookup.clientCode) }, 'no usable connection for userId lookup — refusing env fallback');
+    return null;
+  }
   if (lookup.clientCode) {
     const token = envTokenFor(lookup.clientCode);
     const acct = lookup.adAccountId

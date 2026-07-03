@@ -1373,9 +1373,14 @@ export async function runMagicAudit(
   // "that's MY account" (UX review §2.1: recognition is the first magic beat).
   const recognition = await quickRecognition(client.id, client.currency);
 
+  // Identity contract v2 (Dan ruling 2026-07-03): tenant_id (uuid) is the
+  // canonical audit identity — clients.id for agency clients, auth users.id
+  // for self-serve strangers (cold path). client_code stays as a display
+  // label. Requires the magic_audits.tenant_id DDL (bmad migration
+  // 20260703150000) applied BEFORE this deploys — unknown column fails hard.
   const { data: row, error } = await supabase
     .from('magic_audits')
-    .insert({ token, client_code: code, client_name: client.name, sections, recognition })
+    .insert({ token, client_code: code, client_name: client.name, sections, recognition, tenant_id: client.id })
     .select('id')
     .single();
   if (error || !row) throw new Error(`audit row insert failed: ${error?.message}`);

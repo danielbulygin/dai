@@ -11,7 +11,7 @@ import type { PackAdRow, PackAccountRow } from './report-pack.js';
  * aggregating the ad-level pull per date — one pull, internally consistent, and
  * the R2 diff against the synced warehouse surfaces any real divergence.
  *
- * Field semantics mirror the warehouse sync (daily_fb_sync.py) so the diff is
+ * Field semantics follow the warehouse sync (daily_fb_sync.py) so the diff is
  * apples-to-apples:
  *  - purchases   = actions[omni_purchase | purchase]      (count)
  *  - purchase_value = action_values[omni_purchase | purchase]
@@ -21,6 +21,19 @@ import type { PackAdRow, PackAccountRow } from './report-pack.js';
  *  - hold_rate   = video_thruplay / impressions (FRACTION, 4dp)
  * `results` is left 0 (ad_daily.results is null for most accounts; the engine
  * falls back to purchases||leads), matching warehouse behaviour.
+ *
+ * KNOWN divergences from the warehouse (intentional — assert-tolerate these in
+ * the R2 cold-vs-synced diff; full list in the build-3 handover):
+ *  - purchases COUNT: warehouse reads bare `purchase` only (its purchase_VALUE
+ *    is omni-first — the warehouse count/value disagree; that's a warehouse
+ *    finding, not a bug here).
+ *  - hold_rate: warehouse syncs never populate it; cold computes it.
+ *  - funnel counts (view_content / add_to_cart / initiate_checkout): cold falls
+ *    back to the omni_* variant when the bare event is absent; warehouse reads
+ *    the bare name only.
+ *  - account rows: warehouse account_daily merges the Graph `conversions` array
+ *    (custom pixel events) into actions before extraction; cold-derived account
+ *    rows are summed from ad-level actions, which have no such merge.
  */
 
 interface RawAction {
