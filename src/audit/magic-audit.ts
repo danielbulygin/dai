@@ -10,10 +10,17 @@ import { extractJson, triageLibrary, type LibraryAd } from './library-triage.js'
 import { buildClientKnowledgeBundle } from '../agents/client-context.js';
 import {
   computeConcentration, computeFatigue, computeCohorts, computeCostTrend, computeDayOfWeek,
-  computeConceptRoas, computeOptimizationEvents, buildProvisionalInsights, computeHookCorrection,
+  computeConceptRoas, computeOptimizationEvents, buildProvisionalInsights, computeHookCorrection, kpiMode,
   type PackAdRow, type PackAccountRow, type AdsetConfigLite, type FatigueAd, type PlacementHookRow,
 } from './report-pack.js';
-import { buildScorecard, type ScorecardInputs } from './scorecard.js';
+import { buildScorecard, type ScorecardInputs, type ScorecardEntry } from './scorecard.js';
+import {
+  computePlacementBreakdown, computeAudienceBreakdown, computeTargetingSplit, computeLearningLimited,
+  computeSaturation, computeCreativeDiversity, computeCohortWave, computeWhatsWorking, computeLandingPages,
+  computeAccountFacts,
+  type PlacementInsightRow, type DemoInsightRow, type GeoInsightRow, type TargetingSpecLite,
+  type WeeklyReachRow, type LandingAdRow, type DeadUrlCheck,
+} from './report-pack-extra.js';
 import { buildAccountModel, mergeAccountModel, type AccountModel, type AccountModelInputs } from './account-model.js';
 
 /**
@@ -73,10 +80,19 @@ const SECTION_ORDER: Array<Pick<AuditSection, 'key' | 'title' | 'status'>> = [
   { key: 'creative_cohorts', title: 'Creative Cohorts — living off old creative?', status: 'pending' },
   { key: 'cost_trends', title: 'CPM & Auction Pressure', status: 'pending' },
   { key: 'timing_patterns', title: 'Day-of-Week Pattern', status: 'pending' },
+  { key: 'placement_breakdown', title: 'Placements — where the spend actually goes', status: 'pending' },
+  { key: 'audience_breakdown', title: 'Audience Delivery — age, gender, geography', status: 'pending' },
+  { key: 'saturation', title: 'Audience Saturation — how much headroom is left?', status: 'pending' },
   { key: 'concept_roas', title: 'Creative Angles — spend vs return by concept', status: 'pending' },
+  { key: 'creative_diversity', title: 'Creative Diversity — how fragile is the portfolio?', status: 'pending' },
+  { key: 'whats_working', title: "What's Working — the protect list", status: 'pending' },
   { key: 'optimization_events', title: 'Optimization Events — is Meta hunting the right thing?', status: 'pending' },
+  { key: 'learning_limited', title: 'Learning Phase — is the structure starving Meta?', status: 'pending' },
+  { key: 'targeting_split', title: 'Targeting — broad vs interests vs audiences', status: 'pending' },
+  { key: 'landing_pages', title: 'Landing Pages — spend by destination + dead-URL check', status: 'pending' },
   { key: 'creative_analysis', title: 'Creative Performance & Angles', status: 'pending' },
   { key: 'funnel_read', title: 'Funnel Diagnosis', status: 'pending' },
+  { key: 'account_facts', title: 'Did You Know — six months of account texture', status: 'pending' },
   { key: 'competitor_teardown', title: 'Ads Library Landscape', status: 'pending' },
 ];
 
@@ -785,6 +801,231 @@ async function fetchPlacementHookRows(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Session-G pulls — the full report set (all fail-soft: a failed pull turns
+// its section into an honest error, never kills the audit)
+// ---------------------------------------------------------------------------
+
+interface RawActionList {
+  action_type: string;
+  value: string;
+}
+const actionNum = (xs: RawActionList[] | undefined, type: string): number => Number(xs?.find((a) => a.action_type === type)?.value ?? 0);
+const purchasesOf = (actions?: RawActionList[]): number => actionNum(actions, 'omni_purchase') || actionNum(actions, 'purchase');
+const leadsOf = (actions?: RawActionList[]): number => actionNum(actions, 'lead');
+
+/** One account-insights pull with the given breakdowns, last 30 days. */
+async function fetchInsightsBreakdown(
+  clientCode: string,
+  adAccountId: string | null,
+  breakdowns: string,
+  extraParams = '',
+): Promise<Array<Record<string, unknown> & { spend?: string; impressions?: string; actions?: RawActionList[]; action_values?: RawActionList[] }> | null> {
+  if (!adAccountId) return null;
+  const token = metaTokenFor(clientCode);
+  if (!token) return null;
+  const acct = adAccountId.startsWith('act_') ? adAccountId : `act_${adAccountId}`;
+  try {
+    const resp = await fetch(
+      `https://graph.facebook.com/v21.0/${acct}/insights?level=account&date_preset=last_30d` +
+        `&breakdowns=${breakdowns}&fields=spend,impressions,actions,action_values&limit=500${extraParams}&access_token=${token}`,
+      { signal: AbortSignal.timeout(30_000) },
+    );
+    if (!resp.ok) return null;
+    const body = (await resp.json()) as { data?: Array<Record<string, unknown>> };
+    return (body.data ?? []) as never;
+  } catch {
+    return null;
+  }
+}
+
+/** Weekly reach/impressions/spend, last ~91 days (Meta's own deduped weekly reach). */
+async function fetchWeeklyReach(clientCode: string, adAccountId: string | null): Promise<WeeklyReachRow[] | null> {
+  if (!adAccountId) return null;
+  const token = metaTokenFor(clientCode);
+  if (!token) return null;
+  const acct = adAccountId.startsWith('act_') ? adAccountId : `act_${adAccountId}`;
+  const until = new Date().toISOString().slice(0, 10);
+  const since = new Date(Date.now() - 91 * 86400_000).toISOString().slice(0, 10);
+  try {
+    const resp = await fetch(
+      `https://graph.facebook.com/v21.0/${acct}/insights?level=account&fields=reach,impressions,spend` +
+        `&time_increment=7&time_range=${encodeURIComponent(JSON.stringify({ since, until }))}&limit=52&access_token=${token}`,
+      { signal: AbortSignal.timeout(30_000) },
+    );
+    if (!resp.ok) return null;
+    const body = (await resp.json()) as { data?: Array<{ date_start?: string; reach?: string; impressions?: string; spend?: string }> };
+    if (!body.data?.length) return null;
+    return body.data.map((r) => ({
+      week: r.date_start ?? '',
+      reach: Number(r.reach ?? 0),
+      impressions: Number(r.impressions ?? 0),
+      spend: Number(r.spend ?? 0),
+    }));
+  } catch {
+    return null;
+  }
+}
+
+/** Live targeting spec per ad set, classified fields only. */
+async function fetchTargetingSpecs(clientCode: string, adAccountId: string | null): Promise<TargetingSpecLite[] | null> {
+  if (!adAccountId) return null;
+  const token = metaTokenFor(clientCode);
+  if (!token) return null;
+  const acct = adAccountId.startsWith('act_') ? adAccountId : `act_${adAccountId}`;
+  const out: TargetingSpecLite[] = [];
+  let url =
+    `https://graph.facebook.com/v21.0/${acct}/adsets` +
+    `?fields=id,name,effective_status,targeting{age_min,age_max,genders,custom_audiences,flexible_spec,targeting_automation}` +
+    `&limit=200&access_token=${token}`;
+  try {
+    for (let page = 0; page < 5 && url; page++) {
+      const resp = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+      if (!resp.ok) return out.length ? out : null;
+      const body = (await resp.json()) as {
+        data?: Array<{
+          id: string;
+          name: string;
+          effective_status?: string;
+          targeting?: {
+            age_min?: number;
+            age_max?: number;
+            genders?: number[];
+            custom_audiences?: Array<{ id: string; name?: string }>;
+            flexible_spec?: Array<Record<string, unknown>>;
+            targeting_automation?: { advantage_audience?: number };
+          };
+        }>;
+        paging?: { next?: string };
+      };
+      for (const a of body.data ?? []) {
+        const t = a.targeting ?? {};
+        const cas = t.custom_audiences ?? [];
+        const hasLal = cas.some((c) => /lookalike|lal/i.test(c.name ?? ''));
+        const hasInterests = (t.flexible_spec ?? []).some((f) => Object.keys(f).some((k) => k === 'interests' || k === 'behaviors'));
+        out.push({
+          adset_id: a.id,
+          adset_name: a.name,
+          effective_status: a.effective_status ?? null,
+          advantage_audience: (t.targeting_automation?.advantage_audience ?? 0) === 1,
+          has_custom_audiences: cas.length > 0,
+          has_lookalikes: hasLal,
+          has_interests: hasInterests,
+          age_min: t.age_min ?? null,
+          age_max: t.age_max ?? null,
+          genders: t.genders?.length === 1 ? (t.genders[0] === 1 ? 'male' : 'female') : t.genders?.length ? 'all' : null,
+        });
+      }
+      url = body.paging?.next ?? '';
+    }
+    return out;
+  } catch {
+    return out.length ? out : null;
+  }
+}
+
+/** Ad ids whose creative is branded content (partnership ads). */
+async function fetchPartnershipAdIds(clientCode: string, adAccountId: string | null): Promise<Set<string> | null> {
+  if (!adAccountId) return null;
+  const token = metaTokenFor(clientCode);
+  if (!token) return null;
+  const acct = adAccountId.startsWith('act_') ? adAccountId : `act_${adAccountId}`;
+  const flagged = new Set<string>();
+  let url =
+    `https://graph.facebook.com/v21.0/${acct}/ads` +
+    `?fields=id,creative{branded_content_sponsor_page_id}&limit=250&access_token=${token}`;
+  try {
+    for (let page = 0; page < 4 && url; page++) {
+      const resp = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+      if (!resp.ok) return flagged;
+      const body = (await resp.json()) as {
+        data?: Array<{ id: string; creative?: { branded_content_sponsor_page_id?: string } }>;
+        paging?: { next?: string };
+      };
+      for (const a of body.data ?? []) if (a.creative?.branded_content_sponsor_page_id) flagged.add(a.id);
+      url = body.paging?.next ?? '';
+    }
+    return flagged;
+  } catch {
+    return flagged;
+  }
+}
+
+/**
+ * Resolve each top-spend ad's CURRENT destination live from its Meta creative
+ * (stored landing_page_raw goes stale on dynamic creatives — HARD RULE from
+ * the NP dead-URL false-positive incident, 2026-07-01), then fetch each URL.
+ * Only hard failures read dead; 429/403/timeouts read inconclusive.
+ */
+async function checkTopAdDestinations(
+  clientCode: string,
+  topAds: Array<{ ad_id: string; ad_name: string; spend: number }>,
+): Promise<DeadUrlCheck[]> {
+  const token = metaTokenFor(clientCode);
+  if (!token || topAds.length === 0) return [];
+  const byUrl = new Map<string, { ads: string[]; spend: number }>();
+  try {
+    const ids = topAds.map((a) => a.ad_id).slice(0, 15);
+    const resp = await fetch(
+      `https://graph.facebook.com/v21.0/?ids=${ids.join(',')}` +
+        `&fields=name,creative{asset_feed_spec{link_urls},object_story_spec{link_data{link},video_data{call_to_action}}}` +
+        `&access_token=${token}`,
+      { signal: AbortSignal.timeout(30_000) },
+    );
+    if (!resp.ok) return [];
+    const body = (await resp.json()) as Record<
+      string,
+      {
+        creative?: {
+          asset_feed_spec?: { link_urls?: Array<{ website_url?: string }> };
+          object_story_spec?: { link_data?: { link?: string }; video_data?: { call_to_action?: { value?: { link?: string } } } };
+        };
+      }
+    >;
+    for (const ad of topAds) {
+      const c = body[ad.ad_id]?.creative;
+      const url =
+        c?.asset_feed_spec?.link_urls?.[0]?.website_url ??
+        c?.object_story_spec?.link_data?.link ??
+        c?.object_story_spec?.video_data?.call_to_action?.value?.link;
+      if (!url || !/^https?:\/\//.test(url)) continue;
+      const clean = url.split('?')[0]!;
+      const agg = byUrl.get(clean) ?? { ads: [], spend: 0 };
+      agg.ads.push(ad.ad_name);
+      agg.spend += ad.spend;
+      byUrl.set(clean, agg);
+    }
+  } catch {
+    return [];
+  }
+
+  const checks: DeadUrlCheck[] = [];
+  for (const [url, agg] of [...byUrl.entries()].slice(0, 10)) {
+    let verdict: DeadUrlCheck['verdict'] = 'ok';
+    let status: number | null = null;
+    try {
+      const resp = await fetch(url, {
+        redirect: 'follow',
+        headers: { 'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/126 Safari/537.36' },
+        signal: AbortSignal.timeout(15_000),
+      });
+      status = resp.status;
+      if (resp.status === 429 || resp.status === 403) verdict = 'inconclusive';
+      else if (resp.status >= 400) verdict = 'dead';
+      else {
+        const finalPath = new URL(resp.url).pathname;
+        const origPath = new URL(url).pathname;
+        if (origPath !== '/' && finalPath === '/') verdict = 'redirect_home';
+      }
+    } catch (err) {
+      verdict = err instanceof Error && err.name === 'TimeoutError' ? 'inconclusive' : 'dead';
+    }
+    checks.push({ url, verdict, status, daily_burn: agg.spend / 30, ads: agg.ads.slice(0, 5) });
+    await new Promise((r) => setTimeout(r, 300)); // gentle pacing — never burst a shop
+  }
+  return checks;
+}
+
 interface CompetitorSynthesis {
   summary: string;
   pages: Array<{ page_name: string; velocity_read: string; dominant_messages: string[]; lp_strategy: string }>;
@@ -1006,6 +1247,36 @@ function workLineFor(key: string, s: AuditSection): string | null {
       return typeof d.ads_with_spend === 'number' ? `Read the copy + transcripts of the top spenders (${d.ads_with_spend} ads in market)` : null;
     case 'funnel_read':
       return `Walked the funnel stage by stage (30 days)`;
+    case 'placement_breakdown': {
+      const n = (d.platforms as unknown[] | undefined)?.length ?? 0;
+      return n ? `Split spend across ${n} platforms and their placements — Audience Network checked` : null;
+    }
+    case 'audience_breakdown':
+      return `Broke delivery down by age, gender and country`;
+    case 'saturation': {
+      const n = (d.weeks as unknown[] | undefined)?.length ?? 0;
+      return n ? `Read ${n} weeks of reach vs frequency for saturation` : null;
+    }
+    case 'creative_diversity':
+      return typeof d.angles === 'number' && d.angles > 0 ? `Measured portfolio concentration across ${d.angles} creative angles` : null;
+    case 'whats_working':
+      return `Assembled the protect list — what NOT to touch`;
+    case 'learning_limited': {
+      const n = (d.rows as unknown[] | undefined)?.length ?? 0;
+      return n ? `Checked ${n} active ad sets against Meta's learning-phase bar` : null;
+    }
+    case 'targeting_split': {
+      const n = (d.classes as unknown[] | undefined)?.length ?? 0;
+      return n ? `Classified every spending ad set's live targeting (${n} styles found)` : null;
+    }
+    case 'landing_pages': {
+      const checks = (d.dead_checks as unknown[] | undefined)?.length ?? 0;
+      return checks
+        ? `Resolved the top spenders' CURRENT destinations from Meta and fetched all ${checks} live`
+        : `Ranked spend by landing destination`;
+    }
+    case 'account_facts':
+      return `Pulled six months of account texture — the "did you know" facts`;
     case 'competitor_teardown':
       return `Scanned the public Ads Library footprint`;
     default:
@@ -1142,7 +1413,15 @@ export async function runMagicAudit(
   let packRows180: Array<Pick<PackAdRow, 'ad_id' | 'date' | 'spend'>> = [];
   let packAccRows90: PackAccountRow[] = [];
   let accFull30: Array<Record<string, unknown>> = [];
-  let landing30: Array<{ spend: number; landing_page_market: string | null; landing_page_path: string | null }> = [];
+  let landing30: Array<{
+    ad_id: string;
+    spend: number;
+    purchases: number;
+    purchase_value: number;
+    leads: number | null;
+    landing_page_market: string | null;
+    landing_page_path: string | null;
+  }> = [];
   try {
     // Caps sized to the LARGEST account on the desk (NP: 144k ad-day rows/90d).
     // The old 40k cap silently truncated NP to 28% of its rows — concentration
@@ -1158,9 +1437,17 @@ export async function runMagicAudit(
         (q) => q.eq('client_id', client.id).gte('date', daysAgoISO(30)),
         200,
       ),
-      pageAll<{ spend: number; landing_page_market: string | null; landing_page_path: string | null }>(
+      pageAll<{
+        ad_id: string;
+        spend: number;
+        purchases: number;
+        purchase_value: number;
+        leads: number | null;
+        landing_page_market: string | null;
+        landing_page_path: string | null;
+      }>(
         'ad_daily',
-        'spend, landing_page_market, landing_page_path',
+        'ad_id, spend, purchases, purchase_value, leads:actions->lead, landing_page_market, landing_page_path',
         (q) => q.eq('client_id', client.id).gte('date', daysAgoISO(30)),
         250_000,
       ),
@@ -1201,18 +1488,81 @@ export async function runMagicAudit(
     spendByAdset.set(String(r.adset_id), (spendByAdset.get(String(r.adset_id)) ?? 0) + (r.spend || 0));
   }
 
+  // Session-G shared state: sections later in the order reuse earlier reads.
+  let savedScorecard: ScorecardEntry[] | null = null;
+  let angleByAdIdShared: Map<string, string> | null = null;
+  const getAngles = async (): Promise<Map<string, string>> => {
+    if (!angleByAdIdShared) angleByAdIdShared = await fetchAngleByAdId(client.id, new Set(rows30.map((r) => r.ad_id)));
+    return angleByAdIdShared;
+  };
+  const auditKpiMode = kpiMode(rows30);
+
   const RUNNERS: Record<string, () => Promise<Partial<AuditSection>>> = {
     dataset_health: () => runDatasetHealth(code),
     account_structure: () => runAccountStructure(code),
     spend_concentration: async () => computeConcentration(rows30),
     creative_fatigue: async () => computeFatigue(packRows90, 1.0, client.currency),
-    creative_cohorts: async () => computeCohorts(packRows180),
+    creative_cohorts: async () => {
+      const s = computeCohorts(packRows180);
+      // Second cohort view (design batch 4): absolute monthly cohorts over time.
+      s.data.cohort_wave = computeCohortWave(packRows180);
+      return s;
+    },
     cost_trends: async () => computeCostTrend(packAccRows90, client.currency),
     timing_patterns: async () => computeDayOfWeek(packAccRows90),
-    concept_roas: async () => {
-      const angleByAdId = await fetchAngleByAdId(client.id, new Set(rows30.map((r) => r.ad_id)));
-      return computeConceptRoas(rows30, angleByAdId);
+    placement_breakdown: async () => {
+      const raw = await fetchInsightsBreakdown(code, client.adAccountId, 'publisher_platform,platform_position');
+      if (!raw) return { status: 'error', error: 'placement insights pull failed' };
+      const rows: PlacementInsightRow[] = raw.map((r) => ({
+        publisher_platform: String(r.publisher_platform ?? 'unknown'),
+        platform_position: String(r.platform_position ?? 'unknown'),
+        spend: Number(r.spend ?? 0),
+        impressions: Number(r.impressions ?? 0),
+        purchases: purchasesOf(r.actions),
+        purchase_value: purchasesOf(r.action_values),
+        leads: leadsOf(r.actions),
+      }));
+      return computePlacementBreakdown(rows, client.currency);
     },
+    audience_breakdown: async () => {
+      const [demoRaw, geoRaw] = await Promise.all([
+        fetchInsightsBreakdown(code, client.adAccountId, 'age,gender'),
+        fetchInsightsBreakdown(code, client.adAccountId, 'country'),
+      ]);
+      if (!demoRaw) return { status: 'error', error: 'demographic insights pull failed' };
+      const demo: DemoInsightRow[] = demoRaw.map((r) => ({
+        age: String(r.age ?? 'unknown'),
+        gender: String(r.gender ?? 'unknown'),
+        spend: Number(r.spend ?? 0),
+        impressions: Number(r.impressions ?? 0),
+        purchases: purchasesOf(r.actions),
+        purchase_value: purchasesOf(r.action_values),
+        leads: leadsOf(r.actions),
+      }));
+      const geo: GeoInsightRow[] = (geoRaw ?? []).map((r) => ({
+        country: String(r.country ?? 'unknown'),
+        spend: Number(r.spend ?? 0),
+        impressions: Number(r.impressions ?? 0),
+        purchases: purchasesOf(r.actions),
+        purchase_value: purchasesOf(r.action_values),
+        leads: leadsOf(r.actions),
+      }));
+      return computeAudienceBreakdown(demo, geo, client.currency);
+    },
+    saturation: async () => {
+      const weeks = await fetchWeeklyReach(code, client.adAccountId);
+      if (!weeks) return { status: 'error', error: 'weekly reach pull failed' };
+      return computeSaturation(weeks, client.currency);
+    },
+    concept_roas: async () => computeConceptRoas(rows30, await getAngles()),
+    creative_diversity: async () => computeCreativeDiversity(rows30, await getAngles(), client.currency),
+    whats_working: async () =>
+      computeWhatsWorking(
+        sections['creative_fatigue']?.data as Parameters<typeof computeWhatsWorking>[0],
+        sections['concept_roas']?.data as Parameters<typeof computeWhatsWorking>[1],
+        savedScorecard ?? undefined,
+        client.currency,
+      ),
     optimization_events: async () => {
       adsetConfigsForModel = await fetchAdsetConfigs(code, client.adAccountId);
       const t = accountTotals30 ?? { purchases: 0, leads: 0, purchase_value: 0 };
@@ -1222,8 +1572,104 @@ export async function runMagicAudit(
         purchase_value: t.purchase_value ?? 0,
       }, client.currency);
     },
-    creative_analysis: () => runCreativeAnalysis(code, meter, client, synthSystem),
+    learning_limited: async () => {
+      // Weekly optimization-event rate per ad set from the last 28 days.
+      const cut = daysAgoISO(28);
+      const weekly = new Map<string, number>();
+      for (const r of packRows90) {
+        if (!r.adset_id || r.date < cut) continue;
+        const events = auditKpiMode === 'roas' ? r.purchases || 0 : r.purchases || r.leads || 0;
+        weekly.set(String(r.adset_id), (weekly.get(String(r.adset_id)) ?? 0) + events / 4);
+      }
+      const adsets = adsetConfigsForModel.length ? adsetConfigsForModel : await fetchAdsetConfigs(code, client.adAccountId);
+      return computeLearningLimited(adsets, weekly, spendByAdset, client.currency);
+    },
+    targeting_split: async () => {
+      const specs = await fetchTargetingSpecs(code, client.adAccountId);
+      if (!specs) return { status: 'error', error: 'targeting spec pull failed' };
+      const kpiByAdset = new Map<string, { value: number; results: number }>();
+      for (const r of rows30) {
+        if (!r.adset_id) continue;
+        const a = kpiByAdset.get(String(r.adset_id)) ?? { value: 0, results: 0 };
+        a.value += r.purchase_value || 0;
+        a.results += (auditKpiMode === 'roas' ? r.purchases : r.purchases || r.leads) || 0;
+        kpiByAdset.set(String(r.adset_id), a);
+      }
+      return computeTargetingSplit(specs, spendByAdset, kpiByAdset, rows30, client.currency);
+    },
+    landing_pages: async () => {
+      const adRows: LandingAdRow[] = landing30.map((r) => ({
+        ad_id: r.ad_id,
+        spend: r.spend || 0,
+        purchases: r.purchases || 0,
+        purchase_value: r.purchase_value || 0,
+        leads: r.leads || 0,
+        landing_page_path: r.landing_page_path,
+      }));
+      const byAd = new Map<string, { ad_id: string; ad_name: string; spend: number }>();
+      for (const r of rows30) {
+        const a = byAd.get(r.ad_id) ?? { ad_id: r.ad_id, ad_name: r.ad_name ?? r.ad_id, spend: 0 };
+        a.spend += r.spend || 0;
+        if (r.ad_name) a.ad_name = r.ad_name;
+        byAd.set(r.ad_id, a);
+      }
+      const topAds = [...byAd.values()].sort((a, b) => b.spend - a.spend).slice(0, 15);
+      const checks = await checkTopAdDestinations(code, topAds);
+      return computeLandingPages(adRows, checks, client.currency, auditKpiMode);
+    },
+    creative_analysis: async () => {
+      const s = await runCreativeAnalysis(code, meter, client, synthSystem);
+      // 9:16 creative tiles (design "done 2026-06-25"): give each winner its
+      // thumbnail + delivery stats so the page renders tiles, not a row list.
+      try {
+        const winners = (s.data as { winners?: Array<{ ad_name: string; [k: string]: unknown }> } | undefined)?.winners;
+        if (winners?.length) {
+          const idByName = new Map<string, string>();
+          for (const r of rows30) if (r.ad_name) idByName.set(r.ad_name, r.ad_id);
+          const ids = winners.map((w) => idByName.get(w.ad_name)).filter((v): v is string => !!v);
+          if (ids.length) {
+            const thumbs = await pageAll<{ ad_id: string; thumbnail_url: string | null }>(
+              'creatives',
+              'ad_id, thumbnail_url',
+              (q) => q.in('ad_id', ids),
+              200,
+            );
+            const thumbById = new Map(thumbs.map((t) => [t.ad_id, t.thumbnail_url]));
+            const statsById = new Map<string, { hook: number | null; spend: number }>();
+            for (const r of rows30) {
+              const a = statsById.get(r.ad_id) ?? { hook: null, spend: 0 };
+              a.spend += r.spend || 0;
+              if (typeof r.hook_rate === 'number' && r.hook_rate > 0) a.hook = Math.round(r.hook_rate * 1000) / 10;
+              statsById.set(r.ad_id, a);
+            }
+            for (const w of winners) {
+              const id = idByName.get(w.ad_name);
+              if (!id) continue;
+              w.thumbnail_url = thumbById.get(id) ?? null;
+              w.hook_rate_pct = statsById.get(id)?.hook ?? null;
+            }
+          }
+        }
+      } catch (err) {
+        logger.warn({ err, code }, 'winner tile enrichment failed (section still valid)');
+      }
+      return s;
+    },
     funnel_read: () => runFunnelRead(code, meter, client, synthSystem),
+    account_facts: async () => {
+      const partnershipIds = await fetchPartnershipAdIds(code, client.adAccountId);
+      let partnershipPct: number | null = null;
+      if (partnershipIds && partnershipIds.size > 0) {
+        const total = rows30.reduce((s, r) => s + (r.spend || 0), 0);
+        const flagged = rows30.filter((r) => partnershipIds.has(r.ad_id)).reduce((s, r) => s + (r.spend || 0), 0);
+        partnershipPct = total > 0 ? Math.round((flagged / total) * 1000) / 10 : null;
+      } else if (partnershipIds) {
+        partnershipPct = 0;
+      }
+      const adNames = new Map<string, string>();
+      for (const r of packRows90) if (r.ad_name) adNames.set(r.ad_id, r.ad_name);
+      return computeAccountFacts({ rows180: packRows180, adNames, partnershipSpendPct: partnershipPct, currency: client.currency });
+    },
     competitor_teardown: () => runCompetitorTeardown(code, meter, client, options, synthSystem),
   };
 
@@ -1302,6 +1748,7 @@ export async function runMagicAudit(
       }
 
       if (scorecard.length) await updateRow({ scorecard });
+      savedScorecard = scorecard; // later sections (whats_working) read it
       logger.info({ code, dimensions: scorecard.map((e) => `${e.key}:${e.band}`) }, 'scorecard computed');
 
       // Provisional top-3 lead insights the moment the fast tier lands — the
