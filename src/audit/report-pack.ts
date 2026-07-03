@@ -338,6 +338,178 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currenc
 }
 
 // ---------------------------------------------------------------------------
+// 2.5 Budget scatter — spend × return per ad (the Lumira §01 hero visual)
+//
+// One dot per ad: x = 30-day spend, y = 30-day ROAS, size = avg frequency.
+// The dot's COLOUR is the existing fatigue diagnosis, NOT a fresh 30-day
+// re-classification — so the "move it" (red) set is exactly the unguarded
+// fatiguing ads whose burn the fatigue chapter already posts. That is the
+// binding anti-double-count contract: the scatter is a VIEW of money counted
+// once in the fatigue chapter, never a second tally. It posts a stat kicker
+// (the starved-winner contrast), never a leak.
+// ---------------------------------------------------------------------------
+
+export interface ScatterDot {
+  ad_id: string;
+  ad_name: string;
+  spend_30d: number;
+  /** ROAS over the last 30 days (null in cost-per-result mode). */
+  roas_30d: number | null;
+  /** Cost per result over 30 days (cpr mode; null in ROAS mode). */
+  cpr_30d: number | null;
+  avg_frequency: number | null;
+  spend_share_pct: number;
+  /** Colour class — driven by the fatigue diagnosis (trend), never age/position. */
+  klass: 'move' | 'acquisition' | 'evergreen' | 'neutral';
+  /** Gold-ring annotation: a strong ad getting a small share of budget. */
+  starved: boolean;
+}
+
+/** A dot needs enough spend to be worth reading — noise dots pollute the field. */
+export const SCATTER_FLOOR_CAP = 1_000;
+
+export function computeBudgetScatter(
+  rows30: PackAdRow[],
+  fatigueAds: Array<Pick<FatigueAd, 'ad_id' | 'class' | 'low_frequency_acquisition_guard'>>,
+  breakevenRoas = 1.0,
+  currency = '',
+  grossMarginPct: number | null = null,
+): PackSection & { data: { dots: ScatterDot[] } & Record<string, unknown> } {
+  const mode = kpiMode(rows30);
+  const byAd = new Map<string, { ad_id: string; name: string; spend: number; value: number; results: number; freqs: number[] }>();
+  let total = 0;
+  for (const r of rows30) {
+    total += r.spend || 0;
+    const a = byAd.get(r.ad_id) ?? { ad_id: r.ad_id, name: r.ad_name ?? r.ad_id, spend: 0, value: 0, results: 0, freqs: [] };
+    a.spend += r.spend || 0;
+    a.value += r.purchase_value || 0;
+    a.results += r.results || 0;
+    if (r.ad_name) a.name = r.ad_name;
+    if (typeof r.frequency === 'number' && r.frequency > 0) a.freqs.push(r.frequency);
+    byAd.set(r.ad_id, a);
+  }
+
+  const fatByAd = new Map(fatigueAds.map((f) => [f.ad_id, f]));
+  const classOf = (adId: string): ScatterDot['klass'] => {
+    const f = fatByAd.get(adId);
+    if (!f) return 'neutral';
+    if (f.class === 'fatiguing') return f.low_frequency_acquisition_guard ? 'acquisition' : 'move';
+    if (f.class === 'evergreen') return 'evergreen';
+    return 'neutral';
+  };
+
+  // Dot floor: enough spend to read. Capped-relative like the fatigue floor.
+  const floor = cappedFloor(100, total * 0.005, SCATTER_FLOOR_CAP);
+  const all = [...byAd.values()];
+  const plotted = all.filter((a) => a.spend >= floor).sort((a, b) => b.spend - a.spend);
+
+  const dots: ScatterDot[] = plotted.map((a) => {
+    const roas = mode === 'roas' ? r2(div(a.value, a.spend)) : null;
+    const cpr = mode === 'cpr' ? r2(div(a.spend, a.results)) : null;
+    const avgFreq = a.freqs.length ? r2(a.freqs.reduce((s, f) => s + f, 0) / a.freqs.length) : null;
+    return {
+      ad_id: a.ad_id,
+      ad_name: a.name,
+      spend_30d: Math.round(a.spend),
+      roas_30d: roas,
+      cpr_30d: cpr,
+      avg_frequency: avgFreq,
+      spend_share_pct: pct(a.spend, total),
+      klass: classOf(a.ad_id),
+      starved: false,
+    };
+  });
+
+  // Starved winner: a strong ROAS ad taking a small share of budget. Only a
+  // ROAS-mode read (cost-per-result "strength" needs the client's target, done
+  // in the render). Gold-ring the ones clearly above breakeven AND under the
+  // median spend share — then name the single best for the caption contrast.
+  const shares = dots.map((d) => d.spend_share_pct).sort((x, y) => x - y);
+  const medianShare = shares.length ? shares[Math.floor(shares.length / 2)]! : 0;
+  let starvedBest: ScatterDot | null = null;
+  if (mode === 'roas') {
+    for (const d of dots) {
+      if (d.klass === 'move' || d.klass === 'acquisition') continue; // a laggard isn't "starved"
+      if (d.roas_30d != null && d.roas_30d >= breakevenRoas * 2 && d.spend_share_pct <= medianShare) {
+        d.starved = true;
+        if (!starvedBest || (d.roas_30d ?? 0) > (starvedBest.roas_30d ?? 0)) starvedBest = d;
+      }
+    }
+  }
+
+  // The heaviest laggard — the most budget sitting on a below-breakeven / moving
+  // ad — is the honest contrast to the starved winner.
+  const laggards = dots
+    .filter((d) => d.klass === 'move' || d.klass === 'acquisition' || (d.roas_30d != null && d.roas_30d < breakevenRoas))
+    .sort((a, b) => b.spend_30d - a.spend_30d);
+  const heaviestLaggard = laggards[0] ?? null;
+
+  const moveCount = dots.filter((d) => d.klass === 'move').length;
+  const acqCount = dots.filter((d) => d.klass === 'acquisition').length;
+  const dropped = all.length - plotted.length;
+
+  // Caption contrast — "your best ad gets £X, a fraction of what your worst spends".
+  let contrast: string | null = null;
+  if (starvedBest && heaviestLaggard && starvedBest.ad_id !== heaviestLaggard.ad_id && starvedBest.spend_30d > 0) {
+    const ratio = heaviestLaggard.spend_30d / starvedBest.spend_30d;
+    if (ratio >= 1.5) {
+      contrast =
+        `"${starvedBest.ad_name}" returns ${starvedBest.roas_30d}× on ${money(starvedBest.spend_30d, currency)} of spend, ` +
+        `while "${heaviestLaggard.ad_name}" is ${heaviestLaggard.roas_30d != null ? `at ${heaviestLaggard.roas_30d}×` : 'below breakeven'} on ` +
+        `${money(heaviestLaggard.spend_30d, currency)} — roughly ${ratio >= 10 ? Math.round(ratio) : ratio.toFixed(1)}× the budget on the weaker ad.`;
+    }
+  }
+
+  const breakevenWord = grossMarginPct != null && breakevenRoas > 1.0 ? `your ${breakevenRoas}× breakeven` : 'the 1.0× line';
+  const summaryParts: string[] = [];
+  if (mode === 'roas') {
+    summaryParts.push(
+      `Each dot is one ad, placed by its last-30-day spend (left→right) against its ROAS (bottom→top); the dashed line is ${breakevenWord}.`,
+    );
+    if (moveCount > 0)
+      summaryParts.push(`${moveCount} ad${moveCount === 1 ? '' : 's'} sit in the danger zone — past peak and still spending (the same ${moveCount === 1 ? 'one' : 'ones'} flagged in the fatigue chapter).`);
+    if (acqCount > 0)
+      summaryParts.push(`${acqCount} below-breakeven ad${acqCount === 1 ? '' : 's'} run at low frequency — that reads as acquisition, not waste, so ${acqCount === 1 ? "it's" : "they're"} marked separately.`);
+    if (contrast) summaryParts.push(contrast);
+  } else {
+    summaryParts.push(`Each dot is one ad, placed by its last-30-day spend against its cost per result.`);
+  }
+
+  const next_step = starvedBest
+    ? `Shift budget toward the starved winners the chart circles — "${starvedBest.ad_name}" is earning well above the line on a small share of spend, so it has room to take more before it saturates.`
+    : moveCount > 0
+      ? `Move budget off the danger-zone ads and into the ones sitting high on the chart — the fatigue chapter has the deadline.`
+      : `Spend is broadly tracking return — keep feeding the ads sitting high-right and starve the low ones.`;
+
+  return {
+    summary: summaryParts.join(' '),
+    next_step,
+    data: {
+      window_days: 30,
+      kpi_mode: mode,
+      breakeven_roas: breakevenRoas,
+      gross_margin_pct: grossMarginPct ?? undefined,
+      currency: currency || undefined,
+      total_spend: Math.round(total),
+      ads_plotted: dots.length,
+      ads_dropped_thin: dropped,
+      move_count: moveCount,
+      acquisition_count: acqCount,
+      starved_best_ad: starvedBest?.ad_name ?? undefined,
+      contrast: contrast ?? undefined,
+      dots: dots.slice(0, 40),
+    },
+    derivation:
+      `We summed each ad's spend and revenue over the last 30 days and plotted spend against ROAS, sizing each dot by its average frequency. ` +
+      `The colour is the SAME fatigue read from the chapter above — red = past-peak and still spending, blue = below breakeven but low-frequency (acquisition, not waste), ` +
+      `olive = evergreen. Gold rings mark ads earning well above ${breakevenWord} on a small slice of budget. ` +
+      (grossMarginPct != null && breakevenRoas > 1.0
+        ? `The dashed line is ${breakevenRoas}× — your breakeven at the ${grossMarginPct}% gross margin you gave us.`
+        : `The dashed line is 1.0× — the honest default when we don't know your gross margin; your true breakeven sits higher, so dots just above the line may already be underwater after product cost.`),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // 3. Creative cohorts by launch month (does the account live off old creative?)
 // ---------------------------------------------------------------------------
 

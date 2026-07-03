@@ -9,7 +9,7 @@ import { logger } from '../utils/logger.js';
 import { extractJson, triageLibrary, libraryAgeBridge, type LibraryAd } from './library-triage.js';
 import { buildClientKnowledgeBundle } from '../agents/client-context.js';
 import {
-  computeConcentration, computeFatigue, computeCohorts, computeCostTrend, computeDayOfWeek,
+  computeConcentration, computeFatigue, computeBudgetScatter, computeCohorts, computeCostTrend, computeDayOfWeek,
   computeConceptRoas, computeOptimizationEvents, buildProvisionalInsights, computeHookCorrection, kpiMode,
   mergeAdPreviews,
   type PackAdRow, type PackAccountRow, type AdsetConfigLite, type FatigueAd, type PlacementHookRow, type AdPreview,
@@ -114,6 +114,7 @@ const SECTION_ORDER: Array<Pick<AuditSection, 'key' | 'title' | 'status'>> = [
   { key: 'account_structure', title: 'Account Structure & Spend Concentration', status: 'pending' },
   { key: 'spend_concentration', title: 'Budget Concentration & Key-Man Risk', status: 'pending' },
   { key: 'creative_fatigue', title: 'Creative Fatigue & Runway', status: 'pending' },
+  { key: 'budget_scatter', title: 'Budget — spend vs return per ad', status: 'pending' },
   { key: 'creative_cohorts', title: 'Creative Cohorts — living off old creative?', status: 'pending' },
   { key: 'cost_trends', title: 'CPM & Auction Pressure', status: 'pending' },
   { key: 'timing_patterns', title: 'Day-of-Week Pattern', status: 'pending' },
@@ -1346,6 +1347,8 @@ function workLineFor(key: string, s: AuditSection): string | null {
       return typeof d.ads_with_spend === 'number' ? `Measured spend concentration across ${d.ads_with_spend} active ads` : null;
     case 'creative_fatigue':
       return typeof d.assessed_ads === 'number' ? `Ran 90-day fatigue trends on ${d.assessed_ads} ads` : null;
+    case 'budget_scatter':
+      return typeof d.ads_plotted === 'number' && d.ads_plotted > 0 ? `Plotted spend against return for ${d.ads_plotted} ads` : null;
     case 'creative_cohorts':
       return typeof d.window_months === 'number' ? `Rebuilt ${d.window_months} months of creative launch cohorts` : null;
     case 'cost_trends': {
@@ -1693,6 +1696,13 @@ export async function runMagicAudit(
     // breakevenRoas is 1.0 unless the cold lead stated a gross margin (see
     // coldBreakeven above) — warehouse audits are unchanged.
     creative_fatigue: async () => computeFatigue(packRows90, breakevenRoas, client.currency, grossMarginPct),
+    // Runs AFTER creative_fatigue in SECTION_ORDER, so it reuses that section's
+    // classification — the red "move" dots ARE the unguarded fatiguing ads, so
+    // the scatter never re-tallies money the fatigue chapter already counted.
+    budget_scatter: async () => {
+      const fatAds = (sections['creative_fatigue']?.data as { ads?: FatigueAd[] } | undefined)?.ads ?? [];
+      return computeBudgetScatter(rows30, fatAds, breakevenRoas, client.currency, grossMarginPct);
+    },
     creative_cohorts: async () => {
       const s = computeCohorts(packRows180);
       // Second cohort view (design batch 4): absolute monthly cohorts over time.

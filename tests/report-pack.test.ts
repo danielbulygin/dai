@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
-  computeConcentration, computeFatigue, computeCohorts, computeCostTrend, computeDayOfWeek, kpiMode,
+  computeConcentration, computeFatigue, computeBudgetScatter, computeCohorts, computeCostTrend, computeDayOfWeek, kpiMode,
   computeHookCorrection, mergeAdPreviews,
-  type PackAdRow, type PackAccountRow, type PlacementHookRow, type AdPreview,
+  type PackAdRow, type PackAccountRow, type PlacementHookRow, type AdPreview, type FatigueAd, type ScatterDot,
 } from '../src/audit/report-pack.js';
 import { buildScorecard, cohortPosition } from '../src/audit/scorecard.js';
 
@@ -415,3 +415,81 @@ describe('creative fatigue — margin re-basing (stated-economics, 2026-07-04)',
     expect(e.class).toBe('evergreen');
   });
 });
+
+describe('budget scatter — colour = the fatigue diagnosis (anti-double-count contract)', () => {
+  // Four ads over 30 days + one thin ad that must be dropped.
+  const rows30: PackAdRow[] = [
+    ...adRows('a1', 'evergreen-hero', 30, 700, () => 2.5, 1.3),
+    ...adRows('a2', 'mover', 30, 200, () => 0.9, 2.0),
+    ...adRows('a3', 'acquisition', 30, 150, () => 0.7, 1.1),
+    ...adRows('a4', 'starved-winner', 30, 40, () => 3.0, 1.2),
+    ...adRows('a5', 'thin-noise', 30, 5, () => 1.0, 1.5),
+  ];
+  // The fatigue diagnosis the scatter must MIRROR (never re-derive).
+  const fat: Array<Pick<FatigueAd, 'ad_id' | 'class' | 'low_frequency_acquisition_guard'>> = [
+    { ad_id: 'a1', class: 'evergreen', low_frequency_acquisition_guard: false },
+    { ad_id: 'a2', class: 'fatiguing', low_frequency_acquisition_guard: false }, // unguarded → counted money → red
+    { ad_id: 'a3', class: 'fatiguing', low_frequency_acquisition_guard: true }, // guarded → not counted → blue
+  ];
+
+  const dotsOf = (s: ReturnType<typeof computeBudgetScatter>) => new Map((s.data.dots as ScatterDot[]).map((d) => [d.ad_id, d]));
+
+  it('red "move" dots are exactly the UNGUARDED fatiguing ads (the hero money, counted once)', () => {
+    const s = computeBudgetScatter(rows30, fat);
+    const d = dotsOf(s);
+    expect(d.get('a2')!.klass).toBe('move');
+    expect(s.data.move_count).toBe(1);
+    // The guarded fatiguing ad is NEVER red — it is the not-counted acquisition set.
+    expect(d.get('a3')!.klass).toBe('acquisition');
+    expect(s.data.acquisition_count).toBe(1);
+  });
+
+  it('evergreen stays evergreen; ads with no fatigue verdict are neutral', () => {
+    const d = dotsOf(computeBudgetScatter(rows30, fat));
+    expect(d.get('a1')!.klass).toBe('evergreen');
+    expect(d.get('a4')!.klass).toBe('neutral'); // not in the fatigue set
+  });
+
+  it('gold-rings a strong ad on a small share of budget, never a strong high-share ad', () => {
+    const s = computeBudgetScatter(rows30, fat);
+    const d = dotsOf(s);
+    expect(d.get('a4')!.starved).toBe(true); // 3.0× on ~4% of spend
+    expect(d.get('a1')!.starved).toBe(false); // 2.5× but ~64% of spend — already fed
+    expect(s.data.starved_best_ad).toBe('starved-winner');
+    expect(String(s.data.contrast)).toMatch(/starved-winner/);
+  });
+
+  it('carries spend, ROAS and averaged frequency per dot; drops thin ads below the floor', () => {
+    const s = computeBudgetScatter(rows30, fat);
+    const d = dotsOf(s);
+    expect(d.get('a2')!.spend_30d).toBe(6000);
+    expect(d.get('a2')!.roas_30d).toBeCloseTo(0.9, 5);
+    expect(d.get('a2')!.avg_frequency).toBeCloseTo(2.0, 5);
+    expect(d.has('a5')).toBe(false); // below the spend floor
+    expect(s.data.ads_dropped_thin).toBe(1);
+    expect(s.data.kpi_mode).toBe('roas');
+  });
+
+  it('re-based breakeven (stated margin) shifts what counts as "starved" strong', () => {
+    // At a 2.22× line, the 2.5× evergreen is only ~1.13× the line — no longer
+    // "well above" (needs 2×line = 4.44×), so nothing is starved-flagged as a
+    // clear winner; the honest-default 1.0× line would flag more.
+    const s = computeBudgetScatter(rows30, fat, 2.22, 'GBP', 45);
+    const d = dotsOf(s);
+    expect(d.get('a4')!.starved).toBe(false); // 3.0× < 2×2.22
+    expect(String(s.derivation)).toMatch(/45% gross margin/);
+  });
+
+  it('cost-per-result mode emits cpr, no ROAS, and never invents a starved winner', () => {
+    const cprRows: PackAdRow[] = [
+      ...adRows('c1', 'lead-ad', 30, 300, () => 0, 1.4).map((r) => ({ ...r, purchase_value: 0, results: 10 })),
+      ...adRows('c2', 'lead-ad-2', 30, 100, () => 0, 1.2).map((r) => ({ ...r, purchase_value: 0, results: 2 })),
+    ];
+    const s = computeBudgetScatter(cprRows, []);
+    expect(s.data.kpi_mode).toBe('cpr');
+    const d = (s.data.dots as ScatterDot[]).find((x) => x.ad_id === 'c1')!;
+    expect(d.roas_30d).toBeNull();
+    expect(d.cpr_30d).toBeCloseTo(30, 5); // 300/day ÷ 10 results
+    expect(s.data.starved_best_ad).toBeUndefined();
+  });
+})
