@@ -4,7 +4,7 @@ import {
   computeHookCorrection, mergeAdPreviews,
   type PackAdRow, type PackAccountRow, type PlacementHookRow, type AdPreview, type FatigueAd, type ScatterDot,
 } from '../src/audit/report-pack.js';
-import { buildScorecard, cohortPosition } from '../src/audit/scorecard.js';
+import { buildScorecard, buildComparisonSection, cohortPosition, type ScorecardEntry } from '../src/audit/scorecard.js';
 
 /**
  * The fast tier's BINDING rules (design spec 2026-06-25), pinned:
@@ -492,4 +492,61 @@ describe('budget scatter — colour = the fatigue diagnosis (anti-double-count c
     expect(d.cpr_30d).toBeCloseTo(30, 5); // 300/day ÷ 10 results
     expect(s.data.starved_best_ad).toBeUndefined();
   });
+})
+
+describe('how-you-compare bands (Lumira §09 — rates only, quantified gap)', () => {
+  const band = (key: string, dimension: string, value: number, b: 'weak' | 'middle' | 'strong', cohort: { median: number; p25: number; p75: number } | null, quantified?: string): ScorecardEntry => ({
+    key, dimension, value, unit: '%', band: b, position: '', lever: '', next_step: '', section_key: 'creative_analysis',
+    cohort: cohort ? { label: 'the 17 accounts on our desk (last 7 days)', n: 17, ...cohort } : null,
+    ...(quantified ? { quantified } : {}),
+  })
+
+  it('quantifies the hook gap as pure arithmetic (median/you − 1) and carries the people note', () => {
+    const s = buildComparisonSection([band('hooks', 'Hooks (3s view rate)', 16.3, 'weak', { median: 21.7, p25: 16.3, p75: 25.1 }, '≈39,348 more people past 3 seconds every month.')])
+    const hook = s.data.bands.find((x) => x.key === 'hooks')!
+    expect(hook.gap_pct).toBeCloseTo(33.1, 0) // 21.7/16.3 − 1 = 33.1%
+    expect(s.summary).toMatch(/33.*% more people past 3 seconds/)
+    expect(s.summary).toContain('39,348') // the people note is appended
+    expect(hook.p25).toBe(16.3)
+    expect(hook.median).toBe(21.7)
+  })
+
+  it('DECOMPOSES when both bands exist: weak hook + healthy hold = "content works, people aren\'t getting in"', () => {
+    const s = buildComparisonSection([
+      band('hooks', 'Hooks (3s view rate)', 16.3, 'weak', { median: 21.7, p25: 16.3, p75: 25.1 }),
+      band('hold', 'Hold (15s of watchers)', 32, 'middle', { median: 30, p25: 26, p75: 36 }),
+    ])
+    expect(s.summary).toMatch(/content itself is working|aren't getting into it|opening is the lever/i)
+    expect(s.data.bands.length).toBe(2)
+    expect(s.next_step).toMatch(/openings/i)
+  })
+
+  it('names the OTHER lever when hold is the weak one', () => {
+    const s = buildComparisonSection([
+      band('hooks', 'Hooks (3s view rate)', 26, 'strong', { median: 21, p25: 17, p75: 25 }),
+      band('hold', 'Hold (15s of watchers)', 18, 'weak', { median: 28, p25: 24, p75: 33 }),
+    ])
+    expect(s.summary).toMatch(/middle loses them|3.15s|tighten the/i)
+    expect(s.next_step).toMatch(/3.15s|hooks are already winning/i)
+  })
+
+  it('ends on the strength and quantifies nothing when the rate band is strong', () => {
+    const s = buildComparisonSection([band('hooks', 'Hooks (3s view rate)', 26, 'strong', { median: 21, p25: 17, p75: 25 })])
+    expect(s.data.bands[0]!.gap_pct).toBeNull()
+    expect(s.summary).toMatch(/strength/i)
+  })
+
+  it('IGNORES money dimensions — only rates cross accounts (integrity rule)', () => {
+    const s = buildComparisonSection([
+      band('hooks', 'Hooks (3s view rate)', 16.3, 'weak', { median: 21.7, p25: 16.3, p75: 25.1 }),
+      // concentration/cpm carry no cohort and non-% units — never a band.
+      { key: 'concentration', dimension: 'Budget concentration', value: 20.6, unit: '% of spend in top 3 ads', band: 'strong', position: '', lever: '', next_step: '', section_key: 'spend_concentration', cohort: null },
+    ])
+    expect(s.data.bands.map((b) => b.key)).toEqual(['hooks'])
+  })
+
+  it('returns no bands when the scorecard has no benchmarked rate dimension', () => {
+    const s = buildComparisonSection([{ key: 'freshness', dimension: 'Creative freshness', value: 94, unit: '% of spend on recent launches', band: 'strong', position: '', lever: '', next_step: '', section_key: 'creative_cohorts', cohort: null }])
+    expect(s.data.bands.length).toBe(0)
+  })
 })

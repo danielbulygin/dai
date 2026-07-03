@@ -14,7 +14,7 @@ import {
   mergeAdPreviews,
   type PackAdRow, type PackAccountRow, type AdsetConfigLite, type FatigueAd, type PlacementHookRow, type AdPreview,
 } from './report-pack.js';
-import { buildScorecard, type ScorecardInputs, type ScorecardEntry } from './scorecard.js';
+import { buildScorecard, buildComparisonSection, type ScorecardInputs, type ScorecardEntry } from './scorecard.js';
 import {
   computePlacementBreakdown, computeAudienceBreakdown, computeTargetingSplit, computeLearningLimited,
   computeSaturation, computeCreativeDiversity, computeCohortWave, computeWhatsWorking, computeLandingPages,
@@ -118,6 +118,7 @@ const SECTION_ORDER: Array<Pick<AuditSection, 'key' | 'title' | 'status'>> = [
   { key: 'creative_cohorts', title: 'Creative Cohorts — living off old creative?', status: 'pending' },
   { key: 'cost_trends', title: 'CPM & Auction Pressure', status: 'pending' },
   { key: 'timing_patterns', title: 'Day-of-Week Pattern', status: 'pending' },
+  { key: 'how_you_compare', title: 'How You Compare — hook & hold vs the desk', status: 'pending' },
   { key: 'placement_breakdown', title: 'Placements — where the spend actually goes', status: 'pending' },
   { key: 'audience_breakdown', title: 'Audience Delivery — age, gender, geography', status: 'pending' },
   { key: 'saturation', title: 'Audience Saturation — how much headroom is left?', status: 'pending' },
@@ -1357,6 +1358,10 @@ function workLineFor(key: string, s: AuditSection): string | null {
     }
     case 'timing_patterns':
       return `Split 90 days of results by weekday`;
+    case 'how_you_compare': {
+      const n = (d.bands as unknown[] | undefined)?.length ?? 0;
+      return n ? `Benchmarked your hook${n > 1 ? ' & hold' : ''} rate against the accounts on our desk` : null;
+    }
     case 'concept_roas':
       return typeof d.coverage_pct === 'number' ? `Matched creative angle tags on ${d.coverage_pct}% of spend` : null;
     case 'optimization_events': {
@@ -1711,6 +1716,10 @@ export async function runMagicAudit(
     },
     cost_trends: async () => computeCostTrend(packAccRows90, client.currency),
     timing_patterns: async () => computeDayOfWeek(packAccRows90),
+    // Runs AFTER timing_patterns, whose iteration triggers computeAndSaveScorecard —
+    // so savedScorecard (hook/hold cohort bands) is populated. Repackages the
+    // already-benchmarked rate dims into the dedicated band chapter; posts a stat.
+    how_you_compare: async () => buildComparisonSection(savedScorecard ?? []),
     placement_breakdown: async () => {
       const raw = await fetchInsightsBreakdown(code, client.adAccountId, 'publisher_platform,platform_position', '', cold?.accessToken);
       if (!raw) return { status: 'error', error: 'placement insights pull failed' };

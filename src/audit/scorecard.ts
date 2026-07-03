@@ -210,3 +210,122 @@ export function buildScorecard(inp: ScorecardInputs): ScorecardEntry[] {
   entries.sort((a, b) => order[a.band] - order[b.band]);
   return entries;
 }
+
+// ---------------------------------------------------------------------------
+// "How you compare" — the dedicated percentile-band chapter (Lumira §09).
+//
+// The validated WOW: hook/hold percentile bands against the NAMED desk cohort,
+// with the gap made concrete. Reuses the scorecard's already-benchmarked rate
+// dimensions (rates cross accounts safely — the binding integrity rule), so it
+// invents no new cohort. Renders whichever rate bands the cohort supports
+// (hooks always; hold when the warehouse has the coverage). Posts a STAT.
+// ---------------------------------------------------------------------------
+
+export interface ComparisonBand {
+  key: string;
+  dimension: string;
+  you: number;
+  median: number;
+  p25: number;
+  p75: number;
+  band: 'strong' | 'middle' | 'weak';
+  cohortLabel: string;
+  n: number;
+  /** median/you − 1, as a %: "≈X% more people past 3s on the same budget". */
+  gap_pct: number | null;
+  /** The absolute people framing carried from the scorecard, when present. */
+  people_note?: string;
+}
+
+export interface ComparisonSection {
+  summary: string;
+  next_step: string;
+  data: { bands: ComparisonBand[]; cohort_label: string | null } & Record<string, unknown>;
+  derivation?: string;
+}
+
+/** Build the comparison chapter from the already-computed scorecard. Pure. */
+export function buildComparisonSection(scorecard: ScorecardEntry[]): ComparisonSection {
+  // Only rate dimensions cross accounts (unit '%', a real cohort). That is
+  // hooks and hold — never money metrics (CPM never crosses currencies).
+  const RATE_KEYS = new Set(['hooks', 'hold']);
+  const bands: ComparisonBand[] = scorecard
+    .filter((e) => RATE_KEYS.has(e.key) && e.cohort && e.unit === '%')
+    .map((e) => {
+      const c = e.cohort!;
+      const gap = e.band !== 'strong' && c.median > e.value && e.value > 0 ? r1((c.median / e.value - 1) * 100) : null;
+      return {
+        key: e.key,
+        dimension: e.dimension,
+        you: e.value,
+        median: c.median,
+        p25: c.p25,
+        p75: c.p75,
+        band: e.band,
+        cohortLabel: c.label,
+        n: c.n,
+        gap_pct: gap,
+        people_note: e.quantified,
+      };
+    });
+
+  const cohortLabel = bands[0]?.cohortLabel ?? null;
+  const hook = bands.find((b) => b.key === 'hooks');
+  const hold = bands.find((b) => b.key === 'hold');
+
+  // Decompose when we have both signals (the pro's "content works, people
+  // aren't getting to it" read); otherwise speak to the one band we can defend.
+  const parts: string[] = [];
+  if (hook && hold) {
+    if (hook.band === 'weak' && hold.band !== 'weak') {
+      parts.push(
+        `Your hooks land below ${cohortLabel} while your hold rate keeps pace — the content itself is working, people just aren't getting into it. The opening is the lever.`,
+      );
+    } else if (hold.band === 'weak' && hook.band !== 'weak') {
+      parts.push(
+        `Your hooks win attention at or above ${cohortLabel}, but your hold rate lags — the openings pull people in and the middle loses them. Tighten the 3–15s stretch, not the hook.`,
+      );
+    } else if (hook.band === 'weak' && hold.band === 'weak') {
+      parts.push(`Both your hook and hold rates sit below ${cohortLabel} — the openings and the middles are each leaving people behind.`);
+    } else {
+      parts.push(`Your hook and hold rates both hold their own against ${cohortLabel} — a genuine creative strength.`);
+    }
+  } else if (hook) {
+    parts.push(
+      hook.band === 'weak'
+        ? `Your hook rate sits below ${cohortLabel} — the first three seconds are where you're losing people.`
+        : hook.band === 'middle'
+          ? `Your hook rate sits mid-pack against ${cohortLabel} — room to climb.`
+          : `Your hook rate is a genuine strength against ${cohortLabel}.`,
+    );
+  }
+  // The quantified gap (pure arithmetic) on the weakest rate band.
+  const weakest = bands.filter((b) => b.gap_pct != null).sort((a, b) => (b.gap_pct ?? 0) - (a.gap_pct ?? 0))[0];
+  if (weakest) {
+    const dim = weakest.key === 'hooks' ? 'past 3 seconds' : 'through the middle of the video';
+    parts.push(
+      `Closing your ${weakest.key === 'hooks' ? 'hook' : 'hold'} gap to their median is roughly ${weakest.gap_pct}% more people ${dim} on the same budget.`,
+    );
+    if (weakest.people_note) parts.push(weakest.people_note);
+  }
+
+  // End on the strength (scorecard rule).
+  const strength = bands.find((b) => b.band === 'strong');
+  const next_step = weakest
+    ? weakest.key === 'hooks'
+      ? `Brief new openings for your top spenders — the content already holds, so more people past the first three seconds converts on the budget you're already spending.`
+      : `Tighten the 3–15s stretch of your top spenders — the hooks are already winning the click.`
+    : strength
+      ? `Protect what's producing this — it's the edge to build the next tests around.`
+      : `Baseline for the next audit — watch these bands move in 30 days.`;
+
+  return {
+    summary: parts.join(' '),
+    next_step,
+    data: { bands, cohort_label: cohortLabel },
+    derivation:
+      `Each band is the middle half (25th–75th percentile) of ${cohortLabel ?? 'the comparison accounts'}, with the median marked and your number plotted on it. ` +
+      `Every account is spend-weighted the same way — big spenders count for more, exactly as your budget experiences it. ` +
+      `The gap is pure arithmetic: their median ÷ your rate − 1. Rates only — we never compare another account's spend or revenue, only how their creative performs.`,
+  };
+}
