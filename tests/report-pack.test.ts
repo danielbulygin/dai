@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
   computeConcentration, computeFatigue, computeCohorts, computeCostTrend, computeDayOfWeek, kpiMode,
-  computeHookCorrection,
-  type PackAdRow, type PackAccountRow, type PlacementHookRow,
+  computeHookCorrection, mergeAdPreviews,
+  type PackAdRow, type PackAccountRow, type PlacementHookRow, type AdPreview,
 } from '../src/audit/report-pack.js';
 import { buildScorecard, cohortPosition } from '../src/audit/scorecard.js';
 
@@ -54,6 +54,18 @@ describe('spend concentration', () => {
     const s = computeConcentration(adRows('a1', 'only', 5, 20, () => 2));
     expect(s.warnings?.[0]).toContain('Thin base');
   });
+
+  it('AD IDENTITY: every top_ads row carries its ad_id (the page links to the real ad)', () => {
+    const rows = [
+      ...adRows('a1', 'hero', 30, 700, () => 2),
+      ...adRows('a2', 'second', 30, 100, () => 2),
+    ];
+    const s = computeConcentration(rows);
+    const d = s.data as { top_ads: Array<{ ad_id: string; ad_name: string }> };
+    expect(d.top_ads[0]).toMatchObject({ ad_id: 'a1', ad_name: 'hero' });
+    expect(d.top_ads[1]).toMatchObject({ ad_id: 'a2', ad_name: 'second' });
+    for (const a of d.top_ads) expect(a.ad_id.length).toBeGreaterThan(0);
+  });
 });
 
 describe('creative fatigue — the binding rules', () => {
@@ -103,6 +115,16 @@ describe('creative fatigue — the binding rules', () => {
     // steep decline: recent level just above breakeven, falling fast
     const s = computeFatigue([...adRows('f1', 'cliff', 60, 300, (i) => 3.0 - (1.9 * i) / 59), ...adRows('x', 'noise', 30, 100, () => 2)]);
     expect(s.summary).not.toMatch(/\b1 days\b/);
+  });
+
+  it('AD IDENTITY: every assessed fatigue row carries its ad_id', () => {
+    const s = computeFatigue([
+      ...adRows('e1', 'evergreen-hero', 80, 300, () => 2.5),
+      ...adRows('f1', 'decayer', 60, 300, (i) => 3.0 - (1.8 * i) / 59),
+    ]);
+    expect(s.data.ads.length).toBeGreaterThanOrEqual(2);
+    for (const ad of s.data.ads) expect(['e1', 'f1']).toContain(ad.ad_id);
+    expect(s.data.ads.find((a) => a.ad_name === 'decayer')!.ad_id).toBe('f1');
   });
 
   it('FLOOR CAP: a very large account still assesses mid-size ads (NP regression)', () => {
@@ -284,5 +306,46 @@ describe('hook-rate correction (rewarded video — binding ruling #5)', () => {
     expect(clean.material).toBe(false);
     expect(clean.note).toContain('no correction');
     expect(computeHookCorrection([row('facebook', 'feed', 500, 100)])).toBeNull();
+  });
+});
+
+describe('mergeAdPreviews (ad identity + visual enrichment — pure merge)', () => {
+  const previews = new Map<string, AdPreview>([
+    ['a1', { preview_link: 'https://fb.me/abc', thumbnail_url: 'https://cdn.fb.com/t1.jpg' }],
+    ['a2', { preview_link: 'https://fb.me/def', thumbnail_url: null }],
+  ]);
+
+  it('writes preview_link + thumbnail_url onto matched rows; unmatched pass through unchanged', () => {
+    const rows = [
+      { ad_id: 'a1', ad_name: 'hero', spend: 700 },
+      { ad_id: 'a3', ad_name: 'nomatch', spend: 100 },
+    ];
+    const out = mergeAdPreviews(rows, previews)!;
+    expect(out[0]).toMatchObject({ ad_id: 'a1', spend: 700, preview_link: 'https://fb.me/abc', thumbnail_url: 'https://cdn.fb.com/t1.jpg' });
+    expect(out[1]).toEqual({ ad_id: 'a3', ad_name: 'nomatch', spend: 100 }); // untouched — no invented fields
+  });
+
+  it('never writes null/empty values — a half-fetched preview only adds what it has', () => {
+    const out = mergeAdPreviews([{ ad_id: 'a2', ad_name: 'x' }], previews)!;
+    expect((out[0] as Record<string, unknown>).preview_link).toBe('https://fb.me/def');
+    expect('thumbnail_url' in out[0]!).toBe(false);
+  });
+
+  it('does not mutate the input rows (section data stays intact on any failure path)', () => {
+    const rows = [{ ad_id: 'a1', ad_name: 'hero' }];
+    mergeAdPreviews(rows, previews);
+    expect(rows[0]).toEqual({ ad_id: 'a1', ad_name: 'hero' });
+  });
+
+  it('tolerates rows without ad_id and undefined row sets', () => {
+    const out = mergeAdPreviews([{ ad_name: 'legacy row, no id' } as { ad_id?: string }], previews)!;
+    expect(out[0]).toEqual({ ad_name: 'legacy row, no id' });
+    expect(mergeAdPreviews(undefined, previews)).toBeUndefined();
+  });
+
+  it('empty preview map is a no-op (the fail-soft Graph path)', () => {
+    const rows = [{ ad_id: 'a1', ad_name: 'hero' }];
+    const out = mergeAdPreviews(rows, new Map())!;
+    expect(out).toEqual(rows);
   });
 });

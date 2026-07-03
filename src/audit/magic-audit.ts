@@ -11,7 +11,8 @@ import { buildClientKnowledgeBundle } from '../agents/client-context.js';
 import {
   computeConcentration, computeFatigue, computeCohorts, computeCostTrend, computeDayOfWeek,
   computeConceptRoas, computeOptimizationEvents, buildProvisionalInsights, computeHookCorrection, kpiMode,
-  type PackAdRow, type PackAccountRow, type AdsetConfigLite, type FatigueAd, type PlacementHookRow,
+  mergeAdPreviews,
+  type PackAdRow, type PackAccountRow, type AdsetConfigLite, type FatigueAd, type PlacementHookRow, type AdPreview,
 } from './report-pack.js';
 import { buildScorecard, type ScorecardInputs, type ScorecardEntry } from './scorecard.js';
 import {
@@ -1060,6 +1061,50 @@ async function checkTopAdDestinations(
   return checks;
 }
 
+/** How many surfaced ads get a preview link + thumbnail per audit (one batched
+ * Graph call — the ids= batch endpoint takes up to 50; 15 covers the page). */
+const AD_PREVIEW_CAP = 15;
+
+/**
+ * Batched preview links + creative thumbnails for the ads that actually
+ * surface on the report page (fatigue `ads[]` + concentration `top_ads[]`) —
+ * ONE Graph `?ids=` call, same batch shape as the dead-URL creative resolve.
+ * `preview_shareable_link` is an fb.me link anyone can open ("view this ad").
+ * Fail-soft: no token / any Graph error → empty map, the audit stays intact.
+ */
+async function fetchAdPreviews(
+  clientCode: string,
+  adIds: string[],
+  tokenOverride?: string,
+): Promise<Map<string, AdPreview>> {
+  const out = new Map<string, AdPreview>();
+  const token = tokenOverride ?? metaTokenFor(clientCode);
+  if (!token || adIds.length === 0) return out;
+  const ids = adIds.slice(0, AD_PREVIEW_CAP);
+  try {
+    const resp = await fetch(
+      `https://graph.facebook.com/v21.0/?ids=${ids.join(',')}` +
+        `&fields=preview_shareable_link,creative{thumbnail_url}&access_token=${token}`,
+      { signal: AbortSignal.timeout(30_000) },
+    );
+    if (!resp.ok) return out;
+    const body = (await resp.json()) as Record<
+      string,
+      { preview_shareable_link?: string; creative?: { thumbnail_url?: string } }
+    >;
+    for (const id of ids) {
+      const a = body[id];
+      if (!a) continue;
+      const preview_link = a.preview_shareable_link ?? null;
+      const thumbnail_url = a.creative?.thumbnail_url ?? null;
+      if (preview_link || thumbnail_url) out.set(id, { preview_link, thumbnail_url });
+    }
+  } catch (err) {
+    logger.warn({ err, clientCode }, 'ad preview fetch failed (report renders without previews)');
+  }
+  return out;
+}
+
 interface CompetitorSynthesis {
   summary: string;
   pages: Array<{ page_name: string; velocity_read: string; dominant_messages: string[]; lp_strategy: string }>;
@@ -1843,6 +1888,37 @@ export async function runMagicAudit(
     }
   };
 
+  // Ad identity + visuals post-pass (fast-tier decoration): the fatigue and
+  // concentration rows now carry ad_id — give the ads that actually surface
+  // on the page a "view this ad" link (preview_shareable_link) and a creative
+  // thumbnail via ONE batched Graph call, then write the enriched section data
+  // back through the normal section-save path. Fail-soft everywhere: any
+  // Graph error → the report simply renders without previews.
+  const enrichAdPreviewsSafely = async (): Promise<void> => {
+    try {
+      const fatigueData = sections['creative_fatigue']?.data as { ads?: Array<{ ad_id?: string }> } | undefined;
+      const concData = sections['spend_concentration']?.data as { top_ads?: Array<{ ad_id?: string }> } | undefined;
+      const surfaced = [...(fatigueData?.ads ?? []), ...(concData?.top_ads ?? [])]
+        .map((r) => r.ad_id)
+        .filter((v): v is string => typeof v === 'string' && v.length > 0);
+      const ids = [...new Set(surfaced)].slice(0, AD_PREVIEW_CAP);
+      if (ids.length === 0) return;
+      const previews = await fetchAdPreviews(code, ids, cold?.accessToken);
+      if (previews.size === 0) return;
+      if (fatigueData?.ads?.length) {
+        fatigueData.ads = mergeAdPreviews(fatigueData.ads, previews)!;
+        await saveSection(sections['creative_fatigue']!);
+      }
+      if (concData?.top_ads?.length) {
+        concData.top_ads = mergeAdPreviews(concData.top_ads, previews)!;
+        await saveSection(sections['spend_concentration']!);
+      }
+      logger.info({ code, previewed: previews.size, surfaced: ids.length }, 'ad previews merged into fatigue + concentration sections');
+    } catch (err) {
+      logger.warn({ err, code }, 'ad preview enrichment failed (audit continues)');
+    }
+  };
+
   // The Account Model — the audit WRITES durable context, not just a report
   // (context design C1: the audit is the context bootstrap). Fail-soft.
   const writeAccountModelSafely = async (): Promise<void> => {
@@ -1922,8 +1998,13 @@ export async function runMagicAudit(
     }
     // The 5-report fast tier ends at timing_patterns — the scorecard +
     // provisional lead insights land NOW (seconds in), not after the LLM
-    // sections finish minutes later.
-    if (def.key === 'timing_patterns') await computeAndSaveScorecard();
+    // sections finish minutes later. The ad-preview decoration rides the same
+    // beat: fatigue + concentration are already stored, so their rows get
+    // their "view this ad" links + thumbnails before the heavy sections cook.
+    if (def.key === 'timing_patterns') {
+      await computeAndSaveScorecard();
+      await enrichAdPreviewsSafely();
+    }
     // All deterministic evidence is in after the ad-set config read — write
     // the Account Model here so the "correct us" section renders early too.
     if (def.key === 'optimization_events') await writeAccountModelSafely();

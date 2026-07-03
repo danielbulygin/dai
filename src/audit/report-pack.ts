@@ -86,11 +86,11 @@ export function kpiMode(rows: Array<{ purchase_value: number; results: number }>
 // ---------------------------------------------------------------------------
 
 export function computeConcentration(rows30: PackAdRow[]): PackSection {
-  const byAd = new Map<string, { name: string; spend: number }>();
+  const byAd = new Map<string, { ad_id: string; name: string; spend: number }>();
   let total = 0;
   for (const r of rows30) {
     total += r.spend || 0;
-    const a = byAd.get(r.ad_id) ?? { name: r.ad_name ?? r.ad_id, spend: 0 };
+    const a = byAd.get(r.ad_id) ?? { ad_id: r.ad_id, name: r.ad_name ?? r.ad_id, spend: 0 };
     a.spend += r.spend || 0;
     if (r.ad_name) a.name = r.ad_name;
     byAd.set(r.ad_id, a);
@@ -136,7 +136,7 @@ export function computeConcentration(rows30: PackAdRow[]): PackSection {
       top10_share_pct: top10,
       hhi,
       band,
-      top_ads: ads.slice(0, 10).map((a) => ({ ad_name: a.name, spend: Math.round(a.spend), share_pct: pct(a.spend, total) })),
+      top_ads: ads.slice(0, 10).map((a) => ({ ad_id: a.ad_id, ad_name: a.name, spend: Math.round(a.spend), share_pct: pct(a.spend, total) })),
     },
     warnings: warnings.length ? warnings : undefined,
     derivation:
@@ -151,6 +151,7 @@ export function computeConcentration(rows30: PackAdRow[]): PackSection {
 // ---------------------------------------------------------------------------
 
 export interface FatigueAd {
+  ad_id: string;
   ad_name: string;
   spend: number;
   in_window_age_days: number;
@@ -188,7 +189,7 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currenc
   const totalSpend = rows90.reduce((s, r) => s + (r.spend || 0), 0);
 
   const ads: FatigueAd[] = [];
-  for (const list of byAd.values()) {
+  for (const [adId, list] of byAd.entries()) {
     const spend = list.reduce((s, r) => s + r.spend, 0);
     const days = [...new Set(list.map((r) => r.date))].sort();
     // Statistical floor: enough days AND enough money to say anything.
@@ -243,6 +244,7 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currenc
     const lowFreqGuard = belowBreakeven && avgFreq !== null && avgFreq < 1.5;
 
     ads.push({
+      ad_id: adId,
       ad_name: list.find((r) => r.ad_name)?.ad_name ?? list[0]!.ad_id,
       spend: Math.round(spend),
       in_window_age_days: ageDays,
@@ -955,4 +957,40 @@ export function computeHookCorrection(rows: PlacementHookRow[]): HookCorrection 
         ? `Rewarded-video placements are ${forcedShare}% of impressions — not enough to move your hook rate meaningfully.`
         : `No forced-view placements in the window — the reported hook rate needs no correction.`,
   };
+}
+
+// ---------------------------------------------------------------------------
+// 10. Ad preview enrichment merge (pure — the batched Graph fetch lives in
+//     magic-audit.ts; this just writes the results into section rows)
+// ---------------------------------------------------------------------------
+
+/** Per-ad visual identity fetched live from Graph: a shareable fb.me preview
+ * link (`preview_shareable_link` on the ad object) + the creative thumbnail. */
+export interface AdPreview {
+  preview_link?: string | null;
+  thumbnail_url?: string | null;
+}
+
+/**
+ * Merge per-ad preview links + thumbnails into already-computed section rows
+ * (fatigue `ads[]`, concentration `top_ads[]` — anything carrying `ad_id`).
+ * Pure and non-destructive: rows without an ad_id or without a fetched preview
+ * pass through unchanged, null/empty values are never written, and the input
+ * array is not mutated. The enrichment post-pass is fail-soft by design — a
+ * missing preview must never dent the section data it decorates.
+ */
+export function mergeAdPreviews<T extends { ad_id?: unknown }>(
+  rows: T[] | undefined,
+  previews: Map<string, AdPreview>,
+): T[] | undefined {
+  if (!rows) return rows;
+  return rows.map((row) => {
+    const id = typeof row.ad_id === 'string' ? row.ad_id : null;
+    const p = id ? previews.get(id) : undefined;
+    if (!p) return row;
+    const merged: T & AdPreview = { ...row };
+    if (p.preview_link) merged.preview_link = p.preview_link;
+    if (p.thumbnail_url) merged.thumbnail_url = p.thumbnail_url;
+    return merged;
+  });
 }
