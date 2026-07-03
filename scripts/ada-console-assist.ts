@@ -42,7 +42,7 @@
  *   cd /root/ada-sdk-spike && node_modules/.bin/tsx scripts/ada-console-assist.ts
  */
 import http from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHmac, timingSafeEqual } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { runAgentSDK } from '../src/agents/sdk/runAgentSDK.js';
 import { getAgent } from '../src/agents/registry.js';
@@ -58,6 +58,34 @@ const VERSION = (() => {
   try { return execSync('git describe --tags --always --dirty', { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim(); }
   catch { return 'unknown (not a git checkout)'; }
 })();
+
+// Shared secret with the Tinkers API (gettinkers.com) — used to verify the
+// signed scope claim on client-scoped chat requests (rollout plan R5).
+const SCOPE_SIGNING_SECRET = process.env.ADA_SCOPE_SIGNING_SECRET ?? '';
+
+interface ScopeClaimPayload { client_scope: string; user_id: string; iat: number; exp: number }
+
+/** Verify a Tinkers scope claim: base64url(payload).base64url(HMAC-SHA256).
+ *  Mirrors tinkers/src/lib/scope-claim.ts — keep the two in sync. */
+function verifyScopeClaim(claim: string): ScopeClaimPayload | null {
+  if (!SCOPE_SIGNING_SECRET) return null;
+  const dot = claim.lastIndexOf('.');
+  if (dot < 1) return null;
+  const body = claim.slice(0, dot);
+  const sig = Buffer.from(claim.slice(dot + 1));
+  const expected = Buffer.from(
+    createHmac('sha256', SCOPE_SIGNING_SECRET).update(body).digest('base64url')
+  );
+  if (sig.length !== expected.length || !timingSafeEqual(sig, expected)) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(body, 'base64url').toString()) as ScopeClaimPayload;
+    if (typeof payload.exp !== 'number' || payload.exp < Date.now() / 1000) return null;
+    if (!payload.client_scope || !payload.user_id) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
 
 const MAX_BUDGET_USD = Number(process.env.ADA_ASSIST_MAX_BUDGET ?? 1.5);
 const MAX_TURNS = Number(process.env.ADA_ASSIST_MAX_TURNS ?? 15);
@@ -83,6 +111,11 @@ interface AssistRequest {
   context?: AssistContext;
   question?: string;
   session_id?: string;
+  // Client-scoped chat (Tinkers portal — rollout plan R5). A request that
+  // names a client_scope MUST carry a scope_claim signed by the Tinkers API;
+  // the claim is minted from the SESSION server-side, never by the browser.
+  client_scope?: string;
+  scope_claim?: string;
   // /diagnose only — the prior Ada turn the debugger second-opinions:
   answer?: string;                            // Ada's answer being checked
   trace?: { label: string; tool?: string }[]; // the tool/step trace Ada took
@@ -906,6 +939,19 @@ const server = http.createServer(async (req, res) => {
         parsed = raw ? (JSON.parse(raw) as AssistRequest) : {};
       } catch (e) {
         sendJson(res, 400, { ok: false, error: `bad request: ${(e as Error).message}` });
+        return;
+      }
+      // Client-scoped requests (Tinkers portal) must carry a valid signed
+      // scope claim — and until the buildClientOverlay wiring ships (rollout
+      // plan Phase 4), even a VALID claim is refused: there is no safe way to
+      // serve a client-scoped question with the unscoped internal Ada.
+      if (parsed.client_scope) {
+        const claim = parsed.scope_claim ? verifyScopeClaim(parsed.scope_claim) : null;
+        if (!claim || claim.client_scope !== parsed.client_scope) {
+          sendJson(res, 403, { ok: false, error: 'invalid or missing scope claim' });
+          return;
+        }
+        sendJson(res, 501, { ok: false, error: 'client-scoped chat not enabled yet' });
         return;
       }
       // Streams its own SSE response (never sendJson on success).
