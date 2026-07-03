@@ -9,6 +9,7 @@ import { chatRouter } from './routes/chat.js';
 import { conceptsRouter } from './routes/concepts.js';
 import { pipelineRouter } from './routes/pipeline.js';
 import { cronRouter } from './routes/cron.js';
+import { auditTriggerRouter } from './routes/audit-trigger.js';
 import { notionWebhookRouter } from '../webhooks/notion.js';
 
 export function startApiServer(): void {
@@ -37,6 +38,9 @@ export function startApiServer(): void {
 
   // Cron endpoints (no X-API-Key — authed via CRON_SECRET bearer token)
   app.route('/', cronRouter);
+
+  // Tinkers audit trigger (no X-API-Key — authed via X-Ada-Secret shared secret)
+  app.route('/', auditTriggerRouter);
 
   // Authenticated routes
   app.use('/*', apiKeyAuth);

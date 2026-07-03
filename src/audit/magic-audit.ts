@@ -22,6 +22,7 @@ import {
   type WeeklyReachRow, type LandingAdRow, type DeadUrlCheck,
 } from './report-pack-extra.js';
 import { buildAccountModel, mergeAccountModel, type AccountModel, type AccountModelInputs } from './account-model.js';
+import type { ColdRows } from './cold-source.js';
 
 /**
  * Magic Audit orchestrator (master-plan B1, expanded 2026-06-11: creative /
@@ -60,7 +61,31 @@ export interface AuditOptions {
   competitorPages?: Array<{ name: string; pageId: string }>;
   /** Section keys to skip this run. */
   skipSections?: string[];
+  /** Cold-path injection (self-serve stranger, no warehouse rows). Built by
+   * runColdAudit (cold-audit.ts) — never construct by hand elsewhere. */
+  cold?: ColdInjection;
 }
+
+/**
+ * Everything the cold path resolves BEFORE entering the orchestrator: the
+ * connection token, the account, the pre-built row set (buildColdRows), and
+ * the lead's stated goal (the synthetic target — a stranger has no
+ * client-knowledge bundle). Identity contract v2: the audit row is keyed by
+ * tenant_id = the auth user's uuid; client_code stays null.
+ */
+export interface ColdInjection {
+  userId: string;
+  accessToken: string;
+  adAccountId: string;
+  accountName: string | null;
+  currency: string;
+  rows: ColdRows;
+  goalMetric?: string | null;
+  goalValue?: number | null;
+}
+
+/** Sections that read warehouse tables a stranger doesn't have. */
+const COLD_SKIP_SECTIONS = ['dataset_health', 'account_structure', 'creative_analysis'];
 
 export interface LeadInsight {
   headline: string;
@@ -583,8 +608,10 @@ async function runFunnelRead(
   meter: CostMeter,
   client: { id: string; name: string; currency: string },
   synthSystem: string,
+  rows30Override?: Array<Record<string, unknown>>,
 ): Promise<Partial<AuditSection>> {
-  const rows30 = await pageAll<Record<string, unknown>>(
+  // Cold path injects the derived account rows (same columns as this select).
+  const rows30 = rows30Override ?? await pageAll<Record<string, unknown>>(
     'account_daily',
     'date, spend, impressions, clicks, link_clicks, content_views, add_to_carts, checkouts_initiated, purchases, purchase_value, leads, complete_registrations, results',
     (q) => q.eq('client_id', client.id).gte('date', daysAgoISO(30)),
@@ -735,9 +762,9 @@ function metaTokenFor(clientCode: string): string | undefined {
 }
 
 /** Resolve the client's own FB page from a live ad's effective_object_story_id. */
-async function resolveOwnPage(clientCode: string, adAccountId: string | null): Promise<{ name: string; pageId: string } | null> {
+async function resolveOwnPage(clientCode: string, adAccountId: string | null, tokenOverride?: string): Promise<{ name: string; pageId: string } | null> {
   if (!adAccountId) return null;
-  const token = metaTokenFor(clientCode);
+  const token = tokenOverride ?? metaTokenFor(clientCode);
   if (!token) return null;
   const acct = adAccountId.startsWith('act_') ? adAccountId : `act_${adAccountId}`;
   const resp = await fetch(
@@ -769,9 +796,10 @@ async function resolveOwnPage(clientCode: string, adAccountId: string | null): P
 async function fetchPlacementHookRows(
   clientCode: string,
   adAccountId: string | null,
+  tokenOverride?: string,
 ): Promise<PlacementHookRow[] | null> {
   if (!adAccountId) return null;
-  const token = metaTokenFor(clientCode);
+  const token = tokenOverride ?? metaTokenFor(clientCode);
   if (!token) return null;
   const acct = adAccountId.startsWith('act_') ? adAccountId : `act_${adAccountId}`;
   try {
@@ -820,9 +848,10 @@ async function fetchInsightsBreakdown(
   adAccountId: string | null,
   breakdowns: string,
   extraParams = '',
+  tokenOverride?: string,
 ): Promise<Array<Record<string, unknown> & { spend?: string; impressions?: string; actions?: RawActionList[]; action_values?: RawActionList[] }> | null> {
   if (!adAccountId) return null;
-  const token = metaTokenFor(clientCode);
+  const token = tokenOverride ?? metaTokenFor(clientCode);
   if (!token) return null;
   const acct = adAccountId.startsWith('act_') ? adAccountId : `act_${adAccountId}`;
   try {
@@ -840,9 +869,9 @@ async function fetchInsightsBreakdown(
 }
 
 /** Weekly reach/impressions/spend, last ~91 days (Meta's own deduped weekly reach). */
-async function fetchWeeklyReach(clientCode: string, adAccountId: string | null): Promise<WeeklyReachRow[] | null> {
+async function fetchWeeklyReach(clientCode: string, adAccountId: string | null, tokenOverride?: string): Promise<WeeklyReachRow[] | null> {
   if (!adAccountId) return null;
-  const token = metaTokenFor(clientCode);
+  const token = tokenOverride ?? metaTokenFor(clientCode);
   if (!token) return null;
   const acct = adAccountId.startsWith('act_') ? adAccountId : `act_${adAccountId}`;
   const until = new Date().toISOString().slice(0, 10);
@@ -868,9 +897,9 @@ async function fetchWeeklyReach(clientCode: string, adAccountId: string | null):
 }
 
 /** Live targeting spec per ad set, classified fields only. */
-async function fetchTargetingSpecs(clientCode: string, adAccountId: string | null): Promise<TargetingSpecLite[] | null> {
+async function fetchTargetingSpecs(clientCode: string, adAccountId: string | null, tokenOverride?: string): Promise<TargetingSpecLite[] | null> {
   if (!adAccountId) return null;
-  const token = metaTokenFor(clientCode);
+  const token = tokenOverride ?? metaTokenFor(clientCode);
   if (!token) return null;
   const acct = adAccountId.startsWith('act_') ? adAccountId : `act_${adAccountId}`;
   const out: TargetingSpecLite[] = [];
@@ -925,9 +954,9 @@ async function fetchTargetingSpecs(clientCode: string, adAccountId: string | nul
 }
 
 /** Ad ids whose creative is branded content (partnership ads). */
-async function fetchPartnershipAdIds(clientCode: string, adAccountId: string | null): Promise<Set<string> | null> {
+async function fetchPartnershipAdIds(clientCode: string, adAccountId: string | null, tokenOverride?: string): Promise<Set<string> | null> {
   if (!adAccountId) return null;
-  const token = metaTokenFor(clientCode);
+  const token = tokenOverride ?? metaTokenFor(clientCode);
   if (!token) return null;
   const acct = adAccountId.startsWith('act_') ? adAccountId : `act_${adAccountId}`;
   const flagged = new Set<string>();
@@ -960,8 +989,9 @@ async function fetchPartnershipAdIds(clientCode: string, adAccountId: string | n
 async function checkTopAdDestinations(
   clientCode: string,
   topAds: Array<{ ad_id: string; ad_name: string; spend: number }>,
+  tokenOverride?: string,
 ): Promise<DeadUrlCheck[]> {
-  const token = metaTokenFor(clientCode);
+  const token = tokenOverride ?? metaTokenFor(clientCode);
   if (!token || topAds.length === 0) return [];
   const byUrl = new Map<string, { ads: string[]; spend: number }>();
   try {
@@ -1043,7 +1073,7 @@ async function runCompetitorTeardown(
   let targets = options.competitorPages ?? [];
   let mode: 'competitors' | 'own_footprint' = 'competitors';
   if (targets.length === 0) {
-    const own = await resolveOwnPage(clientCode, client.adAccountId);
+    const own = await resolveOwnPage(clientCode, client.adAccountId, options.cold?.accessToken);
     if (!own) return { status: 'error', error: 'no competitor pages given and own FB page could not be resolved' };
     targets = [own];
     mode = 'own_footprint';
@@ -1101,9 +1131,9 @@ async function runCompetitorTeardown(
 // ---------------------------------------------------------------------------
 
 /** READ-ONLY GET of ad-set optimization configs. Audits never write to Meta. */
-async function fetchAdsetConfigs(clientCode: string, adAccountId: string | null): Promise<AdsetConfigLite[]> {
+async function fetchAdsetConfigs(clientCode: string, adAccountId: string | null, tokenOverride?: string): Promise<AdsetConfigLite[]> {
   if (!adAccountId) return [];
-  const token = metaTokenFor(clientCode);
+  const token = tokenOverride ?? metaTokenFor(clientCode);
   if (!token) return [];
   const acct = adAccountId.startsWith('act_') ? adAccountId : `act_${adAccountId}`;
   const out: AdsetConfigLite[] = [];
@@ -1181,6 +1211,14 @@ async function quickRecognition(clientId: string, currency: string): Promise<Rec
   } catch {
     return null;
   }
+}
+
+/** Cold-path recognition — same shape as quickRecognition, from the pre-pulled rows. */
+function coldRecognition(cold: ColdInjection, currency: string): Record<string, unknown> | null {
+  const rows = cold.rows.packAccRows90;
+  if (rows.length === 0) return null;
+  const spend = rows.reduce((s, r) => s + num(r.spend), 0);
+  return { window_days: 90, days_covered: rows.length, spend_90d: Math.round(spend), currency };
 }
 
 /** Upsert the Account Model — human_stated facts survive re-inference (merge rule). */
@@ -1326,32 +1364,54 @@ export async function runMagicAudit(
   options: AuditOptions = {},
 ): Promise<{ auditId: string; token: string; costUsd: number }> {
   const supabase = getSupabase();
+  const cold = options.cold;
   const code = clientCode.toUpperCase();
   const meter = new CostMeter(options.maxCostUsd ?? 10);
   const skip = new Set(options.skipSections ?? []);
+  // Cold path: warehouse-backed sections can't run for a stranger — mark them
+  // planned via the existing skip machinery, never as errors.
+  if (cold) for (const k of COLD_SKIP_SECTIONS) skip.add(k);
 
-  const client = await resolveClient(code);
+  // Cold path synthesizes the client shape from the live connection; `id` is
+  // the auth user's uuid and is ONLY used as tenant identity — every
+  // warehouse query keyed by client.id is guarded behind `!cold` below.
+  const client = cold
+    ? { id: cold.userId, name: cold.accountName ?? 'Your account', currency: cold.currency, adAccountId: cold.adAccountId }
+    : await resolveClient(code);
   if (!client) throw new Error(`client ${code} not found`);
 
   // Phase B (context layer): assemble this client's knowledge bundle ONCE
   // (targets/KPI config + client-scoped learnings + the intelligence file) and
   // the days-with-data preflight; every synthesis call sees both via the
   // system prompt. Fail-soft — an audit without context still runs.
+  // Cold path: a stranger has no knowledge bundle — the lead's stated goal
+  // (ada_leads.goal_metric/value) is the synthetic target so "below target"
+  // judgments still anchor.
   let clientKnowledge = '';
-  try {
-    clientKnowledge = await buildClientKnowledgeBundle(code);
-  } catch (err) {
-    logger.warn({ err, code }, 'client knowledge bundle failed (audit continues without it)');
+  if (cold) {
+    clientKnowledge = cold.goalMetric && cold.goalValue != null
+      ? `The account owner's stated target: ${cold.goalMetric.toUpperCase()} of ${cold.goalValue}. Anchor "above/below target" judgments to this. No other client history is available — this is a first-time audit of a freshly connected account.`
+      : 'No client history is available — this is a first-time audit of a freshly connected account. Anchor judgments to observable account data only.';
+  } else {
+    try {
+      clientKnowledge = await buildClientKnowledgeBundle(code);
+    } catch (err) {
+      logger.warn({ err, code }, 'client knowledge bundle failed (audit continues without it)');
+    }
   }
   let dataCaveat: string | null = null;
   let daysWithData: number | null = null;
   try {
-    const dateRows = await pageAll<{ date: string }>(
-      'ad_daily',
-      'date',
-      (q) => q.eq('client_id', client.id).gte('date', daysAgoISO(30)),
-    );
-    const win = summarizeDataWindow(dateRows.map((r) => r.date));
+    const dates = cold
+      ? cold.rows.accFull30.map((r) => r.date)
+      : (
+          await pageAll<{ date: string }>(
+            'ad_daily',
+            'date',
+            (q) => q.eq('client_id', client.id).gte('date', daysAgoISO(30)),
+          )
+        ).map((r) => r.date);
+    const win = summarizeDataWindow(dates);
     daysWithData = win.daysWithData;
     dataCaveat = win.caveat;
   } catch (err) {
@@ -1371,16 +1431,17 @@ export async function runMagicAudit(
 
   // Recognition strip — seeded AT insert so the very first paint already says
   // "that's MY account" (UX review §2.1: recognition is the first magic beat).
-  const recognition = await quickRecognition(client.id, client.currency);
+  // Cold path derives it from the pre-pulled rows (no account_daily to read).
+  const recognition = cold ? coldRecognition(cold, client.currency) : await quickRecognition(client.id, client.currency);
 
   // Identity contract v2 (Dan ruling 2026-07-03): tenant_id (uuid) is the
   // canonical audit identity — clients.id for agency clients, auth users.id
-  // for self-serve strangers (cold path). client_code stays as a display
-  // label. Requires the magic_audits.tenant_id DDL (bmad migration
-  // 20260703150000) applied BEFORE this deploys — unknown column fails hard.
+  // for self-serve strangers (cold path; client_code stays NULL there).
+  // Requires the magic_audits.tenant_id DDL (bmad migration 20260703150000) —
+  // applied to prod 2026-07-03.
   const { data: row, error } = await supabase
     .from('magic_audits')
-    .insert({ token, client_code: code, client_name: client.name, sections, recognition, tenant_id: client.id })
+    .insert({ token, client_code: cold ? null : code, client_name: client.name, sections, recognition, tenant_id: client.id })
     .select('id')
     .single();
   if (error || !row) throw new Error(`audit row insert failed: ${error?.message}`);
@@ -1427,7 +1488,15 @@ export async function runMagicAudit(
     landing_page_market: string | null;
     landing_page_path: string | null;
   }> = [];
-  try {
+  if (cold) {
+    // Cold path: the five row sets were already built from the live Graph pull
+    // (buildColdRows) — same shapes, same field semantics as the warehouse.
+    packRows90 = cold.rows.packRows90;
+    packRows180 = cold.rows.packRows180;
+    packAccRows90 = cold.rows.packAccRows90;
+    accFull30 = cold.rows.accFull30 as unknown as Array<Record<string, unknown>>;
+    landing30 = cold.rows.landing30;
+  } else try {
     // Caps sized to the LARGEST account on the desk (NP: 144k ad-day rows/90d).
     // The old 40k cap silently truncated NP to 28% of its rows — concentration
     // and fatigue were computed on an arbitrary subset (caught by the sweep's
@@ -1497,7 +1566,7 @@ export async function runMagicAudit(
   let savedScorecard: ScorecardEntry[] | null = null;
   let angleByAdIdShared: Map<string, string> | null = null;
   const getAngles = async (): Promise<Map<string, string>> => {
-    if (!angleByAdIdShared) angleByAdIdShared = await fetchAngleByAdId(client.id, new Set(rows30.map((r) => r.ad_id)));
+    if (!angleByAdIdShared) angleByAdIdShared = cold ? new Map() : await fetchAngleByAdId(client.id, new Set(rows30.map((r) => r.ad_id)));
     return angleByAdIdShared;
   };
   const auditKpiMode = kpiMode(rows30);
@@ -1516,7 +1585,7 @@ export async function runMagicAudit(
     cost_trends: async () => computeCostTrend(packAccRows90, client.currency),
     timing_patterns: async () => computeDayOfWeek(packAccRows90),
     placement_breakdown: async () => {
-      const raw = await fetchInsightsBreakdown(code, client.adAccountId, 'publisher_platform,platform_position');
+      const raw = await fetchInsightsBreakdown(code, client.adAccountId, 'publisher_platform,platform_position', '', cold?.accessToken);
       if (!raw) return { status: 'error', error: 'placement insights pull failed' };
       const rows: PlacementInsightRow[] = raw.map((r) => ({
         publisher_platform: String(r.publisher_platform ?? 'unknown'),
@@ -1531,8 +1600,8 @@ export async function runMagicAudit(
     },
     audience_breakdown: async () => {
       const [demoRaw, geoRaw] = await Promise.all([
-        fetchInsightsBreakdown(code, client.adAccountId, 'age,gender'),
-        fetchInsightsBreakdown(code, client.adAccountId, 'country'),
+        fetchInsightsBreakdown(code, client.adAccountId, 'age,gender', '', cold?.accessToken),
+        fetchInsightsBreakdown(code, client.adAccountId, 'country', '', cold?.accessToken),
       ]);
       if (!demoRaw) return { status: 'error', error: 'demographic insights pull failed' };
       const demo: DemoInsightRow[] = demoRaw.map((r) => ({
@@ -1555,7 +1624,7 @@ export async function runMagicAudit(
       return computeAudienceBreakdown(demo, geo, client.currency);
     },
     saturation: async () => {
-      const weeks = await fetchWeeklyReach(code, client.adAccountId);
+      const weeks = await fetchWeeklyReach(code, client.adAccountId, cold?.accessToken);
       if (!weeks) return { status: 'error', error: 'weekly reach pull failed' };
       return computeSaturation(weeks, client.currency);
     },
@@ -1569,7 +1638,7 @@ export async function runMagicAudit(
         client.currency,
       ),
     optimization_events: async () => {
-      adsetConfigsForModel = await fetchAdsetConfigs(code, client.adAccountId);
+      adsetConfigsForModel = await fetchAdsetConfigs(code, client.adAccountId, cold?.accessToken);
       const t = accountTotals30 ?? { purchases: 0, leads: 0, purchase_value: 0 };
       return computeOptimizationEvents(adsetConfigsForModel, spendByAdset, {
         purchases: t.purchases ?? 0,
@@ -1586,11 +1655,11 @@ export async function runMagicAudit(
         const events = auditKpiMode === 'roas' ? r.purchases || 0 : r.purchases || r.leads || 0;
         weekly.set(String(r.adset_id), (weekly.get(String(r.adset_id)) ?? 0) + events / 4);
       }
-      const adsets = adsetConfigsForModel.length ? adsetConfigsForModel : await fetchAdsetConfigs(code, client.adAccountId);
+      const adsets = adsetConfigsForModel.length ? adsetConfigsForModel : await fetchAdsetConfigs(code, client.adAccountId, cold?.accessToken);
       return computeLearningLimited(adsets, weekly, spendByAdset, client.currency);
     },
     targeting_split: async () => {
-      const specs = await fetchTargetingSpecs(code, client.adAccountId);
+      const specs = await fetchTargetingSpecs(code, client.adAccountId, cold?.accessToken);
       if (!specs) return { status: 'error', error: 'targeting spec pull failed' };
       const kpiByAdset = new Map<string, { value: number; results: number }>();
       for (const r of rows30) {
@@ -1619,7 +1688,7 @@ export async function runMagicAudit(
         byAd.set(r.ad_id, a);
       }
       const topAds = [...byAd.values()].sort((a, b) => b.spend - a.spend).slice(0, 15);
-      const checks = await checkTopAdDestinations(code, topAds);
+      const checks = await checkTopAdDestinations(code, topAds, cold?.accessToken);
       return computeLandingPages(adRows, checks, client.currency, auditKpiMode);
     },
     creative_analysis: async () => {
@@ -1660,9 +1729,9 @@ export async function runMagicAudit(
       }
       return s;
     },
-    funnel_read: () => runFunnelRead(code, meter, client, synthSystem),
+    funnel_read: () => runFunnelRead(code, meter, client, synthSystem, cold ? accFull30 : undefined),
     account_facts: async () => {
-      const partnershipIds = await fetchPartnershipAdIds(code, client.adAccountId);
+      const partnershipIds = await fetchPartnershipAdIds(code, client.adAccountId, cold?.accessToken);
       let partnershipPct: number | null = null;
       if (partnershipIds && partnershipIds.size > 0) {
         const total = rows30.reduce((s, r) => s + (r.spend || 0), 0);
@@ -1738,7 +1807,7 @@ export async function runMagicAudit(
       try {
         const hooksEntry = scorecard.find((e) => e.key === 'hooks');
         if (hooksEntry) {
-          const placementRows = await fetchPlacementHookRows(code, client.adAccountId);
+          const placementRows = await fetchPlacementHookRows(code, client.adAccountId, cold?.accessToken);
           const correction = placementRows ? computeHookCorrection(placementRows) : null;
           if (correction?.material) {
             hooksEntry.correction = { corrected_value: correction.corrected_pct, note: correction.note };
@@ -1774,6 +1843,7 @@ export async function runMagicAudit(
   // (context design C1: the audit is the context bootstrap). Fail-soft.
   const writeAccountModelSafely = async (): Promise<void> => {
     try {
+      if (cold) return; // account_models is client_code-keyed; stranger identity lands with tenant-keyed models later
       if (!accountTotals30) return;
       const marketAgg = new Map<string, number>();
       const pathAgg = new Map<string, number>();
