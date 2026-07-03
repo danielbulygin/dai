@@ -24,6 +24,7 @@ import {
 } from './report-pack-extra.js';
 import { buildAccountModel, mergeAccountModel, type AccountModel, type AccountModelInputs } from './account-model.js';
 import type { ColdRows } from './cold-source.js';
+import { runColdCreativeAnalysis, type OwnLibraryScrape } from './cold-creative.js';
 
 /**
  * Magic Audit orchestrator (master-plan B1, expanded 2026-06-11: creative /
@@ -86,11 +87,14 @@ export interface ColdInjection {
 }
 
 /** Sections that read warehouse tables a stranger doesn't have.
- * concept_roas/creative_diversity need angle tags from creative_analysis —
- * without them they render as "0% tagged" dead weight (Dan, first live cold
- * audit 2026-07-03). Future: a cold angle-tagger (LLM over top ad names +
- * creative bodies) can un-skip them. */
-const COLD_SKIP_SECTIONS = ['dataset_health', 'account_structure', 'creative_analysis', 'concept_roas', 'creative_diversity'];
+ * concept_roas/creative_diversity need angle tags from the warehouse
+ * creative_analysis table — without them they render as "0% tagged" dead
+ * weight (Dan, first live cold audit 2026-07-03). Future: a cold angle-tagger
+ * (LLM over top ad names + creative bodies) can un-skip them.
+ * creative_analysis itself now RUNS cold (cold-creative.ts, 2026-07-04):
+ * media resolved live (Graph → own Ads Library fallback) + Gemini reads,
+ * launched as a background task after the fast tier. */
+const COLD_SKIP_SECTIONS = ['dataset_health', 'account_structure', 'concept_roas', 'creative_diversity'];
 
 export interface LeadInsight {
   headline: string;
@@ -1118,19 +1122,25 @@ async function runCompetitorTeardown(
   client: { id: string; name: string; currency: string; adAccountId: string | null },
   options: AuditOptions,
   synthSystem: string,
+  getOwnLibrary?: () => Promise<OwnLibraryScrape>,
 ): Promise<Partial<AuditSection>> {
-  let targets = options.competitorPages ?? [];
+  const targets = options.competitorPages ?? [];
   let mode: 'competitors' | 'own_footprint' = 'competitors';
-  if (targets.length === 0) {
-    const own = await resolveOwnPage(clientCode, client.adAccountId, options.cold?.accessToken);
-    if (!own) return { status: 'error', error: 'no competitor pages given and own FB page could not be resolved' };
-    targets = [own];
-    mode = 'own_footprint';
-  }
 
   const perPage: Array<{ name: string; pageId: string; triage: Record<string, unknown> }> = [];
   const scrapeWarnings: string[] = [];
-  for (const t of targets.slice(0, 3)) {
+  if (targets.length === 0) {
+    // Own-footprint mode rides the SHARED memoized scrape (one Apify run per
+    // audit — the cold creative_analysis fallback reads the same result).
+    mode = 'own_footprint';
+    if (!getOwnLibrary) return { status: 'error', error: 'no competitor pages given and no own-footprint scrape available' };
+    try {
+      const lib = await getOwnLibrary();
+      perPage.push({ name: lib.page.name, pageId: lib.page.pageId, triage: triageLibrary(lib.ads) });
+    } catch (err) {
+      return { status: 'error', error: `own-footprint scrape failed: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  } else for (const t of targets.slice(0, 3)) {
     if (meter.exhausted()) {
       scrapeWarnings.push(`cost cap reached before scraping ${t.name}`);
       continue;
@@ -1331,6 +1341,10 @@ function workLineFor(key: string, s: AuditSection): string | null {
       return n ? `Read the optimization goal on ${n} spending ad sets` : null;
     }
     case 'creative_analysis':
+      // Cold path: we watched the actual downloaded creatives with Gemini.
+      if (typeof d.creatives_analyzed === 'number' && d.creatives_analyzed > 0) {
+        return `Watched the actual creative on ${d.creatives_analyzed} top ads — hooks, formats, casting`;
+      }
       return typeof d.ads_with_spend === 'number' ? `Read the copy + transcripts of the top spenders (${d.ads_with_spend} ads in market)` : null;
     case 'funnel_read':
       return `Walked the funnel stage by stage (30 days)`;
@@ -1620,6 +1634,22 @@ export async function runMagicAudit(
   };
   const auditKpiMode = kpiMode(rows30);
 
+  // ONE own-page Ads Library scrape per audit, memoized: competitor_teardown
+  // (own_footprint mode) and the cold creative_analysis media fallback both
+  // await the same promise — the Apify dollars and the multi-minute run are
+  // never paid twice. A rejection memoizes too (one attempt per audit).
+  let ownLibraryPromise: Promise<OwnLibraryScrape> | undefined;
+  const getOwnLibrary = (): Promise<OwnLibraryScrape> => {
+    ownLibraryPromise ??= (async () => {
+      const own = await resolveOwnPage(code, client.adAccountId, cold?.accessToken);
+      if (!own) throw new Error('own FB page could not be resolved');
+      if (meter.exhausted()) throw new Error(`cost cap reached before scraping ${own.name}`);
+      const ads = await apifyScrapePage(own.pageId, 250, meter);
+      return { page: own, ads };
+    })();
+    return ownLibraryPromise;
+  };
+
   const RUNNERS: Record<string, () => Promise<Partial<AuditSection>>> = {
     dataset_health: () => runDatasetHealth(code),
     account_structure: () => runAccountStructure(code),
@@ -1793,7 +1823,7 @@ export async function runMagicAudit(
       for (const r of packRows90) if (r.ad_name) adNames.set(r.ad_id, r.ad_name);
       return computeAccountFacts({ rows180: packRows180, adNames, partnershipSpendPct: partnershipPct, currency: client.currency });
     },
-    competitor_teardown: () => runCompetitorTeardown(code, meter, client, options, synthSystem),
+    competitor_teardown: () => runCompetitorTeardown(code, meter, client, options, synthSystem, getOwnLibrary),
   };
 
   // "Where you stand" scorecard — computed the moment the fast tier is done
@@ -1972,8 +2002,53 @@ export async function runMagicAudit(
   };
 
   let anyError = false;
+  // Cold path: creative_analysis is HEAVY (media downloads + Gemini reads) —
+  // it launches here as a background task so the tail sections keep landing,
+  // and settles before the lead-insight ranking below. The page's
+  // "still cooking" state covers it like any other late section.
+  let coldCreativePromise: Promise<void> | null = null;
   for (const def of SECTION_ORDER) {
     if (skip.has(def.key)) continue;
+    if (cold && def.key === 'creative_analysis') {
+      await saveSection({ ...sections[def.key]!, status: 'running' });
+      coldCreativePromise = (async () => {
+        let partial: Partial<AuditSection>;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          partial = await Promise.race([
+            runColdCreativeAnalysis({
+              meter,
+              accessToken: cold.accessToken,
+              accountName: client.name,
+              currency: client.currency,
+              rows30,
+              getOwnLibrary,
+              synthesize: <T,>(label: string, user: string) => synthesizeJson<T>(meter, label, synthSystem, user),
+            }),
+            new Promise<Partial<AuditSection>>((resolve) => {
+              timer = setTimeout(
+                () => resolve({ status: 'error', error: 'creative analysis timed out after 8 minutes' }),
+                8 * 60_000,
+              );
+            }),
+          ]);
+        } catch (err) {
+          partial = { status: 'error', error: err instanceof Error ? err.message : String(err) };
+          logger.error({ err, section: 'creative_analysis' }, 'cold creative analysis failed');
+        } finally {
+          clearTimeout(timer);
+        }
+        await saveSection({
+          ...sections['creative_analysis']!,
+          ...partial,
+          status: partial.status ?? 'complete',
+          completed_at: new Date().toISOString(),
+        });
+        if (partial.status === 'error') anyError = true;
+        else await logWork(workLineFor('creative_analysis', sections['creative_analysis']!));
+      })();
+      continue;
+    }
     const runner = RUNNERS[def.key];
     if (!runner) continue;
     await saveSection({ ...sections[def.key]!, status: 'running' });
@@ -2009,6 +2084,10 @@ export async function runMagicAudit(
     // the Account Model here so the "correct us" section renders early too.
     if (def.key === 'optimization_events') await writeAccountModelSafely();
   }
+
+  // Settle the background cold creative section before ranking — the lead
+  // insights should see what we found in the actual creatives.
+  if (coldCreativePromise) await coldCreativePromise;
 
   // B3 — rank the lead insights across everything that completed
   try {
