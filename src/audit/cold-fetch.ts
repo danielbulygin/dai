@@ -121,7 +121,11 @@ export async function resolveDestinations(
   adDays: RawAdDay[],
   opts: { top?: number; asOf?: string } = {},
 ): Promise<Record<string, { market: string | null; path: string | null }>> {
-  const top = opts.top ?? 15;
+  // Top 15 was a 46%-of-spend cap on the first live cold audit — the landing
+  // report undercounted a page's spend 2× (Dan caught daily-celery at £1,954
+  // vs £4k+ real, 2026-07-04). Resolve enough ads to cover ~all mapped spend;
+  // the ?ids= batch endpoint takes 50 per call, so this is ceil(top/50) calls.
+  const top = opts.top ?? 100;
   const asOf = opts.asOf ?? new Date().toISOString().slice(0, 10);
   const cut30 = isoDaysAgo(asOf, 30);
 
@@ -141,35 +145,39 @@ export async function resolveDestinations(
 
   const out: Record<string, { market: string | null; path: string | null }> = {};
   try {
-    const resp = await fetch(
-      `${GRAPH}/?ids=${ids.join(',')}` +
-        `&fields=creative{asset_feed_spec{link_urls},object_story_spec{link_data{link},video_data{call_to_action}}}` +
-        `&access_token=${token}`,
-      { signal: AbortSignal.timeout(30_000) },
-    );
-    if (!resp.ok) return {};
-    const body = (await resp.json()) as Record<
-      string,
-      {
-        creative?: {
-          asset_feed_spec?: { link_urls?: Array<{ website_url?: string }> };
-          object_story_spec?: { link_data?: { link?: string }; video_data?: { call_to_action?: { value?: { link?: string } } } };
-        };
-      }
-    >;
-    for (const adId of ids) {
-      const c = body[adId]?.creative;
-      const url =
-        c?.asset_feed_spec?.link_urls?.[0]?.website_url ??
-        c?.object_story_spec?.link_data?.link ??
-        c?.object_story_spec?.video_data?.call_to_action?.value?.link;
-      if (!url || !/^https?:\/\//.test(url)) continue;
-      try {
-        out[adId] = { market: null, path: new URL(url).pathname };
-      } catch {
-        /* malformed url — leave unresolved */
+    for (let i = 0; i < ids.length; i += 50) {
+      const batch = ids.slice(i, i + 50);
+      const resp = await fetch(
+        `${GRAPH}/?ids=${batch.join(',')}` +
+          `&fields=creative{asset_feed_spec{link_urls},object_story_spec{link_data{link},video_data{call_to_action}}}` +
+          `&access_token=${token}`,
+        { signal: AbortSignal.timeout(30_000) },
+      );
+      if (!resp.ok) break; // keep whatever earlier batches resolved
+      const body = (await resp.json()) as Record<
+        string,
+        {
+          creative?: {
+            asset_feed_spec?: { link_urls?: Array<{ website_url?: string }> };
+            object_story_spec?: { link_data?: { link?: string }; video_data?: { call_to_action?: { value?: { link?: string } } } };
+          };
+        }
+      >;
+      for (const adId of batch) {
+        const c = body[adId]?.creative;
+        const url =
+          c?.asset_feed_spec?.link_urls?.[0]?.website_url ??
+          c?.object_story_spec?.link_data?.link ??
+          c?.object_story_spec?.video_data?.call_to_action?.value?.link;
+        if (!url || !/^https?:\/\//.test(url)) continue;
+        try {
+          out[adId] = { market: null, path: new URL(url).pathname };
+        } catch {
+          /* malformed url — leave unresolved */
+        }
       }
     }
+    return out;
   } catch (err) {
     logger.warn({ err }, 'cold destination resolve failed (landing section degrades to unresolved)');
   }
