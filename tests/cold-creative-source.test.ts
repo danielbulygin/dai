@@ -231,3 +231,27 @@ describe('winners synthesis inputs + fallback', () => {
     expect(facts.unresolved_media[0]!.ad_name).toBe('Video-C');
   });
 });
+
+// ---------------------------------------------------------------------------
+// coerceStringList — LLM string-array contract repair (live incident 2026-07-04)
+// ---------------------------------------------------------------------------
+import { coerceStringList } from '../src/audit/cold-creative.js';
+
+describe('coerceStringList', () => {
+  it('passes plain string arrays through', () => {
+    expect(coerceStringList(['a', 'b'])).toEqual(['a', 'b']);
+  });
+
+  it('coerces numbered-keyed objects to their string values (the NBN incident shape)', () => {
+    expect(coerceStringList([{ '1': 'first gap' }, { '2': 'second gap' }])).toEqual(['first gap', 'second gap']);
+  });
+
+  it('joins multi-value objects, drops empty/valueless items, stringifies primitives', () => {
+    expect(coerceStringList([{ a: 'x', b: 'y' }, {}, '', '  ', 42, null, ['nested']])).toEqual(['x y', '42']);
+  });
+
+  it('returns [] for non-arrays', () => {
+    expect(coerceStringList({ '1': 'not a list' })).toEqual([]);
+    expect(coerceStringList(undefined)).toEqual([]);
+  });
+});

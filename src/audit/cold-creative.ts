@@ -313,6 +313,28 @@ interface CreativeSynthesis {
   warnings: string[];
 }
 
+/** The LLM occasionally returns numbered-keyed objects instead of plain
+ *  strings in list fields ([{"1": "text"}] — live incident on the first NBN
+ *  re-run, 2026-07-04: the render crashed on the object child). Coerce every
+ *  list item to its string content; drop anything with none. */
+export function coerceStringList(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  const out: string[] = [];
+  for (const item of v) {
+    if (typeof item === 'string') {
+      if (item.trim()) out.push(item);
+    } else if (typeof item === 'number' || typeof item === 'boolean') {
+      out.push(String(item));
+    } else if (item && typeof item === 'object' && !Array.isArray(item)) {
+      const vals = Object.values(item as Record<string, unknown>).filter(
+        (x): x is string => typeof x === 'string' && x.trim().length > 0,
+      );
+      if (vals.length > 0) out.push(vals.join(' '));
+    }
+  }
+  return out;
+}
+
 export interface ColdCreativeArgs {
   meter: AuditCostMeter;
   accessToken: string;
@@ -521,8 +543,8 @@ export async function runColdCreativeAnalysis(args: ColdCreativeArgs): Promise<P
       ...baseData,
       winners: synth.winners,
       angle_patterns: synth.angle_patterns,
-      gaps: synth.gaps,
+      gaps: coerceStringList(synth.gaps),
     },
-    warnings: [...(synth.warnings ?? []), ...sectionWarnings],
+    warnings: [...coerceStringList(synth.warnings), ...sectionWarnings],
   };
 }
