@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { fetchColdAdDays, resolveDestinations, fetchAccountMeta } from '../src/audit/cold-fetch.js';
+import { fetchColdAdDays, resolveDestinations, fetchAccountMeta, pickDestinationUrl } from '../src/audit/cold-fetch.js';
 
 /**
  * The impure cold fetcher, tested against a mocked Graph: slicing must tile
@@ -143,3 +143,26 @@ describe('fetchAccountMeta', () => {
     await expect(fetchAccountMeta('tok', 'act_9')).rejects.toThrow('403');
   });
 });
+
+describe('pickDestinationUrl — destination shapes (cold coverage, 2026-07-04)', () => {
+  it('single-image link_data.link', () => {
+    expect(pickDestinationUrl({ object_story_spec: { link_data: { link: 'https://x.com/p' } } })).toBe('https://x.com/p');
+  });
+  it('asset_feed_spec.link_urls wins first', () => {
+    expect(pickDestinationUrl({ asset_feed_spec: { link_urls: [{ website_url: 'https://a.com/lp' }] }, object_story_spec: { link_data: { link: 'https://b.com' } } })).toBe('https://a.com/lp');
+  });
+  it('carousel child_attachments (the miss the original three paths dropped)', () => {
+    expect(pickDestinationUrl({ object_story_spec: { link_data: { child_attachments: [{ link: 'https://x.com/card1' }, { link: 'https://x.com/card2' }] } } })).toBe('https://x.com/card1');
+  });
+  it('template_data.link (dynamic)', () => {
+    expect(pickDestinationUrl({ object_story_spec: { template_data: { link: 'https://x.com/t' } } })).toBe('https://x.com/t');
+  });
+  it('video call_to_action link', () => {
+    expect(pickDestinationUrl({ object_story_spec: { video_data: { call_to_action: { value: { link: 'https://x.com/v' } } } } })).toBe('https://x.com/v');
+  });
+  it('rejects non-http and empty (catalog/DPA product-set ads stay unresolved on purpose)', () => {
+    expect(pickDestinationUrl({ object_story_spec: { link_data: { link: 'fb://x' } } })).toBeNull();
+    expect(pickDestinationUrl(undefined)).toBeNull();
+    expect(pickDestinationUrl({})).toBeNull();
+  });
+})

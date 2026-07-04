@@ -18,6 +18,32 @@ import type { RawAdDay } from './cold-source.js';
  */
 
 const GRAPH = 'https://graph.facebook.com/v21.0';
+
+/** The creative shapes a destination URL can hide in. Pulled out as a pure,
+ *  testable function because the first live cold audit under-resolved spend:
+ *  the original three paths missed carousel child_attachments (each card its
+ *  own link) — a real, safe miss. Catalog/DPA ads route to per-product URLs
+ *  with no single stable destination; those stay unresolved on purpose (the
+ *  landing report's coverage floor is the honest treatment for them). */
+export interface RawCreative {
+  asset_feed_spec?: { link_urls?: Array<{ website_url?: string }> };
+  object_story_spec?: {
+    link_data?: { link?: string; child_attachments?: Array<{ link?: string }> };
+    video_data?: { call_to_action?: { value?: { link?: string } } };
+    template_data?: { link?: string };
+  };
+}
+
+export function pickDestinationUrl(creative: RawCreative | undefined): string | null {
+  const c = creative;
+  const cand =
+    c?.asset_feed_spec?.link_urls?.[0]?.website_url ??
+    c?.object_story_spec?.link_data?.link ??
+    c?.object_story_spec?.link_data?.child_attachments?.find((a) => a?.link)?.link ??
+    c?.object_story_spec?.template_data?.link ??
+    c?.object_story_spec?.video_data?.call_to_action?.value?.link;
+  return cand && /^https?:\/\//.test(cand) ? cand : null;
+}
 const FIELDS =
   'ad_id,ad_name,adset_id,spend,impressions,clicks,frequency,actions,action_values,video_thruplay_watched_actions';
 
@@ -149,27 +175,15 @@ export async function resolveDestinations(
       const batch = ids.slice(i, i + 50);
       const resp = await fetch(
         `${GRAPH}/?ids=${batch.join(',')}` +
-          `&fields=creative{asset_feed_spec{link_urls},object_story_spec{link_data{link},video_data{call_to_action}}}` +
+          `&fields=creative{asset_feed_spec{link_urls},object_story_spec{link_data{link,child_attachments{link}},video_data{call_to_action},template_data{link}}}` +
           `&access_token=${token}`,
         { signal: AbortSignal.timeout(30_000) },
       );
       if (!resp.ok) break; // keep whatever earlier batches resolved
-      const body = (await resp.json()) as Record<
-        string,
-        {
-          creative?: {
-            asset_feed_spec?: { link_urls?: Array<{ website_url?: string }> };
-            object_story_spec?: { link_data?: { link?: string }; video_data?: { call_to_action?: { value?: { link?: string } } } };
-          };
-        }
-      >;
+      const body = (await resp.json()) as Record<string, { creative?: RawCreative }>;
       for (const adId of batch) {
-        const c = body[adId]?.creative;
-        const url =
-          c?.asset_feed_spec?.link_urls?.[0]?.website_url ??
-          c?.object_story_spec?.link_data?.link ??
-          c?.object_story_spec?.video_data?.call_to_action?.value?.link;
-        if (!url || !/^https?:\/\//.test(url)) continue;
+        const url = pickDestinationUrl(body[adId]?.creative);
+        if (!url) continue;
         try {
           out[adId] = { market: null, path: new URL(url).pathname };
         } catch {
