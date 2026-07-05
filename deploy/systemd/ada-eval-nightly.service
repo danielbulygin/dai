@@ -1,0 +1,11 @@
+[Unit]
+Description=Ada nightly eval (golden set vs live /chat, judged)
+After=network-online.target ada-console-assist.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/dai
+ExecStart=/root/dai/scripts/eval-nightly.sh
+TimeoutStartSec=3600
+Nice=10
