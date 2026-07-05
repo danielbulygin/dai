@@ -23,4 +23,11 @@ set +a
 
 export GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo nightly)"
 
+# Nightly exit semantics: exit 0 as long as the suite executed and a run file
+# was written — Ada failing questions is a FINDING (a run file to review), not
+# an infra error. eval-ada.ts still exits non-zero when EVERY question
+# infra-failed (endpoint down / all streams truncated), so the systemd unit
+# only shows 'failed' for genuine infrastructure breakage.
+export EVAL_EXIT_ZERO_ON_FAIL=1
+
 exec pnpm exec tsx scripts/eval-ada.ts --target http

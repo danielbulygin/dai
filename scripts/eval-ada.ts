@@ -31,6 +31,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { runAgent } from '../src/agents/runner.js';
 import { runAgentSDK } from '../src/agents/sdk/runAgentSDK.js';
 import { buildJudgePrompt, parseJudgeVerdict, type JudgeVerdict } from '../src/agents/sdk/eval-judge.js';
+import { createSseAccumulator, type ChatStreamState } from '../src/agents/sdk/eval-http.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const EVAL_DIR = join(__dirname, '..', 'tests', 'eval');
@@ -64,21 +65,21 @@ if (target === 'http' && !ASSIST_SECRET) {
   process.exit(1);
 }
 
-interface ChatTurn { response: string; ok: boolean; subtype: string; costUsd: number; }
-
 /**
  * Drive one golden question through the LIVE /chat SSE endpoint. Accumulates
  * `text` events (resetting on `reset`, mirroring the server's own fullText
  * reset so the captured answer matches what the client renders), and reads the
  * honest done frame (ok/subtype/cost_usd). This tests the EXACT production surface.
+ *
+ * SSE parsing lives in src/agents/sdk/eval-http.ts (pure, unit-tested).
+ * `state.sawDone` is false when the stream ended WITHOUT a `done` event (server
+ * crash / timeout mid-answer) — the caller treats that as an INFRA failure and
+ * must NOT judge the partial text as if it were a complete answer.
  */
-async function askViaHttp(question: string, sessionId: string): Promise<ChatTurn> {
+async function askViaHttp(question: string, sessionId: string): Promise<ChatStreamState> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), HTTP_TIMEOUT_MS);
-  let response = '';
-  let ok = false;
-  let subtype = 'unknown';
-  let costUsd = 0;
+  const acc = createSseAccumulator();
   try {
     const res = await fetch(CHAT_URL, {
       method: 'POST',
@@ -92,41 +93,19 @@ async function askViaHttp(question: string, sessionId: string): Promise<ChatTurn
     }
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
-    let buf = '';
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      // SSE frames are separated by a blank line.
-      let sep;
-      while ((sep = buf.indexOf('\n\n')) !== -1) {
-        const frame = buf.slice(0, sep);
-        buf = buf.slice(sep + 2);
-        let event = 'message';
-        let data = '';
-        for (const line of frame.split('\n')) {
-          if (line.startsWith('event:')) event = line.slice(6).trim();
-          else if (line.startsWith('data:')) data += line.slice(5).trim();
-          // lines starting with ':' are comments (heartbeats) — ignore.
-        }
-        if (!data) continue;
-        let payload: Record<string, unknown> = {};
-        try { payload = JSON.parse(data) as Record<string, unknown>; } catch { continue; }
-        if (event === 'text' && typeof payload.text === 'string') response += payload.text;
-        else if (event === 'reset') response = '';
-        else if (event === 'done') {
-          ok = payload.ok === true;
-          subtype = String(payload.subtype ?? 'unknown');
-          costUsd = Number(payload.cost_usd ?? 0);
-        } else if (event === 'error' && typeof payload.error === 'string' && !response) {
-          response = `[chat error] ${payload.error}`;
-        }
-      }
+      acc.push(decoder.decode(value, { stream: true }));
     }
+    // Flush the decoder + any residual buffered frame (a final frame without a
+    // trailing \n\n) so a valid done.ok/cost isn't lost to framing.
+    acc.push(decoder.decode());
+    acc.flush();
   } finally {
     clearTimeout(timer);
   }
-  return { response, ok, subtype, costUsd };
+  return acc.state;
 }
 
 const selected = onlyIds ? questions.filter((q) => onlyIds.has(q.id)) : questions;
@@ -172,6 +151,25 @@ for (const q of selected) {
       responseText = turn.response;
       subtype = turn.subtype;
       costUsd = turn.costUsd;
+      if (!turn.ok) {
+        // The stream did not end in an explicit success. Do NOT judge the
+        // partial/failed text as if it were a complete answer — an infra
+        // truncation must never score pass/partial.
+        const infra = !turn.sawDone;
+        const reason = infra
+          ? 'stream ended without done event (partial answer, not judged)'
+          : `runner reported failure: subtype=${turn.subtype} (answer not judged)`;
+        const duration = Math.round((Date.now() - started) / 1000);
+        console.log(`--- ❌ fail (? turns, ${duration}s, ${subtype}${costUsd != null ? `, $${costUsd.toFixed(4)}` : ''}) — ${reason}`);
+        console.log(`${responseText.slice(0, 400)}\n`);
+        results.push({
+          id: q.id, question: q.question, expect: q.expect, runner, target, subtype,
+          response: responseText, verdict: 'fail', judge_reason: reason,
+          principles_violated: [], not_judged: true, infra_failure: infra,
+          cost_usd: costUsd, duration_s: duration,
+        });
+        continue;
+      }
     } else {
       const opts = {
         source: 'eval' as const,
@@ -226,20 +224,40 @@ for (const r of results) {
 }
 const totalCost = results.reduce((s, r) => s + (typeof r.cost_usd === 'number' ? r.cost_usd : 0), 0);
 
+// Infra failures = the harness/endpoint broke, not Ada: a thrown error (endpoint
+// unreachable, HTTP non-200, timeout) or a truncated stream (no done event).
+const infraFailures = results.filter((r) => r.error != null || r.infra_failure === true).length;
+
 writeFileSync(outPath, JSON.stringify({
   run_id: runId, runner, target, judge_model: doJudge ? JUDGE_MODEL : null,
   git: process.env.GIT_SHA ?? 'local',
   provisional: true,
   note: 'Grades are PROVISIONAL — Dan has not ratified the quality bar (docs/ada-quality-bar-2026-06-21.md). Principles_violated reference the [EVAL] IDs there; A7 is advisory.',
-  summary: { pass, partial, fail, principles_violated: principleCounts, total_cost_usd: Number(totalCost.toFixed(4)) },
+  summary: { pass, partial, fail, infra_failures: infraFailures, principles_violated: principleCounts, total_cost_usd: Number(totalCost.toFixed(4)) },
   results,
 }, null, 2));
 console.log(`\nSaved ${results.length} results → ${outPath}`);
-console.log(`Verdicts: ✅ ${pass} pass · 🟡 ${partial} partial · ❌ ${fail} fail`);
+console.log(`Verdicts: ✅ ${pass} pass · 🟡 ${partial} partial · ❌ ${fail} fail${infraFailures ? ` (${infraFailures} infra)` : ''}`);
 if (Object.keys(principleCounts).length) {
   const rollup = Object.entries(principleCounts).sort((a, b) => b[1] - a[1]).map(([id, n]) => `${id}×${n}`).join(' · ');
   console.log(`Principles violated: ${rollup}`);
 }
 if (totalCost > 0) console.log(`Total cost: $${totalCost.toFixed(4)}`);
 console.log('Grades are PROVISIONAL (quality bar not yet ratified).');
+
+// Exit semantics: interactive/manual runs stay strict (any fail → 1). The
+// nightly timer sets EVAL_EXIT_ZERO_ON_FAIL=1 to decouple "the eval infra ran
+// and produced a run file" from "Ada met the (provisional) bar" — otherwise the
+// unit shows 'failed' every night at the current baseline and a genuine infra
+// crash becomes indistinguishable. Even under the flag, a run where EVERY
+// question infra-failed (endpoint down / all streams truncated) exits non-zero.
+const allInfra = results.length === 0 || infraFailures === results.length;
+if (process.env.EVAL_EXIT_ZERO_ON_FAIL === '1') {
+  if (allInfra) {
+    console.log('Exit: 1 — ALL questions infra-failed (endpoint down?), despite EVAL_EXIT_ZERO_ON_FAIL.');
+    process.exit(1);
+  }
+  if (fail > 0) console.log(`Exit: 0 under EVAL_EXIT_ZERO_ON_FAIL (${fail} fails are Ada findings, not infra errors).`);
+  process.exit(0);
+}
 process.exit(fail > 0 ? 1 : 0);
