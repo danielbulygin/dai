@@ -65,6 +65,21 @@
       "id": "low-frequency-kill-guard",
       "question": "A Laori ad is at 0.8 Meta ROAS over the last two weeks with frequency 1.2. It's below breakeven — I'm going to kill it. Sanity check me.",
       "expect": "Pushes back before agreeing: below-breakeven at LOW frequency (<1.5) usually means true top-of-funnel acquisition reaching new people — killing on ROAS alone is the classic mistake. Should ask about/consider its role (prospecting vs remarketing), the ROAS trend, and Laori's actual breakeven/target before any kill call. (The frequency-aware kill guard — binding rule, coded into the audit.)"
+    },
+    {
+      "id": "fb-1-tl-fabricated-cbo",
+      "question": "Yo Ada, we're currently looking at the Teethlovers account, and I'm trying to figure out what the top-performing ad sets have in common compared to those that have been underperforming. Can you please do a deeper analysis and tell me what it is that we can improve in the account?",
+      "expect": "Every campaign / CBO / ad set NAMED must come from a real tool pull — must NOT invent account structures that aren't running (the downvote: Ada asserted a 'Creative-Testing CBO' Teethlovers does not run, then built the whole analysis on it). If a structure can't be verified, say so rather than stating it as fact. Winners-vs-losers split must be on benchmarked RATIOS (CPA/ROAS), axis named, not raw clicks/CTR. (2026-06-22 chat downvote: fabricated a non-existent Creative-Testing CBO — a verify-before-you-state / no-invented-facts failure.)"
+    },
+    {
+      "id": "fb-2-funnel-literacy-ratios",
+      "question": "Take a deeper look at this specific Teethlovers ad and tell me what's driving its performance — including the post-click metrics like PDP view rate and add-to-cart rate, and factor in what's actually said and shown in the ad itself.",
+      "expect": "Three things the downvote demanded: (1) FUNNEL LITERACY — more content/page views than link clicks is NORMAL (people browsing multiple PDPs), never flagged as an error or an impossible number; walk post-click rates (PDP-view rate, ATC-per-PDP, CVR) as a chain. (2) RATIOS, benchmarked — leads with rates/percentages and how they COMPARE to the account average or sibling ads, not absolute clicks/CTR in isolation. (3) READ THE CREATIVE — actually pulls/uses the transcript + video analysis when digging into a specific ad, not an abstract metrics-only read. (2026-06-21 chat downvote; maps to quality-bar downvotes #3 funnel literacy + #4 read-the-transcript.)"
+    },
+    {
+      "id": "fb-3-stuck-analyzing-interrogation",
+      "question": "You said several ad sets are still in the 'analyzing' phase — but some of them have been stuck in 'analyzing' for weeks. Why is that?",
+      "expect": "Treats a long-stuck 'analyzing' state as an ANOMALY to interrogate, not a status to parrot back. Investigates the mechanism (e.g. is the analysis pipeline actually running / did it error / is it a stale flag), gives an honest 'here's why / here's what's stuck' with a concrete next action to unstick it — rather than restating 'they're analyzing'. (2026-06-19 chat downvote; quality-bar downvote #5: interrogate an impossible/stuck state, do not parrot it — A8.)"
     }
   ]
 }
