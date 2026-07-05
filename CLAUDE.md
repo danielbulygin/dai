@@ -57,6 +57,25 @@ BEFORE being called done:
 Evals MUST run on the droplet — the local `.env` ANTHROPIC_API_KEY is stale.
 Add a golden question whenever a new failure mode is discovered in #ada.
 
+**Two target modes** (`--target`, default `in-process`):
+- `in-process` drives `runAgentSDK` inside the eval process (the A/B loop).
+- `--target http` sends each question to the LIVE `ada-console-assist` `/chat`
+  SSE endpoint (`http://localhost:8092/chat`, `X-Assist-Key=$ADA_ASSIST_SECRET`
+  from `/root/ada-console-assist.env`) — the EXACT production surface team-Ada
+  runs on. Records the server's honest `done.ok/subtype/cost_usd`.
+
+**Quality-bar rubric layer:** the judge (`src/agents/sdk/eval-judge.ts`) grades
+each answer against BOTH the per-question `expect` AND a compact GENERAL RUBRIC
+(the 14 `[EVAL]` principles from `bmad/docs/ada-quality-bar-2026-06-21.md`, plus
+provisional A7). The verdict now carries `principles_violated: string[]`; the run
+summary rolls up per-principle violation counts + total cost. Grades are
+PROVISIONAL until Dan ratifies the quality bar.
+
+**Nightly, automatic:** `ada-eval-nightly.timer` (droplet, ~05:00 UTC) runs
+`scripts/eval-nightly.sh` → `eval-ada.ts --target http` over the full golden set
+and drops a judged run file in `tests/eval/runs/`. Read-only; never restarts a
+service. Units checked in at `deploy/systemd/`.
+
 ## Deploy
 
 `dai.service` on the droplet (139.59.144.194): `cd /root/dai && git pull --ff-only && pnpm build && systemctl restart dai`.
