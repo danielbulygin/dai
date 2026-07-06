@@ -966,3 +966,294 @@ export function computeAccountFacts(inp: AccountFactsInputs): PackSection {
       `"Still spending" = delivered within 7 days of the newest data day.`,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Account activity / change history (2026-07-06)
+//
+// Meta's account activities edge (act_<id>/activities) is the account's audit
+// log: every change made to campaigns/ad sets/ads/creatives/budgets/targeting,
+// with a timestamp and (usually) an actor + application. Read-only under
+// ads_read. This section answers three founder questions the delivery data
+// can't: how much is anyone actually TOUCHING this account, WHO is touching it
+// (agency vs a person vs an automated app), and how long it sits UNTOUCHED.
+//
+// Contract, same as the rest of the pack: pure function, PackSection out, no
+// speculative claims. We only ever report the counts/actors/gaps the log
+// literally contains — we never infer intent ("your agency is lazy") or invent
+// numbers. Cost-per-change is derived ONLY when a monthly retainer is supplied
+// (nullable — unknown at audit time), otherwise the field is null and the prose
+// makes no cost claim.
+// ---------------------------------------------------------------------------
+
+/** One normalized row from Meta's activities edge (mapped in magic-audit.ts). */
+export interface ActivityEvent {
+  /** Meta's raw event_type enum value, e.g. "update_ad_set_run_status". */
+  event_type: string;
+  /** ISO-8601 timestamp (event_time). */
+  event_time: string;
+  actor_id: string | null;
+  actor_name: string | null;
+  application_id: string | null;
+  application_name: string | null;
+  object_type: string | null;
+}
+
+/** Small human-readable buckets Meta's large event_type enum maps into. */
+export type ActivityCategory =
+  | 'creative' // new ads, image/video uploads, creative edits
+  | 'budget' // budget / bid / spend-cap changes
+  | 'status' // pauses, unpauses, deletes, archives (run-status flips)
+  | 'targeting' // audience / targeting-spec edits
+  | 'structure' // create/delete of campaigns & ad sets (non-creative scaffolding)
+  | 'account' // account-level settings, billing, users, permissions
+  | 'other'; // anything the map doesn't recognize (kept, never dropped)
+
+const ACTIVITY_CATEGORY_LABEL: Record<ActivityCategory, string> = {
+  creative: 'creative uploads & edits',
+  budget: 'budget & bid changes',
+  status: 'pauses / unpauses',
+  targeting: 'targeting edits',
+  structure: 'campaign & ad-set structure',
+  account: 'account settings',
+  other: 'other changes',
+};
+
+/**
+ * Map one Meta event_type into a human category. Order matters: more specific
+ * signals (targeting, budget, run-status) are tested BEFORE the generic
+ * object-name signals (ad_set / campaign) so e.g. `update_ad_set_target_spec`
+ * lands in `targeting`, not `structure`, and `update_campaign_budget` lands in
+ * `budget`, not `structure`. Pure + exported for unit testing.
+ */
+export function categorizeActivityEvent(eventType: string): ActivityCategory {
+  const e = (eventType || '').toLowerCase();
+  if (/target|audience|geo_location|interest|behavior|lookalike|placement|dsa|country/.test(e)) return 'targeting';
+  if (/budget|bid|spend_cap|spend_limit|cost_cap|roas|amount/.test(e)) return 'budget';
+  if (/run_status|pause|unpause|resume|reactivat|archive|delete|remove/.test(e)) return 'status';
+  if (/creativ|add_image|add_video|create_ad(?!_set|_campaign)|update_ad(?!_set|_campaign|_account)/.test(e)) return 'creative';
+  if (/campaign|ad_set|adgroup|ad_group|create_ad_set/.test(e)) return 'structure';
+  if (/account|billing|payment|funding|invoice|user|permission|business|owner/.test(e)) return 'account';
+  return 'other';
+}
+
+export interface AccountActivityInputs {
+  events: ActivityEvent[];
+  currency: string;
+  /** Monthly retainer the account owner pays whoever manages the account.
+   *  Nullable — usually unknown at audit time; when null, no cost claim is made. */
+  monthlyRetainer: number | null;
+  /** True when the live pull hit its page cap — counts are a floor, not exact. */
+  partial?: boolean;
+  /** Override "now" for deterministic tests. Defaults to current time. */
+  asOf?: string;
+  /** Lookback the fetch actually requested (days). Default 90. */
+  windowDays?: number;
+}
+
+const dayOf = (iso: string): string => String(iso).slice(0, 10);
+const dayNumber = (isoDay: string): number => Math.floor(Date.parse(`${isoDay}T00:00:00Z`) / 86_400_000);
+
+export function computeAccountActivity(inp: AccountActivityInputs): PackSection {
+  const { events, currency, monthlyRetainer } = inp;
+  const windowDays = inp.windowDays ?? 90;
+  const asOf = inp.asOf ? new Date(inp.asOf) : new Date();
+  const asOfDay = dayOf(asOf.toISOString());
+  const cut30 = new Date(asOf.getTime() - 30 * 86_400_000).toISOString().slice(0, 10);
+
+  // Empty log is itself an honest finding — a dormant / untouched account.
+  if (events.length === 0) {
+    return {
+      summary:
+        `Meta's change log shows no recorded account changes in the last ${windowDays} days. ` +
+        `Nobody — no person, no agency, no automated tool — has touched campaigns, budgets, creative, or targeting in that window (as far as the audit log records).`,
+      next_step:
+        `If someone is being paid to manage this account, ask what they've changed lately — the log is empty. ` +
+        `A truly evergreen account can coast, but zero activity usually means the account is on autopilot, not being optimized.`,
+      data: {
+        window_days: windowDays,
+        no_activity: true,
+        total_30d: 0,
+        total_window: 0,
+        actions_per_week: 0,
+        days_since_last_change: null,
+        longest_zero_streak_days: null,
+        by_category: [],
+        by_actor: [],
+        by_application: [],
+        monthly_retainer: monthlyRetainer,
+        cost_per_change_30d: null,
+        cost_per_change_window: null,
+        partial: !!inp.partial,
+      },
+      warnings: [
+        `Meta's activities log has a limited retention window and does not record every automated delivery adjustment — read "no changes" as "no changes we can see", not a guarantee.`,
+      ],
+      derivation:
+        `Read the account's change history live from Meta's activities edge (read-only, ads_read). ` +
+        `The log returned zero events in the ${windowDays}-day lookback.`,
+    };
+  }
+
+  // Sort ascending by time; derive counts, categories, actors, and gaps.
+  const sorted = [...events].sort((a, b) => a.event_time.localeCompare(b.event_time));
+  let count30 = 0;
+  const catWindow = new Map<ActivityCategory, number>();
+  const cat30 = new Map<ActivityCategory, number>();
+  const actorAgg = new Map<string, { id: string | null; name: string; count: number }>();
+  const appAgg = new Map<string, { id: string | null; name: string; count: number }>();
+  const activeDays = new Set<string>();
+
+  for (const ev of sorted) {
+    const cat = categorizeActivityEvent(ev.event_type);
+    catWindow.set(cat, (catWindow.get(cat) ?? 0) + 1);
+    const d = dayOf(ev.event_time);
+    activeDays.add(d);
+    if (d >= cut30) {
+      count30 += 1;
+      cat30.set(cat, (cat30.get(cat) ?? 0) + 1);
+    }
+    // Actor attribution: prefer a named human/actor; fall back to the
+    // application, then to an explicit "unattributed" bucket — never guess.
+    const actorKey = ev.actor_id ?? (ev.actor_name ? `name:${ev.actor_name}` : null);
+    const actorName = ev.actor_name ?? (ev.actor_id ? `Actor ${ev.actor_id}` : 'Unattributed (no actor on record)');
+    if (actorKey || ev.actor_name) {
+      const k = actorKey ?? `name:${ev.actor_name}`;
+      const a = actorAgg.get(k) ?? { id: ev.actor_id, name: actorName, count: 0 };
+      a.count += 1;
+      actorAgg.set(k, a);
+    } else {
+      const a = actorAgg.get('__none__') ?? { id: null, name: 'Unattributed (no actor on record)', count: 0 };
+      a.count += 1;
+      actorAgg.set('__none__', a);
+    }
+    if (ev.application_id || ev.application_name) {
+      const k = ev.application_id ?? `name:${ev.application_name}`;
+      const app = appAgg.get(k) ?? { id: ev.application_id, name: ev.application_name ?? `App ${ev.application_id}`, count: 0 };
+      app.count += 1;
+      appAgg.set(k, app);
+    }
+  }
+
+  const totalWindow = sorted.length;
+  const weeks = windowDays / 7;
+  const actionsPerWeek = r1(totalWindow / weeks);
+
+  // Inactivity gaps. We count gaps BETWEEN observed changes and the trailing
+  // gap up to "now" — but deliberately NOT the leading gap from window-start to
+  // the first observed change: the activities log has a retention limit, so an
+  // apparent lull at the start of the window can be missing data, not real
+  // quiet. Trailing/inter-event gaps are real.
+  const sortedActiveDays = [...activeDays].sort();
+  const lastDay = sortedActiveDays[sortedActiveDays.length - 1]!;
+  const daysSinceLastChange = Math.max(0, dayNumber(asOfDay) - dayNumber(lastDay));
+  let longestZeroStreak = daysSinceLastChange; // trailing quiet counts
+  for (let i = 1; i < sortedActiveDays.length; i++) {
+    const gap = dayNumber(sortedActiveDays[i]!) - dayNumber(sortedActiveDays[i - 1]!) - 1;
+    if (gap > longestZeroStreak) longestZeroStreak = gap;
+  }
+
+  const byCategory = [...catWindow.entries()]
+    .map(([category, count]) => ({
+      category,
+      label: ACTIVITY_CATEGORY_LABEL[category],
+      count,
+      count_30d: cat30.get(category) ?? 0,
+      share_pct: pct(count, totalWindow),
+    }))
+    .sort((a, b) => b.count - a.count);
+
+  const byActor = [...actorAgg.values()]
+    .map((a) => ({ actor_id: a.id, actor_name: a.name, count: a.count, share_pct: pct(a.count, totalWindow) }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 10);
+
+  const byApplication = [...appAgg.values()]
+    .map((a) => ({ application_id: a.id, application_name: a.name, count: a.count, share_pct: pct(a.count, totalWindow) }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 10);
+
+  // Derived cost framing — ONLY when a retainer is known (nullable). We store
+  // the raw quotients; the report layer decides how to phrase them.
+  const costPerChange30d = monthlyRetainer != null && count30 > 0 ? r2(monthlyRetainer / count30) : null;
+  const retainerOverWindow = monthlyRetainer != null ? monthlyRetainer * (windowDays / 30) : null;
+  const costPerChangeWindow = retainerOverWindow != null && totalWindow > 0 ? r2(retainerOverWindow / totalWindow) : null;
+
+  const topCat = byCategory[0];
+  const topActor = byActor[0];
+  const namedActors = byActor.filter((a) => a.actor_id || !a.actor_name.startsWith('Unattributed'));
+
+  const summaryParts: string[] = [];
+  summaryParts.push(
+    `Meta logged ${totalWindow.toLocaleString('en-US')} account change${totalWindow === 1 ? '' : 's'} in the last ${windowDays} days ` +
+      `(${count30} in the last 30) — about ${actionsPerWeek} per week.`,
+  );
+  if (topCat) {
+    summaryParts.push(`The biggest slice was ${topCat.label} (${topCat.share_pct}%).`);
+  }
+  if (topActor && namedActors.length > 0) {
+    summaryParts.push(
+      `Most changes were made by ${topActor.actor_name} (${topActor.count} of ${totalWindow}${byApplication[0] ? `, via ${byApplication[0].application_name}` : ''}).`,
+    );
+  } else if (byApplication[0]) {
+    summaryParts.push(
+      `The log doesn't attribute changes to a named person; the most active tool was ${byApplication[0].application_name} (${byApplication[0].count} of ${totalWindow}).`,
+    );
+  }
+  summaryParts.push(
+    `Longest quiet stretch: ${longestZeroStreak} day${longestZeroStreak === 1 ? '' : 's'} with zero changes; the last change was ${daysSinceLastChange} day${daysSinceLastChange === 1 ? '' : 's'} ago.`,
+  );
+  if (costPerChange30d != null) {
+    summaryParts.push(
+      `At a ${money(monthlyRetainer!, currency)}/mo retainer that's ${money(costPerChange30d, currency)} per logged change last month.`,
+    );
+  }
+
+  const nextStep =
+    count30 === 0
+      ? `No changes at all in the last 30 days. If you're paying for active management, that's the first thing to raise — ask what was done and why the account went quiet.`
+      : actionsPerWeek < 1
+        ? `Under one change a week is light-touch management. Ask whoever runs the account what their testing cadence is — healthy accounts usually see new creative and budget moves every week.`
+        : `Cross-check this against the results: lots of changes is only good if the account is improving. Ask for the reasoning behind the recent ${count30} changes, not just the count.`;
+
+  const warnings: string[] = [];
+  warnings.push(
+    `Meta's activities log has a limited retention window and does not capture every automated delivery adjustment — treat these counts as what's on the record, not a complete history.`,
+  );
+  if (inp.partial) {
+    warnings.push(`The change-history pull hit its page cap — the ${windowDays}-day counts are a floor; the real totals are higher.`);
+  }
+  if (namedActors.length === 0) {
+    warnings.push(`No changes in this window are attributed to a named person — Meta returned only app/system-level actors, so "who acted" can't be broken down by individual.`);
+  }
+
+  return {
+    summary: summaryParts.join(' '),
+    next_step: nextStep,
+    data: {
+      window_days: windowDays,
+      no_activity: false,
+      total_window: totalWindow,
+      total_30d: count30,
+      actions_per_week: actionsPerWeek,
+      days_since_last_change: daysSinceLastChange,
+      longest_zero_streak_days: longestZeroStreak,
+      by_category: byCategory,
+      by_actor: byActor,
+      by_application: byApplication,
+      named_actor_count: namedActors.length,
+      monthly_retainer: monthlyRetainer,
+      cost_per_change_30d: costPerChange30d,
+      cost_per_change_window: costPerChangeWindow,
+      currency,
+      partial: !!inp.partial,
+    },
+    warnings: warnings.length ? warnings : undefined,
+    derivation:
+      `Read the account's change history live from Meta's activities edge (act_<id>/activities, read-only under ads_read). ` +
+      `Counted ${totalWindow.toLocaleString('en-US')} events over ${windowDays} days, bucketed each event_type into ${Object.keys(ACTIVITY_CATEGORY_LABEL).length} human categories, ` +
+      `aggregated by actor and by application, and measured gaps between change-days (trailing quiet counts; a leading gap is treated as possible missing data, not inactivity). ` +
+      (monthlyRetainer != null
+        ? `Cost-per-change divides the stated ${money(monthlyRetainer, currency)}/mo retainer by the change count.`
+        : `No retainer was supplied, so no cost-per-change is claimed.`),
+  };
+}

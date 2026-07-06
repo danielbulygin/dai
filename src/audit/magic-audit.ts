@@ -18,9 +18,9 @@ import { buildScorecard, buildComparisonSection, type ScorecardInputs, type Scor
 import {
   computePlacementBreakdown, computeAudienceBreakdown, computeTargetingSplit, computeLearningLimited,
   computeSaturation, computeCreativeDiversity, computeCohortWave, computeWhatsWorking, computeLandingPages,
-  computeAccountFacts, longestStillSpendingSpan, classifyDestination,
+  computeAccountFacts, longestStillSpendingSpan, classifyDestination, computeAccountActivity,
   type PlacementInsightRow, type DemoInsightRow, type GeoInsightRow, type TargetingSpecLite,
-  type WeeklyReachRow, type LandingAdRow, type DeadUrlCheck,
+  type WeeklyReachRow, type LandingAdRow, type DeadUrlCheck, type ActivityEvent,
 } from './report-pack-extra.js';
 import { buildAccountModel, mergeAccountModel, type AccountModel, type AccountModelInputs } from './account-model.js';
 import { coldBreakeven, buildColdKnowledge, type ColdRows } from './cold-source.js';
@@ -132,6 +132,7 @@ const SECTION_ORDER: Array<Pick<AuditSection, 'key' | 'title' | 'status'>> = [
   { key: 'creative_analysis', title: 'Creative Performance & Angles', status: 'pending' },
   { key: 'funnel_read', title: 'Funnel Diagnosis', status: 'pending' },
   { key: 'account_facts', title: 'Did You Know — six months of account texture', status: 'pending' },
+  { key: 'account_activity', title: "Account Activity — change history & who's working the account", status: 'pending' },
   { key: 'competitor_teardown', title: 'Ads Library Landscape', status: 'pending' },
 ];
 
@@ -991,6 +992,77 @@ async function fetchPartnershipAdIds(clientCode: string, adAccountId: string | n
     return flagged;
   } catch {
     return flagged;
+  }
+}
+
+/**
+ * Account change history / activity log — Meta's activities edge
+ * (act_<id>/activities), read-only under ads_read. Paginated, fail-soft: any
+ * error returns null (the section becomes an honest "unavailable", never a
+ * fabricated log). Capped at ACTIVITY_PAGE_CAP pages — automated accounts can
+ * emit thousands of events; when the cap is hit we flag `partial` so the counts
+ * are read as a floor. Window defaults to 90 days.
+ */
+const ACTIVITY_PAGE_CAP = 20; // 20 × 500 = up to 10k events before we call it a floor
+
+async function fetchAccountActivities(
+  clientCode: string,
+  adAccountId: string | null,
+  tokenOverride?: string,
+  opts: { windowDays?: number; asOf?: string } = {},
+): Promise<{ events: ActivityEvent[]; partial: boolean } | null> {
+  if (!adAccountId) return null;
+  const token = tokenOverride ?? metaTokenFor(clientCode);
+  if (!token) return null;
+  const acct = adAccountId.startsWith('act_') ? adAccountId : `act_${adAccountId}`;
+  const windowDays = opts.windowDays ?? 90;
+  const asOf = opts.asOf ?? new Date().toISOString().slice(0, 10);
+  const since = new Date(new Date(`${asOf}T00:00:00Z`).getTime() - windowDays * 86400_000).toISOString().slice(0, 10);
+  const events: ActivityEvent[] = [];
+  let partial = false;
+  let url =
+    `https://graph.facebook.com/v21.0/${acct}/activities` +
+    `?fields=event_type,event_time,actor_id,actor_name,application_id,application_name,object_type` +
+    `&since=${since}&until=${asOf}&limit=500&access_token=${token}`;
+  try {
+    let page = 0;
+    for (; page < ACTIVITY_PAGE_CAP && url; page++) {
+      const resp = await fetch(url, { signal: AbortSignal.timeout(30_000) });
+      if (!resp.ok) {
+        // A first-page failure = endpoint unavailable under this token → null so
+        // the section reports honestly. Later-page failure = keep what we have.
+        return events.length ? { events, partial: true } : null;
+      }
+      const body = (await resp.json()) as {
+        data?: Array<{
+          event_type?: string;
+          event_time?: string;
+          actor_id?: string;
+          actor_name?: string;
+          application_id?: string;
+          application_name?: string;
+          object_type?: string;
+        }>;
+        paging?: { next?: string };
+      };
+      for (const a of body.data ?? []) {
+        events.push({
+          event_type: a.event_type ?? 'unknown',
+          event_time: a.event_time ?? '',
+          actor_id: a.actor_id ?? null,
+          actor_name: a.actor_name ?? null,
+          application_id: a.application_id ?? null,
+          application_name: a.application_name ?? null,
+          object_type: a.object_type ?? null,
+        });
+      }
+      url = body.paging?.next ?? '';
+    }
+    if (page >= ACTIVITY_PAGE_CAP && url) partial = true;
+    return { events: events.filter((e) => e.event_time), partial };
+  } catch (err) {
+    logger.warn({ err, clientCode }, 'account activities pull failed (change-history section degrades)');
+    return events.length ? { events, partial: true } : null;
   }
 }
 
@@ -1910,6 +1982,22 @@ export async function runMagicAudit(
       const adNames = new Map<string, string>();
       for (const r of packRows90) if (r.ad_name) adNames.set(r.ad_id, r.ad_name);
       return computeAccountFacts({ rows180: packRows180, adNames, partnershipSpendPct: partnershipPct, currency: client.currency });
+    },
+    account_activity: async () => {
+      // Change history reads live from Meta's activities edge on BOTH paths
+      // (cold connection token or the agency token) — no warehouse dependency.
+      const res = await fetchAccountActivities(code, client.adAccountId, cold?.accessToken);
+      if (!res) return { status: 'error', error: 'account change-history pull failed or is unavailable under ads_read' };
+      // Monthly retainer is nullable — unknown at audit time. This is the wire
+      // point: when a lead states what they pay their manager, thread it here to
+      // light up cost-per-change. Until then the section reports counts only.
+      const monthlyRetainer: number | null = null;
+      return computeAccountActivity({
+        events: res.events,
+        currency: client.currency,
+        monthlyRetainer,
+        partial: res.partial,
+      });
     },
     competitor_teardown: () => {
       // Account-side age context for the Library bridge — computed from the

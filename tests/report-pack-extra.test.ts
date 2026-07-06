@@ -13,10 +13,13 @@ import {
   classifyDestination,
   computeAccountFacts,
   longestStillSpendingSpan,
+  computeAccountActivity,
+  categorizeActivityEvent,
   type PlacementInsightRow,
   type TargetingSpecLite,
   type WeeklyReachRow,
   type LandingAdRow,
+  type ActivityEvent,
 } from '../src/audit/report-pack-extra.js';
 import type { PackAdRow, AdsetConfigLite } from '../src/audit/report-pack.js';
 
@@ -383,5 +386,135 @@ describe('longestStillSpendingSpan — the shared account-side ad-age number', (
     const expected = longestStillSpendingSpan(rows)!.spanDays;
     const fact = (s.data as { facts: Array<{ fact: string }> }).facts.find((f) => f.fact.includes('longest-running'))!;
     expect(fact.fact).toContain(`live ${expected} days`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Account activity / change history (2026-07-06)
+// ---------------------------------------------------------------------------
+
+describe('categorizeActivityEvent', () => {
+  it('maps Meta event_types into human categories, specific signals first', () => {
+    // targeting beats the ad_set/campaign structure signal
+    expect(categorizeActivityEvent('update_ad_set_target_spec')).toBe('targeting');
+    // budget beats the campaign structure signal
+    expect(categorizeActivityEvent('update_campaign_budget')).toBe('budget');
+    expect(categorizeActivityEvent('update_ad_set_bid_amount')).toBe('budget');
+    // run-status flips are pauses/unpauses
+    expect(categorizeActivityEvent('update_ad_set_run_status')).toBe('status');
+    expect(categorizeActivityEvent('update_campaign_run_status')).toBe('status');
+    // ad-account enable/disable is account-level, not a campaign pause
+    expect(categorizeActivityEvent('ad_account_update_status')).toBe('account');
+    // creative uploads/edits
+    expect(categorizeActivityEvent('create_ad')).toBe('creative');
+    expect(categorizeActivityEvent('add_images')).toBe('creative');
+    expect(categorizeActivityEvent('update_ad_creative')).toBe('creative');
+    // plain structure
+    expect(categorizeActivityEvent('create_ad_set')).toBe('structure');
+    expect(categorizeActivityEvent('create_campaign')).toBe('structure');
+    // account-level
+    expect(categorizeActivityEvent('ad_account_add_user_to_role')).toBe('account');
+    // unknown -> other (never dropped)
+    expect(categorizeActivityEvent('some_future_event_meta_invents')).toBe('other');
+  });
+});
+
+describe('computeAccountActivity', () => {
+  const ev = (type: string, daysAgo: number, over: Partial<ActivityEvent> = {}): ActivityEvent => ({
+    event_type: type,
+    event_time: new Date(Date.parse('2026-07-06T12:00:00Z') - daysAgo * 86400_000).toISOString(),
+    actor_id: '100',
+    actor_name: 'Agency User',
+    application_id: '200',
+    application_name: 'Ads Manager',
+    object_type: 'AD',
+    ...over,
+  });
+  const asOf = '2026-07-06T12:00:00Z';
+
+  it('treats an empty log as an honest "untouched account" finding', () => {
+    const s = computeAccountActivity({ events: [], currency: 'EUR', monthlyRetainer: null, asOf });
+    const d = s.data as Record<string, unknown>;
+    expect(d.no_activity).toBe(true);
+    expect(d.total_window).toBe(0);
+    expect(d.days_since_last_change).toBeNull();
+    expect(s.summary).toContain('no recorded account changes');
+    // never claims a cost with no retainer
+    expect(d.cost_per_change_30d).toBeNull();
+  });
+
+  it('counts 30d vs window, per-week rate, and category breakdown', () => {
+    const s = computeAccountActivity({
+      events: [
+        ev('create_ad', 2),
+        ev('add_images', 5),
+        ev('update_campaign_budget', 10),
+        ev('update_ad_set_run_status', 40), // outside 30d, inside 90d
+        ev('update_ad_set_target_spec', 80),
+      ],
+      currency: 'EUR',
+      monthlyRetainer: null,
+      asOf,
+    });
+    const d = s.data as Record<string, unknown>;
+    expect(d.total_window).toBe(5);
+    expect(d.total_30d).toBe(3);
+    expect(d.actions_per_week).toBeCloseTo(5 / (90 / 7), 1);
+    const cats = d.by_category as Array<{ category: string; count: number }>;
+    expect(cats.find((c) => c.category === 'creative')!.count).toBe(2);
+    expect(cats.find((c) => c.category === 'budget')!.count).toBe(1);
+    expect(cats.find((c) => c.category === 'targeting')!.count).toBe(1);
+  });
+
+  it('aggregates who acted and flags when nobody is a named person', () => {
+    const named = computeAccountActivity({
+      events: [ev('create_ad', 1), ev('add_images', 3), ev('create_ad', 2, { actor_id: '999', actor_name: 'Other Person' })],
+      currency: 'EUR',
+      monthlyRetainer: null,
+      asOf,
+    });
+    const nd = named.data as Record<string, unknown>;
+    // Agency User acted twice, Other Person once → Agency User leads
+    expect((nd.by_actor as Array<{ actor_name: string }>)[0]!.actor_name).toBe('Agency User');
+    expect(nd.named_actor_count).toBe(2);
+
+    const anon = computeAccountActivity({
+      events: [ev('create_ad', 1, { actor_id: null, actor_name: null })],
+      currency: 'EUR',
+      monthlyRetainer: null,
+      asOf,
+    });
+    expect(anon.warnings?.some((w) => w.includes('named person'))).toBe(true);
+    expect((anon.data as { named_actor_count: number }).named_actor_count).toBe(0);
+  });
+
+  it('measures the longest zero-change streak and days since last change', () => {
+    // changes 60 and 20 days ago -> a ~39-day interior gap; last change 20d ago
+    const s = computeAccountActivity({
+      events: [ev('create_ad', 60), ev('create_ad', 20)],
+      currency: 'EUR',
+      monthlyRetainer: null,
+      asOf,
+    });
+    const d = s.data as Record<string, unknown>;
+    expect(d.days_since_last_change).toBe(20);
+    expect(d.longest_zero_streak_days).toBe(39);
+  });
+
+  it('derives cost-per-change only when a retainer is supplied', () => {
+    const events = [ev('create_ad', 1), ev('create_ad', 2), ev('create_ad', 3), ev('create_ad', 4)];
+    const withRetainer = computeAccountActivity({ events, currency: 'EUR', monthlyRetainer: 4000, asOf });
+    expect((withRetainer.data as { cost_per_change_30d: number }).cost_per_change_30d).toBe(1000);
+    expect(withRetainer.summary).toContain('per logged change');
+
+    const without = computeAccountActivity({ events, currency: 'EUR', monthlyRetainer: null, asOf });
+    expect((without.data as { cost_per_change_30d: number | null }).cost_per_change_30d).toBeNull();
+    expect(without.summary).not.toContain('per logged change');
+  });
+
+  it('flags a partial pull so counts are read as a floor', () => {
+    const s = computeAccountActivity({ events: [ev('create_ad', 1)], currency: 'EUR', monthlyRetainer: null, partial: true, asOf });
+    expect(s.warnings?.some((w) => w.includes('floor'))).toBe(true);
+    expect((s.data as { partial: boolean }).partial).toBe(true);
   });
 });
