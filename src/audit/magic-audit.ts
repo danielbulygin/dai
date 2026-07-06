@@ -18,7 +18,7 @@ import { buildScorecard, buildComparisonSection, type ScorecardInputs, type Scor
 import {
   computePlacementBreakdown, computeAudienceBreakdown, computeTargetingSplit, computeLearningLimited,
   computeSaturation, computeCreativeDiversity, computeCohortWave, computeWhatsWorking, computeLandingPages,
-  computeAccountFacts, longestStillSpendingSpan,
+  computeAccountFacts, longestStillSpendingSpan, classifyDestination,
   type PlacementInsightRow, type DemoInsightRow, type GeoInsightRow, type TargetingSpecLite,
   type WeeklyReachRow, type LandingAdRow, type DeadUrlCheck,
 } from './report-pack-extra.js';
@@ -994,40 +994,57 @@ async function fetchPartnershipAdIds(clientCode: string, adAccountId: string | n
   }
 }
 
+/** Per-audit cap on unique destination URLs fetched (top-spend-first). Well above
+ * a normal account's dedup'd URL count (LA, the busiest, dedups 124 ads → 18 URLs);
+ * exists so a catalog/DPA edge case can't stall the audit. Overflow is surfaced
+ * as a section warning, never silently dropped. */
+const DEAD_URL_CHECK_CAP = 50;
+const GRAPH_IDS_BATCH = 50; // Graph ?ids= batch limit
+
 /**
- * Resolve each top-spend ad's CURRENT destination live from its Meta creative
- * (stored landing_page_raw goes stale on dynamic creatives — HARD RULE from
- * the NP dead-URL false-positive incident, 2026-07-01), then fetch each URL.
- * Only hard failures read dead; 429/403/timeouts read inconclusive.
+ * Resolve the CURRENT destination of EVERY currently-delivering spending ad live
+ * from its Meta creative (stored landing_page_raw goes stale on dynamic creatives —
+ * HARD RULE from the NP dead-URL false-positive incident, 2026-07-01), dedupe by
+ * URL, then fetch each one. Was top-15-ads/10-URLs until 2026-07-06 (Dan: check
+ * ALL ads getting spend); classification is soft-404 aware via classifyDestination
+ * (shared semantics with bmad's url_guard / nightly dead_url_scan). Ads that spent
+ * in the window but are no longer delivering (paused, off) are skipped — a stale
+ * URL there isn't burning money now.
  */
-async function checkTopAdDestinations(
+async function checkAdDestinations(
   clientCode: string,
-  topAds: Array<{ ad_id: string; ad_name: string; spend: number }>,
+  spendingAds: Array<{ ad_id: string; ad_name: string; spend: number }>,
   tokenOverride?: string,
-): Promise<DeadUrlCheck[]> {
+): Promise<{ checks: DeadUrlCheck[]; uncheckedUrls: number }> {
   const token = tokenOverride ?? metaTokenFor(clientCode);
-  if (!token || topAds.length === 0) return [];
+  if (!token || spendingAds.length === 0) return { checks: [], uncheckedUrls: 0 };
   const byUrl = new Map<string, { ads: string[]; spend: number }>();
+  type CreativeNode = {
+    effective_status?: string;
+    creative?: {
+      asset_feed_spec?: { link_urls?: Array<{ website_url?: string }> };
+      object_story_spec?: { link_data?: { link?: string }; video_data?: { call_to_action?: { value?: { link?: string } } } };
+    };
+  };
   try {
-    const ids = topAds.map((a) => a.ad_id).slice(0, 15);
-    const resp = await fetch(
-      `https://graph.facebook.com/v21.0/?ids=${ids.join(',')}` +
-        `&fields=name,creative{asset_feed_spec{link_urls},object_story_spec{link_data{link},video_data{call_to_action}}}` +
-        `&access_token=${token}`,
-      { signal: AbortSignal.timeout(30_000) },
-    );
-    if (!resp.ok) return [];
-    const body = (await resp.json()) as Record<
-      string,
-      {
-        creative?: {
-          asset_feed_spec?: { link_urls?: Array<{ website_url?: string }> };
-          object_story_spec?: { link_data?: { link?: string }; video_data?: { call_to_action?: { value?: { link?: string } } } };
-        };
-      }
-    >;
-    for (const ad of topAds) {
-      const c = body[ad.ad_id]?.creative;
+    const body: Record<string, CreativeNode> = {};
+    for (let i = 0; i < spendingAds.length; i += GRAPH_IDS_BATCH) {
+      const ids = spendingAds.slice(i, i + GRAPH_IDS_BATCH).map((a) => a.ad_id);
+      const resp = await fetch(
+        `https://graph.facebook.com/v21.0/?ids=${ids.join(',')}` +
+          `&fields=name,effective_status,creative{asset_feed_spec{link_urls},object_story_spec{link_data{link},video_data{call_to_action}}}` +
+          `&access_token=${token}`,
+        { signal: AbortSignal.timeout(30_000) },
+      );
+      if (!resp.ok) continue; // partial coverage beats none — remaining batches still try
+      Object.assign(body, (await resp.json()) as Record<string, CreativeNode>);
+    }
+    for (const ad of spendingAds) {
+      const node = body[ad.ad_id];
+      if (!node) continue;
+      // Spent in the window but not delivering now → nothing is burning; skip.
+      if (node.effective_status && node.effective_status !== 'ACTIVE') continue;
+      const c = node.creative;
       const url =
         c?.asset_feed_spec?.link_urls?.[0]?.website_url ??
         c?.object_story_spec?.link_data?.link ??
@@ -1040,12 +1057,18 @@ async function checkTopAdDestinations(
       byUrl.set(clean, agg);
     }
   } catch {
-    return [];
+    return { checks: [], uncheckedUrls: 0 };
   }
 
+  // Highest-spend URLs first, so a cap overflow drops the cheapest tail.
+  const ranked = [...byUrl.entries()].sort((a, b) => b[1].spend - a[1].spend);
+  const toCheck = ranked.slice(0, DEAD_URL_CHECK_CAP);
+  const uncheckedUrls = ranked.length - toCheck.length;
+
   const checks: DeadUrlCheck[] = [];
-  for (const [url, agg] of [...byUrl.entries()].slice(0, 10)) {
-    let verdict: DeadUrlCheck['verdict'] = 'ok';
+  for (const [url, agg] of toCheck) {
+    let verdict: DeadUrlCheck['verdict'];
+    let reason: string;
     let status: number | null = null;
     try {
       const resp = await fetch(url, {
@@ -1054,20 +1077,26 @@ async function checkTopAdDestinations(
         signal: AbortSignal.timeout(15_000),
       });
       status = resp.status;
-      if (resp.status === 429 || resp.status === 403) verdict = 'inconclusive';
-      else if (resp.status >= 400) verdict = 'dead';
-      else {
-        const finalPath = new URL(resp.url).pathname;
-        const origPath = new URL(url).pathname;
-        if (origPath !== '/' && finalPath === '/') verdict = 'redirect_home';
-      }
+      const bodySlice = (await resp.text()).slice(0, 65_536);
+      ({ verdict, reason } = classifyDestination(url, resp.url, resp.status, bodySlice));
     } catch (err) {
-      verdict = err instanceof Error && err.name === 'TimeoutError' ? 'inconclusive' : 'dead';
+      if (err instanceof Error && err.name === 'TimeoutError') {
+        verdict = 'inconclusive';
+        reason = 'fetch timed out — could not verify (not evidence of a dead page)';
+      } else if (err instanceof Error && (err.cause as { code?: string } | undefined)?.code === 'ENOTFOUND') {
+        verdict = 'dead';
+        reason = 'domain does not resolve (DNS failure) — the site/host is gone';
+      } else {
+        // Transient TCP/TLS trouble is NOT proof of death (the nightly scan
+        // browser-confirms these; the audit has no browser, so it stays honest).
+        verdict = 'inconclusive';
+        reason = `connection problem — could not verify (${err instanceof Error ? err.message.slice(0, 80) : 'fetch error'})`;
+      }
     }
-    checks.push({ url, verdict, status, daily_burn: agg.spend / 30, ads: agg.ads.slice(0, 5) });
+    checks.push({ url, verdict, status, daily_burn: agg.spend / 30, ads: agg.ads.slice(0, 5), reason });
     await new Promise((r) => setTimeout(r, 300)); // gentle pacing — never burst a shop
   }
-  return checks;
+  return { checks, uncheckedUrls };
 }
 
 /** How many surfaced ads get a preview link + thumbnail per audit (one batched
@@ -1406,7 +1435,7 @@ function workLineFor(key: string, s: AuditSection): string | null {
     case 'landing_pages': {
       const checks = (d.dead_checks as unknown[] | undefined)?.length ?? 0;
       return checks
-        ? `Resolved the top spenders' CURRENT destinations from Meta and fetched all ${checks} live`
+        ? `Resolved every delivering ad's CURRENT destination from Meta and fetched all ${checks} unique URLs live`
         : `Ranked spend by landing destination`;
     }
     case 'account_facts':
@@ -1823,9 +1852,11 @@ export async function runMagicAudit(
         if (r.ad_name) a.ad_name = r.ad_name;
         byAd.set(r.ad_id, a);
       }
-      const topAds = [...byAd.values()].sort((a, b) => b.spend - a.spend).slice(0, 15);
-      const checks = await checkTopAdDestinations(code, topAds, cold?.accessToken);
-      return computeLandingPages(adRows, checks, client.currency, auditKpiMode);
+      // ALL ads with spend in the window (Dan 2026-07-06) — the engine drops the
+      // no-longer-delivering ones and dedupes by URL, so this stays cheap.
+      const spendingAds = [...byAd.values()].filter((a) => a.spend > 0).sort((a, b) => b.spend - a.spend);
+      const { checks, uncheckedUrls } = await checkAdDestinations(code, spendingAds, cold?.accessToken);
+      return computeLandingPages(adRows, checks, client.currency, auditKpiMode, uncheckedUrls);
     },
     creative_analysis: async () => {
       const s = await runCreativeAnalysis(code, meter, client, synthSystem);

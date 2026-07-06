@@ -656,14 +656,70 @@ export interface LandingAdRow {
 
 export interface DeadUrlCheck {
   url: string;
-  /** ok | dead (hard 4xx/5xx or DNS) | redirect_home | inconclusive (429/403/timeout) */
-  verdict: 'ok' | 'dead' | 'redirect_home' | 'inconclusive';
+  /** ok | dead (hard 4xx/5xx or DNS) | soft_404 (HTTP 200 whose body reads "not found" —
+   * money is just as wasted as a hard 404) | redirect_home | inconclusive (429/403/timeout) */
+  verdict: 'ok' | 'dead' | 'soft_404' | 'redirect_home' | 'inconclusive';
   status: number | null;
   daily_burn: number;
   ads: string[];
+  /** Human-readable verdict reason for the render/synthesis (optional, additive). */
+  reason?: string;
 }
 
-export function computeLandingPages(rows: LandingAdRow[], checks: DeadUrlCheck[], currency: string, mode: 'roas' | 'cpr'): PackSection {
+// High-precision "this is a not-found page" phrases (EN + DE) — same list as the
+// launch url_guard and the nightly dead_url_scan (bmad pma/tools). Kept tight on
+// purpose: a healthy page (out-of-stock size, filter label) must never match.
+const NOT_FOUND_MARKERS = [
+  '404 not found', 'page not found', '404 page not found', 'error 404',
+  'this page could not be found', 'the page you requested could not be found',
+  'the page you were looking for', 'the page you are looking for',
+  "page doesn't exist", 'page does not exist', "this page doesn't exist",
+  'no longer available', 'product no longer available', 'this product is unavailable',
+  // DE
+  'seite nicht gefunden', 'diese seite existiert nicht', 'seite existiert nicht',
+  'seite konnte nicht gefunden werden', 'produkt nicht mehr verfügbar',
+  'dieses produkt ist nicht mehr verfügbar', 'die gesuchte seite',
+];
+const TITLE_RE = /<title[^>]*>([\s\S]*?)<\/title>/i;
+const HOME_PATHS = new Set(['', '/', '/collections', '/collections/all', '/pages/home', '/home']);
+
+/**
+ * Pure classifier for a fetched ad destination (soft-404 aware). Body is a
+ * sniff slice (~64KB is plenty for <title> + a not-found banner).
+ */
+export function classifyDestination(
+  originalUrl: string,
+  finalUrl: string,
+  status: number,
+  body: string,
+): { verdict: DeadUrlCheck['verdict']; reason: string } {
+  if (status === 429) return { verdict: 'inconclusive', reason: 'HTTP 429 rate-limited — could not verify (not a dead page)' };
+  if (status === 401 || status === 403) return { verdict: 'inconclusive', reason: `HTTP ${status} blocked (bot protection) — could not verify` };
+  if (status === 404 || status === 410) return { verdict: 'dead', reason: `HTTP ${status} — the page does not exist` };
+  if (status >= 400) return { verdict: 'dead', reason: `HTTP ${status} error` };
+
+  const low = body.toLowerCase();
+  const title = (TITLE_RE.exec(body)?.[1] ?? '').trim().toLowerCase();
+  if (NOT_FOUND_MARKERS.some((p) => title.includes(p)) || NOT_FOUND_MARKERS.some((p) => low.includes(p))) {
+    return { verdict: 'soft_404', reason: `HTTP ${status} but the page reads like a "not found" page (soft-404)` };
+  }
+
+  try {
+    const o = new URL(originalUrl);
+    const f = new URL(finalUrl);
+    const oPath = o.pathname.replace(/\/$/, '');
+    const fPath = f.pathname.replace(/\/$/, '');
+    const sameHost = o.hostname.toLowerCase().replace(/^www\./, '') === f.hostname.toLowerCase().replace(/^www\./, '');
+    if (sameHost && oPath && !HOME_PATHS.has(oPath) && (HOME_PATHS.has(fPath) || fPath === '')) {
+      return { verdict: 'redirect_home', reason: `redirected to ${finalUrl} — the target page likely no longer exists` };
+    }
+  } catch {
+    /* unparseable URL — fall through to ok */
+  }
+  return { verdict: 'ok', reason: `HTTP ${status}` };
+}
+
+export function computeLandingPages(rows: LandingAdRow[], checks: DeadUrlCheck[], currency: string, mode: 'roas' | 'cpr', uncheckedUrls = 0): PackSection {
   const total = rows.reduce((s, r) => s + (r.spend || 0), 0);
   const withPath = rows.filter((r) => r.landing_page_path);
   const covered = withPath.reduce((s, r) => s + (r.spend || 0), 0);
@@ -699,7 +755,10 @@ export function computeLandingPages(rows: LandingAdRow[], checks: DeadUrlCheck[]
     };
   }
 
-  const dead = checks.filter((c) => c.verdict === 'dead');
+  // soft_404 counts as dead for burn/urgency: the server says 200 but the page
+  // tells the visitor "not found" — the click is exactly as wasted.
+  const dead = checks.filter((c) => c.verdict === 'dead' || c.verdict === 'soft_404');
+  const softCount = checks.filter((c) => c.verdict === 'soft_404').length;
   const redirects = checks.filter((c) => c.verdict === 'redirect_home');
   const burn = dead.reduce((s, c) => s + c.daily_burn, 0);
   const homepage = paths.find((p) => p.path === '/');
@@ -707,11 +766,17 @@ export function computeLandingPages(rows: LandingAdRow[], checks: DeadUrlCheck[]
   const warnings: string[] = [];
   if (dead.length > 0) {
     warnings.push(
-      `${dead.length} live destination${dead.length > 1 ? 's' : ''} came back DEAD (hard error) with ~${money(burn, currency)}/day still flowing at ${dead.length > 1 ? 'them' : 'it'} — pause the listed ads first.`,
+      `${dead.length} live destination${dead.length > 1 ? 's' : ''} came back DEAD with ~${money(burn, currency)}/day still flowing at ${dead.length > 1 ? 'them' : 'it'} — pause the listed ads first.` +
+        (softCount > 0 ? ` (${softCount} of these ${softCount > 1 ? 'are' : 'is a'} soft-404${softCount > 1 ? 's' : ''}: the server answers 200 but the page itself says "not found".)` : ''),
     );
   }
   if (redirects.length > 0) {
     warnings.push(`${redirects.length} destination${redirects.length > 1 ? 's' : ''} bounce to the homepage — the ad's promise dies on arrival.`);
+  }
+  if (uncheckedUrls > 0) {
+    warnings.push(
+      `${uncheckedUrls} additional lower-spend destination${uncheckedUrls > 1 ? 's were' : ' was'} not fetched this run (per-audit URL cap) — coverage is top-spend-first, not exhaustive.`,
+    );
   }
   if (homepage && homepage.spend_share_pct >= 5) {
     warnings.push(`${homepage.spend_share_pct}% of mapped spend lands on the homepage — ads should land on the page that closes them, almost never "/".`);
@@ -739,14 +804,17 @@ export function computeLandingPages(rows: LandingAdRow[], checks: DeadUrlCheck[]
       paths,
       dead_checks: checks,
       dead_count: dead.length,
+      soft_404_count: softCount,
+      unchecked_urls: uncheckedUrls,
       daily_burn: Math.round(burn),
     },
     warnings: warnings.length ? warnings : undefined,
     derivation:
       `Spend per destination path from the last 30 days of ad-level delivery (${pct(covered, total)}% of spend has a mapped ` +
-      `destination). The dead-check does NOT trust stored URLs (they go stale on dynamic creatives — proven 2026-07-01): each ` +
-      `top-spend ad's CURRENT destination is resolved live from its Meta creative at audit time, then fetched. Only hard failures ` +
-      `count as dead; rate-limited or blocked fetches read "inconclusive", never alarmed.`,
+      `destination). The dead-check does NOT trust stored URLs (they go stale on dynamic creatives — proven 2026-07-01): EVERY ` +
+      `currently-delivering ad with spend has its CURRENT destination resolved live from its Meta creative at audit time, then each ` +
+      `unique URL is fetched and read (soft-404 aware — an HTTP-200 "not found" page counts as dead). Rate-limited or blocked ` +
+      `fetches read "inconclusive", never alarmed.`,
   };
 }
 

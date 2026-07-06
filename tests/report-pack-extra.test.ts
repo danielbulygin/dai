@@ -10,6 +10,7 @@ import {
   computeCohortWave,
   computeWhatsWorking,
   computeLandingPages,
+  classifyDestination,
   computeAccountFacts,
   longestStillSpendingSpan,
   type PlacementInsightRow,
@@ -223,6 +224,64 @@ describe('computeLandingPages', () => {
     expect(s.warnings?.some((w) => w.includes('DEAD'))).toBe(true);
     expect(s.warnings?.some((w) => w.includes('homepage'))).toBe(true);
     expect(s.next_step).toContain('Pause');
+  });
+
+  it('counts a soft-404 as dead burn and names it in the warning', () => {
+    const s = computeLandingPages(
+      [row('a', '/products/x', 5000)],
+      [
+        { url: 'https://x.com/products/x', verdict: 'ok', status: 200, daily_burn: 0, ads: ['a'] },
+        { url: 'https://x.com/products/gone', verdict: 'soft_404', status: 200, daily_burn: 40, ads: ['b'] },
+      ],
+      'EUR',
+      'roas',
+    );
+    const d = s.data as { dead_count: number; soft_404_count: number; daily_burn: number };
+    expect(d.dead_count).toBe(1);
+    expect(d.soft_404_count).toBe(1);
+    expect(d.daily_burn).toBe(40);
+    expect(s.warnings?.some((w) => w.includes('soft-404'))).toBe(true);
+  });
+
+  it('surfaces the URL-check cap instead of truncating silently', () => {
+    const s = computeLandingPages(
+      [row('a', '/products/x', 5000)],
+      [{ url: 'https://x.com/products/x', verdict: 'ok', status: 200, daily_burn: 0, ads: ['a'] }],
+      'EUR',
+      'roas',
+      7,
+    );
+    expect((s.data as { unchecked_urls: number }).unchecked_urls).toBe(7);
+    expect(s.warnings?.some((w) => w.includes('not fetched'))).toBe(true);
+  });
+});
+
+describe('classifyDestination', () => {
+  it('hard 404/410 is dead', () => {
+    expect(classifyDestination('https://x.com/p', 'https://x.com/p', 404, '').verdict).toBe('dead');
+    expect(classifyDestination('https://x.com/p', 'https://x.com/p', 410, '').verdict).toBe('dead');
+  });
+
+  it('HTTP 200 with a not-found body is soft_404 (EN + DE)', () => {
+    expect(classifyDestination('https://x.com/p', 'https://x.com/p', 200, '<title>Page not found</title>').verdict).toBe('soft_404');
+    expect(classifyDestination('https://x.de/p', 'https://x.de/p', 200, '<title>Seite nicht gefunden</title>').verdict).toBe('soft_404');
+  });
+
+  it('a healthy product page is ok', () => {
+    expect(classifyDestination('https://x.com/p', 'https://x.com/p', 200, '<title>Great Product</title>Add to cart').verdict).toBe('ok');
+  });
+
+  it('deep page redirected to the same-host homepage is redirect_home', () => {
+    expect(classifyDestination('https://x.com/products/gone', 'https://www.x.com/', 200, '<title>Home</title>').verdict).toBe('redirect_home');
+  });
+
+  it('cross-domain redirect to a homepage is NOT redirect_home', () => {
+    expect(classifyDestination('https://x.com/products/a', 'https://y.com/', 200, '<title>Other</title>').verdict).toBe('ok');
+  });
+
+  it('429/403 bot gates are inconclusive, never dead', () => {
+    expect(classifyDestination('https://x.com/p', 'https://x.com/p', 429, '').verdict).toBe('inconclusive');
+    expect(classifyDestination('https://x.com/p', 'https://x.com/p', 403, '').verdict).toBe('inconclusive');
   });
 });
 
