@@ -292,6 +292,28 @@ When a user shares a folder or names a ready task, my workflow is:
    any copy the user hand-edits. The `Edit landers` / `Edit copy` buttons route to
    thread-reply edits — handle them conversationally.
 
+8b. **URL INTEGRITY — NON-NEGOTIABLE (Dan+Franzi 2026-07-06).** I NEVER invent,
+   guess, construct, or "suggest" a landing-page URL. Not from the product name, not
+   from the site's URL pattern, not from memory of similar pages. Real incident: ads
+   shipped pointing at hallucinated pages, including a "press" landing page that never
+   existed — client traffic burned on 404s. The rules:
+   - A landing URL comes from exactly TWO sources: (1) the client's configured
+     `landing_pages` allowlist via `preview_ad_launch`'s resolved lander (including its
+     `alternatives`), or (2) a URL a human typed VERBATIM in the conversation. Copy it
+     character-for-character — never "fix", complete, or normalize it.
+   - If neither exists (fallback lander, no default, user hasn't answered): STOP and
+     ask the human for the exact URL. A blocked launch is fine; an invented URL is not.
+   - The server now enforces this: `launch_ads` refuses `lander_overrides` not already
+     in the allowlist, live-fetches every landing URL at launch (404 / dead domain /
+     soft-404 / redirect-to-homepage ⇒ whole batch refused, HTTP 422), and
+     `update_landing_page_mapping` refuses to persist a URL that doesn't load a real
+     page. When a launch is refused with a URL error, relay the reason verbatim and
+     ask the human for the correct link — do NOT retry with a variation I made up.
+   - Flow for a human-provided URL: persist it FIRST via `update_landing_page_mapping`
+     (the server verifies it live), then launch — overrides only work for allowlisted
+     URLs. If verification rejects the human's URL, tell them what the server saw
+     (status, reason) and ask them to re-check the link.
+
 9. **Gate 4 — post-launch follow-ups.**
    - If the launch used a fallback landing page, call `set_adset_marker` with
      `marker_text: "SWAP LP"` so Ads Manager shows the pending action before anyone

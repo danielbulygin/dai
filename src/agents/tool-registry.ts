@@ -660,7 +660,26 @@ register({
       properties: {
         batch_id: { type: 'string' },
         idempotency_key: { type: 'string' },
-        edits: { type: 'object' },
+        edits: {
+          type: 'object',
+          description:
+            'Optional edits: { lander_overrides?: {<video_id|image_hash>: url}, ad_overrides?: {<id>: {primary_text?, headline?, description?}}, adset_name?, ad_name_overrides?, channel?, allow_duplicate_asset_id? }. ' +
+            'URL INTEGRITY: lander_overrides URLs must be copied VERBATIM from either the preview\'s resolved lander/alternatives or a URL a human typed in the conversation — NEVER construct or guess a URL. ' +
+            'The server refuses overrides that are not already in the client\'s landing_pages allowlist, and live-fetches every landing URL at launch: a 404, dead domain, or soft-404 rejects the whole batch (HTTP 422). ' +
+            'For a new human-provided URL, persist it via update_landing_page_mapping FIRST (which live-verifies it), then launch.',
+          properties: {
+            lander_overrides: {
+              type: 'object',
+              description:
+                'Map of video_id/image_hash → landing URL. Only allowlisted URLs (client_meta_configs.landing_pages) are accepted by the server.',
+            },
+            ad_overrides: { type: 'object' },
+            adset_name: { type: 'string' },
+            ad_name_overrides: { type: 'object' },
+            channel: { type: 'string' },
+            allow_duplicate_asset_id: { type: 'boolean' },
+          },
+        },
       },
       required: ['batch_id', 'idempotency_key'],
     },
@@ -693,7 +712,8 @@ register({
   definition: {
     name: 'update_landing_page_mapping',
     description:
-      'Persist a (client, keyword) → URL mapping in client_meta_configs.landing_pages. Use when the user gives a durable correction like "for PL ginger ads use /products/wellness-shot-pack as the default" — make it stick so future previews pick it up automatically. For a single URL replacement pass { client_code, keyword, url, label }. For an ordered list pass { client_code, keyword, urls: [...] }. Default source is "user_correction".',
+      'Persist a (client, keyword) → URL mapping in client_meta_configs.landing_pages. Use when the user gives a durable correction like "for PL ginger ads use /products/wellness-shot-pack as the default" — make it stick so future previews pick it up automatically. For a single URL replacement pass { client_code, keyword, url, label }. For an ordered list pass { client_code, keyword, urls: [...] }. Default source is "user_correction". ' +
+      'URL INTEGRITY: only pass URLs a human provided VERBATIM in the conversation — never construct, guess, or "suggest" one yourself. The server live-fetches each URL before saving and refuses (HTTP 422) anything that 404s, has a dead domain, or reads as a soft-404 — relay that rejection to the human verbatim and ask for the correct link; do NOT retry with a variation you invented. A response with verification_warnings means the site blocked our probe (bot gate) — ask the human to double-check the link loads.',
     input_schema: {
       type: 'object' as const,
       properties: {
