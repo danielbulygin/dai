@@ -720,11 +720,11 @@ async function handleChatStream(
   const sessionId = req.session_id || `chat-${randomUUID()}`;
   // Internal SDK resume key = (channelId, threadTs, agentId). For client-scoped
   // requests the agentId already differs per client (ada_client_<CODE>), so
-  // cross-CLIENT resume is impossible; prefixing threadTs with the claim's user_id
-  // additionally stops one user of a client resuming another user's thread within
-  // that same client. Deterministic → the same (user, session_id) re-derives the
-  // same key every turn, so resume still works.
-  const threadTs = scope ? `${scope.userId}:${sessionId}` : sessionId;
+  // cross-CLIENT resume is impossible. WITHIN a client, sessions are shared by
+  // design (Daniel, D2 2026-07-07): any teammate may continue any of their
+  // client's conversations, so threadTs is the session id as-is — the Tinkers
+  // portal's RLS'd session list is what gates who can present a session_id.
+  const threadTs = sessionId;
   const channelId = scope
     ? `launch-ada-chat-${scope.clientCode}`
     : `launch-ada-chat-${req.context?.client_code ?? 'x'}`;
