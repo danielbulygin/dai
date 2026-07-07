@@ -44,8 +44,11 @@
 import http from 'node:http';
 import { randomUUID, createHmac, timingSafeEqual } from 'node:crypto';
 import { execSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { runAgentSDK } from '../src/agents/sdk/runAgentSDK.js';
 import { getAgent } from '../src/agents/registry.js';
+import { buildClientOverlay } from '../src/client-agents/prompt-builder.js';
 
 const PORT = Number(process.env.ADA_ASSIST_PORT ?? 8092);
 const HOST = '0.0.0.0';
@@ -541,6 +544,49 @@ function buildChatPrompt(req: AssistRequest, ledgerEvents: LedgerEvent[] = [], r
   return parts.join('\n\n');
 }
 
+/**
+ * Client-scoped chat prompt (Tinkers portal — rollout plan R5). A CLIENT user is
+ * on the other end, NOT a member of our team, so this deliberately shares NOTHING
+ * with buildChatPrompt: no "OUR team" framing, no cross-client read access, no
+ * list_clients resolution, no upload/launch playbooks, no launch-ledger context.
+ *
+ * Framing reuses buildClientOverlay — the SAME dedicated-single-client analyst
+ * overlay the Slack client-scoped Ada gets in the runner path — so the two client
+ * surfaces stay consistent. (The SDK's buildSystemPrompt does NOT auto-inject the
+ * overlay the way runner.ts does, so we supply it here in the user message, exactly
+ * as the internal buildChatPrompt supplies its own framing in the user message.)
+ * Tool-level scoping (forced input.client_code) is the real data wall; this only
+ * governs voice/behaviour. The client_media_buyer profile is read-only.
+ */
+function buildScopedChatPrompt(req: AssistRequest, clientCode: string): string {
+  let clientContext: string | undefined;
+  try {
+    // Mirrors runner.ts: agents/ada/clients/<CODE>.md, case-sensitive on Linux
+    // (the code is already normalized to canonical UPPERCASE by the caller).
+    clientContext = readFileSync(join(process.cwd(), 'agents', 'ada', 'clients', `${clientCode}.md`), 'utf-8');
+  } catch { /* no per-client context file → generic client framing, same as runner */ }
+
+  // Best-effort friendly name from the overlay's H1 (e.g. "# Audibene (AB) — …"),
+  // else fall back to the code. buildClientOverlay only uses it for phrasing.
+  let displayName = clientCode;
+  if (clientContext) {
+    const m = clientContext.match(/^#\s+([^\n(—-]+?)\s*(?:\(|—|-|\n)/);
+    const name = m?.[1]?.trim();
+    if (name && name.length <= 60) displayName = name;
+  }
+
+  const parts: string[] = [];
+  parts.push(buildClientOverlay({ clientCode, displayName, clientContext }));
+  parts.push(
+    `### How to answer\n` +
+    `- Answer directly and usefully, grounded in real numbers from your tools — never guess a figure, and state the exact window when you cite metrics.\n` +
+    `- Lead with ratios and rates (hook/hold rate, CTR, CVR, AOV, ROAS) and benchmark against the account, not raw counts in isolation.\n` +
+    `- Be concise and concrete. Markdown is welcome (short bold numbers, tight bullets, small tables). No preamble, no "as an AI", no restating the question.`,
+  );
+  parts.push(`### The message\n${(req.question ?? '').trim() || '(no message)'}`);
+  return parts.join('\n\n');
+}
+
 /** Friendly progress labels for the streamed tool-use ticks. */
 const TOOL_LABELS: Record<string, string> = {
   list_clients: 'Looking up the client list', get_client_targets: 'Checking the KPI target',
@@ -664,16 +710,34 @@ function sseEvent(res: http.ServerResponse, event: string, data: unknown): void 
   res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
-async function handleChatStream(req: AssistRequest, res: http.ServerResponse): Promise<void> {
-  const threadTs = req.session_id || `chat-${randomUUID()}`;
-  const channelId = `launch-ada-chat-${req.context?.client_code ?? 'x'}`;
-  const [ledgerEvents, recentLedger] = await Promise.all([
-    fetchLedger(req.context?.asset_code),
-    fetchRecentLedger(),
-  ]);
+async function handleChatStream(
+  req: AssistRequest,
+  res: http.ServerResponse,
+  scope?: { clientCode: string; userId: string },
+): Promise<void> {
+  // The client's own opaque conversation id — echoed back verbatim in meta/done so
+  // it keeps sending the SAME id to continue the thread (prefixing stays internal).
+  const sessionId = req.session_id || `chat-${randomUUID()}`;
+  // Internal SDK resume key = (channelId, threadTs, agentId). For client-scoped
+  // requests the agentId already differs per client (ada_client_<CODE>), so
+  // cross-CLIENT resume is impossible; prefixing threadTs with the claim's user_id
+  // additionally stops one user of a client resuming another user's thread within
+  // that same client. Deterministic → the same (user, session_id) re-derives the
+  // same key every turn, so resume still works.
+  const threadTs = scope ? `${scope.userId}:${sessionId}` : sessionId;
+  const channelId = scope
+    ? `launch-ada-chat-${scope.clientCode}`
+    : `launch-ada-chat-${req.context?.client_code ?? 'x'}`;
+  // The launch ledger is internal team context — never surfaced to a client.
+  const [ledgerEvents, recentLedger] = scope
+    ? [[] as LedgerEvent[], [] as RecentLedgerEvent[]]
+    : await Promise.all([
+        fetchLedger(req.context?.asset_code),
+        fetchRecentLedger(),
+      ]);
 
   sseHead(res);
-  sseEvent(res, 'meta', { session_id: threadTs });
+  sseEvent(res, 'meta', { session_id: sessionId });
 
   let closed = false;
   res.on('close', () => { closed = true; });
@@ -690,28 +754,40 @@ async function handleChatStream(req: AssistRequest, res: http.ServerResponse): P
   try {
     await runAgentSDK(
       {
-        source: 'api-console-chat',
+        source: scope ? 'api-console-chat-scoped' : 'api-console-chat',
         agentId: 'ada',
-        userMessage: buildChatPrompt(req, ledgerEvents, recentLedger),
-        userId: 'launch-console',
+        userMessage: scope
+          ? buildScopedChatPrompt(req, scope.clientCode)
+          : buildChatPrompt(req, ledgerEvents, recentLedger),
+        // Scoped: attribute the run (and its memory/quick-context) to the real
+        // client user from the verified claim; internal: the shared console user.
+        userId: scope ? scope.userId : 'launch-console',
         channelId,
         threadTs,
+        // Client scoping: switches runAgentSDK to the read-only client_media_buyer
+        // profile, agent id ada_client_<CODE>, and forces input.client_code on every
+        // tool call so the agent physically cannot read another client's data.
+        // (runAgentSDK reads only .clientCode; displayName satisfies the RunOptions
+        // type and is otherwise unused by the SDK path.)
+        ...(scope ? { clientScope: { clientCode: scope.clientCode, displayName: scope.clientCode } } : {}),
         onText: (t) => { fullText += t; safe('text', { text: t }); },
         onThinking: (t) => safe('thinking', { text: t }),
         onToolUse: (name) => safe('tool', { name, label: toolLabel(name) }),
         onTurnReset: () => { fullText = ''; safe('reset', {}); },
       },
       {
-        // Full production-write parity (Dan, 2026-06-20): the web /launch/ada chat is
-        // now the team's MAIN Ada, so it gets the same legitimate write surface as the
-        // Slack media_buyer Ada — Notion task writes, media uploads, paused-bank
-        // launches, Slack posts, learning/decision edits (guard.ts PRODUCTION_WRITES).
-        // The load-bearing rails are below the guard and ALWAYS on: launch_ads/
-        // upload_to_media_library create PAUSED-bank-only objects via SafeMetaAPI (zero
-        // spend; a human enables to go live), and the delete rail hard-blocks every
-        // delete in any mode. NOT allowProductionWrites + paused-launch test flags —
-        // those test-client gates aren't needed once allowProductionWrites is on.
-        policy: { allowProductionWrites: true },
+        // Client-scoped requests are READ / ANALYSIS-ONLY: omit the write override so
+        // defaultPolicy() denies every production write — the same advisory-only posture
+        // as /assist and /diagnose. A client user must never trigger a write.
+        //
+        // Internal (unscoped) /chat keeps FULL production-write parity (Dan, 2026-06-20):
+        // it is the team's MAIN Ada, with the same legitimate write surface as the Slack
+        // media_buyer Ada — Notion task writes, media uploads, paused-bank launches, Slack
+        // posts, learning/decision edits (guard.ts PRODUCTION_WRITES). The load-bearing
+        // rails are below the guard and ALWAYS on: launch_ads/upload_to_media_library
+        // create PAUSED-bank-only objects via SafeMetaAPI (zero spend; a human enables to
+        // go live), and the delete rail hard-blocks every delete in any mode.
+        ...(scope ? {} : { policy: { allowProductionWrites: true } }),
         thinking: true,
         streamPartial: true,
         maxBudgetUsd: CHAT_MAX_BUDGET_USD,
@@ -749,7 +825,7 @@ async function handleChatStream(req: AssistRequest, res: http.ServerResponse): P
     // success in the client (the streams-success-on-failure fix, service layer).
     const ok = subtype === 'success';
     safe('done', {
-      session_id: threadTs, cost_usd: round(costUsd),
+      session_id: sessionId, cost_usd: round(costUsd),
       used_skills: inferUsedSkills(fullText, toolsUsed),
       ok, subtype, ...(ok ? {} : { error: `runner subtype=${subtype}` }),
     });
@@ -757,7 +833,7 @@ async function handleChatStream(req: AssistRequest, res: http.ServerResponse): P
     console.error('[ada-console-assist] /chat error:', e);
     const errMsg = (e as Error).message || 'chat failed';
     safe('error', { error: errMsg });
-    safe('done', { session_id: threadTs, cost_usd: round(costUsd), used_skills: [], ok: false, subtype: subtype === 'unknown' ? 'exception' : subtype, error: errMsg });
+    safe('done', { session_id: sessionId, cost_usd: round(costUsd), used_skills: [], ok: false, subtype: subtype === 'unknown' ? 'exception' : subtype, error: errMsg });
   } finally {
     clearInterval(heartbeat);
     if (!closed) { try { res.end(); } catch { /* noop */ } }
@@ -941,20 +1017,23 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, 400, { ok: false, error: `bad request: ${(e as Error).message}` });
         return;
       }
-      // Client-scoped requests (Tinkers portal) must carry a valid signed
-      // scope claim — and until the buildClientOverlay wiring ships (rollout
-      // plan Phase 4), even a VALID claim is refused: there is no safe way to
-      // serve a client-scoped question with the unscoped internal Ada.
+      // Client-scoped requests (Tinkers portal) MUST carry a valid signed scope
+      // claim: the claim must verify AND its client_scope must match the body.
       if (parsed.client_scope) {
         const claim = parsed.scope_claim ? verifyScopeClaim(parsed.scope_claim) : null;
         if (!claim || claim.client_scope !== parsed.client_scope) {
           sendJson(res, 403, { ok: false, error: 'invalid or missing scope claim' });
           return;
         }
-        sendJson(res, 501, { ok: false, error: 'client-scoped chat not enabled yet' });
+        // Verified. Normalize to the canonical UPPERCASE code BEFORE use — the
+        // per-client overlay file lookup (agents/ada/clients/<CODE>.md) is
+        // case-sensitive on the Linux droplet. Serve the read-only client-scoped
+        // Ada (streams its own SSE response, same contract as internal /chat).
+        const clientCode = claim.client_scope.toUpperCase().trim();
+        await handleChatStream(parsed, res, { clientCode, userId: claim.user_id });
         return;
       }
-      // Streams its own SSE response (never sendJson on success).
+      // Internal (unscoped) team chat — unchanged. Streams its own SSE response.
       await handleChatStream(parsed, res);
       return;
     }
