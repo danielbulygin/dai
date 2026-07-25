@@ -1,4 +1,10 @@
 import { getSupabase } from "../../integrations/supabase.js";
+import {
+  adaClientFor,
+  adaAccountPerformance,
+  adaEntityPerformance,
+  adaEntitySummary,
+} from "./ada-source.js";
 import { logger } from "../../utils/logger.js";
 
 function daysAgoISO(days: number): string {
@@ -60,6 +66,10 @@ export async function getClientPerformance(params: {
       { clientCode: params.clientCode, days, since },
       "Querying client performance",
     );
+    // Ada customers are served from their own snapshots, never the agency
+    // warehouse (Dan 2026-07-25). See ada-source.ts.
+    const adaAccount = await adaClientFor(params.clientCode);
+    if (adaAccount) return adaAccountPerformance(adaAccount, days);
     const supabase = getSupabase();
 
     // First resolve client code to id
@@ -206,6 +216,8 @@ export async function getCampaignPerformance(params: {
   try {
     const days = params.days ?? 7;
     const since = daysAgoISO(days);
+    const adaCamp = await adaClientFor(params.clientCode);
+    if (adaCamp) return adaEntityPerformance(adaCamp, "campaign", days);
 
     logger.debug(
       { clientCode: params.clientCode, days },
@@ -343,6 +355,8 @@ export async function getCampaignSummary(params: {
 }): Promise<string> {
   try {
     const days = params.days ?? 30;
+    const adaCampSum = await adaClientFor(params.clientCode);
+    if (adaCampSum) return adaEntitySummary(adaCampSum, "campaign", days);
 
     logger.debug(
       { clientCode: params.clientCode, days },
@@ -379,6 +393,9 @@ export async function getAdsetSummary(params: {
 }): Promise<string> {
   try {
     const days = params.days ?? 30;
+    const adaAdsetSum = await adaClientFor(params.clientCode);
+    if (adaAdsetSum)
+      return adaEntitySummary(adaAdsetSum, "adset", days, { campaignId: params.campaignId });
 
     logger.debug(
       { clientCode: params.clientCode, campaignId: params.campaignId, days },
@@ -417,6 +434,12 @@ export async function getAdSummary(params: {
 }): Promise<string> {
   try {
     const days = params.days ?? 30;
+    const adaAdSum = await adaClientFor(params.clientCode);
+    if (adaAdSum)
+      return adaEntitySummary(adaAdSum, "ad", days, {
+        campaignId: params.campaignId,
+        adsetId: params.adsetId,
+      });
 
     // Guard: require campaignId or adsetId to prevent full-account queries blowing up context
     if (!params.campaignId && !params.adsetId) {
@@ -467,6 +490,9 @@ export async function getAdsetPerformance(params: {
   try {
     const days = params.days ?? 7;
     const since = daysAgoISO(days);
+    const adaAdset = await adaClientFor(params.clientCode);
+    if (adaAdset)
+      return adaEntityPerformance(adaAdset, "adset", days, { campaignId: params.campaignId });
 
     logger.debug(
       { clientCode: params.clientCode, campaignId: params.campaignId, days },
@@ -517,6 +543,12 @@ export async function getAdPerformance(params: {
   try {
     const days = params.days ?? 7;
     const since = daysAgoISO(days);
+    const adaAd = await adaClientFor(params.clientCode);
+    if (adaAd)
+      return adaEntityPerformance(adaAd, "ad", days, {
+        campaignId: params.campaignId,
+        adsetId: params.adsetId,
+      });
 
     logger.debug(
       { clientCode: params.clientCode, campaignId: params.campaignId, adsetId: params.adsetId, days },

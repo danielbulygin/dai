@@ -1,3 +1,4 @@
+import { getTokenForClient } from "../../integrations/meta-token.js";
 import { getSupabase } from "../../integrations/supabase.js";
 import { env } from "../../env.js";
 import { logger } from "../../utils/logger.js";
@@ -11,7 +12,9 @@ const META_BASE_URL = `https://graph.facebook.com/${META_API_VERSION}`;
 
 async function resolveAdAccountId(
   clientCode: string,
-): Promise<{ adAccountId: string; timezone: string; currency: string } | { error: string }> {
+): Promise<
+  { adAccountId: string; timezone: string; currency: string; token: string } | { error: string }
+> {
   const supabase = getSupabase();
   const { data, error } = await supabase
     .from("clients")
@@ -21,13 +24,25 @@ async function resolveAdAccountId(
   if (error || !data) {
     return { error: `Client '${clientCode}' not found` };
   }
-  if (!data.ad_account_id) {
-    return { error: `Client '${clientCode}' has no ad_account_id configured` };
+
+  // The token must follow the CLIENT, not the agency. getTokenForClient
+  // returns the customer's own OAuth connection when there is one and falls
+  // back to the agency env token for legacy agency clients. Before this, every
+  // call used the agency token, so an external Ada customer got
+  // "Ad account owner has NOT granted ads_management or ads_read permission"
+  // and Ada correctly reported she had no data (verified 2026-07-25).
+  const resolved = await getTokenForClient({ clientCode });
+  if (!resolved) {
+    return {
+      error: `No usable Meta access for '${clientCode}'. The customer's connection may have expired, or the account is not connected.`,
+    };
   }
+
   return {
-    adAccountId: data.ad_account_id as string,
+    adAccountId: resolved.adAccountId,
     timezone: (data.timezone as string) || "Europe/Berlin",
     currency: (data.currency as string) || "EUR",
+    token: resolved.token,
   };
 }
 
@@ -38,10 +53,12 @@ async function resolveAdAccountId(
 async function metaApiRequest(
   endpoint: string,
   params: Record<string, string>,
+  /** The CLIENT's token. Falls back to the agency env token when absent. */
+  accessToken?: string,
 ): Promise<{ data?: unknown[]; error?: string }> {
-  const token = env.META_ACCESS_TOKEN;
+  const token = accessToken || env.META_ACCESS_TOKEN;
   if (!token) {
-    return { error: "META_ACCESS_TOKEN is not configured. Cannot query Facebook API directly." };
+    return { error: "No Meta access token available for this client." };
   }
 
   const url = new URL(`${META_BASE_URL}/${endpoint}`);
@@ -107,7 +124,7 @@ export async function queryMetaInsights(params: {
     const resolved = await resolveAdAccountId(params.clientCode);
     if ("error" in resolved) return JSON.stringify(resolved);
 
-    const { adAccountId } = resolved;
+    const { adAccountId, token } = resolved;
     const level = params.level ?? "account";
 
     // Default fields — comprehensive but not overwhelming
@@ -167,7 +184,7 @@ export async function queryMetaInsights(params: {
       apiParams.limit = String(params.limit);
     }
 
-    const result = await metaApiRequest(`${adAccountId}/insights`, apiParams);
+    const result = await metaApiRequest(`${adAccountId}/insights`, apiParams, token);
 
     if (result.error) {
       return JSON.stringify({ error: result.error });
@@ -225,7 +242,7 @@ export async function queryMetaCreatives(params: {
     const resolved = await resolveAdAccountId(params.clientCode);
     if ("error" in resolved) return JSON.stringify(resolved);
 
-    const { adAccountId } = resolved;
+    const { adAccountId, token } = resolved;
 
     if (!params.campaignId && !params.adsetId && !(params.adIds && params.adIds.length > 0)) {
       return JSON.stringify({
@@ -258,7 +275,7 @@ export async function queryMetaCreatives(params: {
 
     apiParams.limit = String(params.limit ?? 100);
 
-    const result = await metaApiRequest(`${adAccountId}/ads`, apiParams);
+    const result = await metaApiRequest(`${adAccountId}/ads`, apiParams, token);
 
     if (result.error) {
       return JSON.stringify({ error: result.error });
@@ -312,6 +329,7 @@ interface AdIdCodeReport {
 async function lookupCodeInMeta(
   adAccountId: string,
   code: string,
+  token: string,
 ): Promise<AdIdCodeReport> {
   const filterFor = (value: string) =>
     JSON.stringify([{ field: 'name', operator: 'CONTAIN', value }]);
@@ -321,12 +339,12 @@ async function lookupCodeInMeta(
       filtering: filterFor(code),
       fields: 'id,name,effective_status,status,campaign_id',
       limit: '50',
-    }),
+    }, token),
     metaApiRequest(`${adAccountId}/ads`, {
       filtering: filterFor(code),
       fields: 'id,name,effective_status,status,adset_id,campaign_id',
       limit: '50',
-    }),
+    }, token),
   ]);
 
   const adsets = (adsetResult.data ?? []) as MetaNameMatch[];
@@ -354,10 +372,10 @@ export async function checkAdsInMeta(params: {
 
     const resolved = await resolveAdAccountId(params.clientCode);
     if ('error' in resolved) return JSON.stringify(resolved);
-    const { adAccountId } = resolved;
+    const { adAccountId, token } = resolved;
 
     const uniqueCodes = Array.from(new Set(params.adIdCodes));
-    const reports = await Promise.all(uniqueCodes.map((code) => lookupCodeInMeta(adAccountId, code)));
+    const reports = await Promise.all(uniqueCodes.map((code) => lookupCodeInMeta(adAccountId, code, token)));
 
     const foundCount = reports.filter((r) => r.found).length;
     logger.info(
