@@ -79,13 +79,29 @@ export async function getLearnings(
   return (data ?? []) as Learning[];
 }
 
-export async function searchLearnings(query: string, clientCode?: string): Promise<Learning[]> {
+export interface SearchLearningsScope {
+  /** Restrict to one agent's learnings (client-scoped runs pass `ada_client_<CODE>`). */
+  agentId?: string;
+  /**
+   * Turn `clientCode` from a rank boost into a hard row filter. Set ONLY on
+   * client-scoped (customer) runs — this is the cross-tenant boundary. Internal
+   * agency callers omit it and keep cross-client search.
+   */
+  strictClientCode?: boolean;
+}
+
+export async function searchLearnings(
+  query: string,
+  clientCode?: string,
+  scope?: SearchLearningsScope,
+): Promise<Learning[]> {
   const supabase = getDaiSupabase();
 
   const { data, error } = await supabase.rpc("search_learnings", {
     query_text: query,
-    agent_id_filter: null,
+    agent_id_filter: scope?.agentId ?? null,
     client_code_filter: clientCode ?? null,
+    client_code_strict: scope?.strictClientCode ?? false,
     result_limit: 20,
   });
 

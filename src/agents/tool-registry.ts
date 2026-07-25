@@ -164,11 +164,20 @@ register({
       required: ['topic'],
     },
   },
-  async execute(input) {
+  async execute(input, context) {
+    // Cross-tenant boundary. Unlike recall, this tool has no agent filter of its
+    // own, so on a client-scoped run BOTH the agent id and the client code come
+    // from context (never from model input) — the same scope recall gets via
+    // context.agentId (`ada_client_<CODE>`). `scoped` makes the client code a
+    // hard row filter in the RPC. Unscoped internal runs are unchanged:
+    // cross-client search stays a legitimate agency feature.
+    const scope = context.clientScope;
     const result = await memoryTools.searchMemories({
       topic: input.topic as string,
       limit: input.limit as number | undefined,
-      client_code: input.client_code as string | undefined,
+      client_code: scope ? scope.clientCode : (input.client_code as string | undefined),
+      agent_id: scope ? context.agentId : undefined,
+      scoped: !!scope,
     });
     return JSON.stringify(result);
   },
@@ -4156,6 +4165,12 @@ export async function executeTool(
       input.client_code = context.clientScope.clientCode;
     }
     if (name === 'recall') {
+      input.client_code = context.clientScope.clientCode;
+    }
+    // search_memories has no agent filter of its own, so the client code IS the
+    // tenant boundary — the executor re-derives it from context, this override
+    // keeps the model's own value out of the audit log and the RPC call.
+    if (name === 'search_memories') {
       input.client_code = context.clientScope.clientCode;
     }
   }

@@ -179,13 +179,29 @@ export async function searchMemories(params: {
   topic: string;
   limit?: number;
   client_code?: string;
+  /**
+   * Cross-tenant boundary. Set from `context.clientScope` by the tool executor
+   * on client-scoped (customer) runs — never from model input. `agent_id` is the
+   * client agent (`ada_client_<CODE>`, the same scope recall gets from
+   * context.agentId); `scoped` makes client_code a hard row filter in the RPC
+   * instead of a rank boost. Internal agency runs pass neither and keep
+   * cross-client search.
+   */
+  agent_id?: string;
+  scoped?: boolean;
 }): Promise<{
   memories: Array<{ content: string; category: string; confidence: number }>;
 }> {
   try {
     const limit = params.limit ?? 10;
     const clientCode = normalizeClientCode(params.client_code);
-    const raw = await searchLearnings(params.topic, clientCode);
+    const raw = await searchLearnings(
+      params.topic,
+      clientCode,
+      params.scoped
+        ? { agentId: params.agent_id, strictClientCode: true }
+        : undefined,
+    );
 
     const memories = raw.slice(0, limit).map((l) => ({
       content: l.content,
