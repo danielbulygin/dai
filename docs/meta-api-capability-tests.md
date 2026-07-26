@@ -353,6 +353,114 @@ The production version of this is the `ada-dead-url-scan` skill (daily, all clie
 browser-confirms before alerting). Note it is one of the skills Ada cannot currently reach
 — see the skills-reachability backlog item.
 
+## Partnership ads — investigated 2026-07-26, NOT built
+
+Daniel asked for a partnership-ad creation capability, pointing at a Brain.fm ad as the
+reference (account `act_1726935217614830`, campaign `120225649475980041`, ad set
+`120245404667740041`, ad `120245404667760041` — all extractable from an Ads Manager URL).
+
+**Read-only investigation of that account. Nothing was written to it.**
+
+What the reference ad actually shows:
+
+| Field | Value |
+|---|---|
+| `branded_content` | `{ "ad_format": 3 }` — **the only ad of 25 sampled that has this set** |
+| `object_story_spec.page_id` | `1521753578089107` = "Brain.fm" — their OWN page |
+| `object_story_spec.instagram_user_id` | `17841406011611363` = `@brainfmapp` — their OWN Instagram |
+| `branded_content_sponsor_page_id` | empty |
+| `source_instagram_media_id` | empty |
+| `instagram_permalink_url` | `instagram.com/p/DYlGDD2AHpZ/` |
+
+Fields that **do not exist** in v22.0: `partnership_ad_code`,
+`branded_content_sponsor_relationship`, `branded_content.creator_page_id`.
+
+### Why this is not enough to build from
+
+1. **The API does not expose the partner.** The creative carries the branded-content
+   marker but no partner or creator identity. There is nothing to reverse-engineer.
+2. **The reference ad may not be a true partnership ad.** It uses Brain.fm's own page and
+   own Instagram, identical to the other 24 ads, with no sponsor and no creator post. The
+   ad name credits "(Jack Yappers Scripts)", which reads like a script author, not a
+   partner. Either the partner is visible only in the UI, or this is Brain.fm's own
+   creative carrying a branded-content format flag.
+3. **Permission is granted OUTSIDE the API.** Meta's own docs are explicit: delivery
+   requires *"account-level permissioning for the creator approved by the brand or
+   post-level permissioning for the brand approved by the creator"*, arranged through the
+   Partnership Ads Hub / Instagram, not through the Marketing API. So no amount of API work
+   creates a working partnership ad on its own.
+4. A dry run of a creative carrying `branded_content: {"ad_format": 3}` **does validate**
+   in the practice account. That proves the payload is structurally acceptable, nothing
+   more. A branded-content flag with no partner behind it is not a partnership ad, and
+   validate_only will not catch that.
+
+### RESOLVED 2026-07-26: the schema, and the exact blocker
+
+Daniel supplied the partner handle (`roas.dan`), which made a deeper probe worthwhile.
+
+**Scanned all 1,200 ads in the Brain.fm account.** Exactly **4** carry `branded_content`,
+and 3 of them are named "Dan Yapper - Masking" — the `roas.dan` partnership. All 1,200 ads
+use the same Instagram id (Brain.fm's own), confirming the partner is NOT stored in
+`object_story_spec`.
+
+**The schema, discovered by probing** (invalid keys produce "Unexpected key", valid ones
+produce a different error, so the API enumerates its own schema):
+
+```jsonc
+branded_content: {
+  ad_format: 3,                                  // writable on its own
+  partners: [ { ig_user_id: "<creator IG id>" } ] // OR { fb_page_id: "<page id>" }
+}
+```
+
+`partners[0]` accepts **exactly two** keys: `ig_user_id` and `fb_page_id`. Everything else
+(`page_id`, `id`, `creator_id`, `instagram_actor_id`, `partner_id`, `igid`,
+`instagram_id`, `instagram_account_id`, `ig_id`) is rejected as an unexpected key.
+
+**The blocker is app capability, not our code and not config:**
+
+| Operation | Result |
+|---|---|
+| READ `branded_content{partners}` | ❌ `#3 Application does not have the capability to make this API call` |
+| WRITE `partners: [{ig_user_id}]` | ❌ same capability error |
+| WRITE `partners: [{fb_page_id}]` (valid page) | ❌ same capability error |
+| WRITE `branded_content: {ad_format: 3}` alone | ✅ validates — but produces a branded-content flag with **no partner**, which is not a partnership ad |
+| `business_discovery` to resolve `roas.dan` | ❌ `#10 Application does not have permission for this action` |
+
+So the Brain.fm partnership ads were almost certainly created **in Ads Manager by a
+human**, using Meta's own first-party app which holds the capability. Our app does not.
+
+### What is needed before this can be built
+
+Two separate requirements, and BOTH are needed. Neither is code.
+
+1. **App capability from Meta for branded content / partnership ads.** This is an App
+   Review / feature request against the app whose token we use. Until it is granted, the
+   partner field cannot be read or written by us at all. **This should be added to the
+   already-planned App Review bundle** (pages + ads_management) rather than raised as a
+   separate request.
+2. **Creator permission from the partner**, granted outside the API in the Partnership Ads
+   Hub / Instagram: either account-level (creator approves the brand) or post-level (brand
+   approves the creator's post). Meta's docs are explicit that delivery requires this. It
+   is still required *after* the capability is granted.
+
+Then a decision on which flow: promoting a creator's existing organic post (needs the media
+id plus post-level permission) versus our own creative carrying a partner credit (needs
+account-level permission). Different builds.
+
+**Until the capability lands, the honest status is: cannot be built.** Writing
+`branded_content: {ad_format: 3}` alone would pass validation and produce something that
+looks like a partnership ad in our code and is not one in Meta. That is worse than not
+building it.
+
+**Regression value:** re-run the probe table above after any App Review outcome. The moment
+those capability errors turn into real responses, this becomes buildable, and the schema is
+already documented here.
+
+Sources: [Partnership Ads API](https://developers.facebook.com/docs/marketing-api/ad-creative/partnership-ads/),
+[Partnership Ads Creation](https://developers.facebook.com/docs/marketing-api/ad-creative/partnership-ads/ads-creation/),
+[Branded Content](https://developers.facebook.com/docs/marketing-api/guides/branded-content/)
+
 ## Objects created for testing
 
 Anything here is disposable. If a session ends without cleaning up, that is fine while
