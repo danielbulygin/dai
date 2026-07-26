@@ -1,0 +1,268 @@
+# Meta API capability tests
+
+A living record of actions we have actually performed against the practice account,
+with the exact request that worked and the result we expect. The point is regression:
+when Meta changes the Graph API, or when we change the safety layer, re-running these
+tells us what broke rather than us finding out through a client.
+
+Started 2026-07-26. **Append as we test. Never delete a case — if behaviour changes,
+record the change and the date.**
+
+## Ground rules
+
+- **Practice account only:** `act_1570076840279279` (Ads on Tap USD, client code `AOT`).
+- **Pre-flight every session, before anything else:** every campaign off, and no spend
+  in the last 7 days. If either fails, stop and tell Daniel. This is a standing rule.
+- **The campaign stays off.** Ads and ad sets may be switched on and off freely: a
+  paused campaign means zero delivery regardless, so nothing spends. Never turn a
+  campaign on.
+- **Validate before you write.** Meta supports a dry run via
+  `execution_options=["validate_only"]`. Use it on every create. It caught a required
+  field on the very first case below, before any real object existed.
+- Graph API version in use: **v22.0** (the safety layer's version). Note the insights
+  libraries elsewhere still sit on v21.0.
+
+## How to verify a change (read this before adding a case)
+
+Every case below must verify by **reading the object back from the API**, never by
+trusting the write response. A `{"success": true}` means the call was accepted, not that
+the object looks how you intended.
+
+**Verify by diffing the whole object, not the fields you changed.** This is the lesson of
+2026-07-26. Adding a campaign budget silently set `bid_strategy` to bid cap. It was caught
+only because that field happened to be in one read-back. Had we checked only
+`daily_budget` — the field we actually changed — the campaign would have kept a bid
+strategy nobody chose, and since Daniel's rule is that bid strategy can never be changed
+after creation, on a real campaign that would have been unrecoverable.
+
+So the procedure is:
+
+1. **Dry run** with `execution_options=["validate_only"]`.
+2. **Snapshot the whole object** before the write, using a field list far wider than what
+   you are changing.
+3. **Write.**
+4. **Snapshot again and diff.** Then assert three separate things:
+   - every field you asked for actually took (catches silently-dropped params)
+   - no field you did *not* ask for changed (catches Meta's unrequested defaults)
+   - the invariant still holds: all campaigns off, spend still zero
+5. **Log it**, with before, after, and how to undo.
+
+`effective_status` and `updated_time` are excluded from the diff, since Meta legitimately
+recomputes them.
+
+A session helper implementing all of this lives in the scratchpad as `meta-write.mjs`. It
+refuses any account other than the practice account, refuses to set a campaign active, and
+will not perform a write without verifying it. **If this methodology is worth keeping, the
+helper should move into the repo rather than living in a temp directory** — currently it
+does not survive the session.
+
+## Pre-flight
+
+```bash
+# every campaign must be PAUSED
+curl -sG "https://graph.facebook.com/v22.0/act_1570076840279279/campaigns" \
+  -d "fields=id,name,status,effective_status" -d "limit=100" -d "access_token=$TOKEN"
+
+# and there must be no spend
+curl -sG "https://graph.facebook.com/v22.0/act_1570076840279279/insights" \
+  -d "date_preset=last_7d" -d "fields=spend,impressions" -d "access_token=$TOKEN"
+```
+
+Expected: every campaign `PAUSED`, insights `data: []`.
+
+Verified 2026-07-26: 4 campaigns all off, 37 ad sets all under off campaigns, zero
+spend for 7 days and zero today.
+
+---
+
+## Case 1 — Create a campaign with a leads objective
+
+**Who can do this:** nobody in our system. The safety layer explicitly cannot create,
+modify, or delete campaigns, and no tool exists. This case documents the direct API
+route, which is what a person (or Claude in a terminal) uses. **It is ungoverned:** it
+does not pass the locked-campaign fence, the spend guard, or the audit log. That is
+worth remembering whenever someone says "Ada created a campaign."
+
+```bash
+curl -s -X POST "https://graph.facebook.com/v22.0/act_1570076840279279/campaigns" \
+  -d "name=AOT // API TEST // Leads // 26 Jul 2026" \
+  -d "objective=OUTCOME_LEADS" \
+  -d "status=PAUSED" \
+  -d "special_ad_categories=[]" \
+  -d "buying_type=AUCTION" \
+  -d "is_adset_budget_sharing_enabled=false" \
+  -d "access_token=$TOKEN"
+```
+
+**Expected:** `{"id": "<numeric>"}`, and on read-back `status=PAUSED`,
+`effective_status=PAUSED`, `objective=OUTCOME_LEADS`, no `daily_budget` or
+`lifetime_budget` at campaign level.
+
+**Result 2026-07-26:** created `120247186199170225`. Read-back matched exactly.
+
+### API contract detail worth keeping
+
+The first attempt failed, and the dry run is what caught it:
+
+> `error_subcode 4834011` — "You must specify True or False in the field
+> `is_adset_budget_sharing_enabled` if you are not using campaign budget."
+
+So **when you omit a campaign budget, that field is now mandatory** rather than
+defaulted. If this case ever starts failing with subcode 4834011, Meta has changed the
+requirement again. We set it to `false` deliberately: with sharing enabled, ad sets
+lend each other up to 20% of budget, which would make any ad-set budget assertion
+unreliable.
+
+### Budget level is Daniel's decision, not a default
+
+First attempt created this campaign with an ad-set-level budget, on the reasoning that it
+made an ad-set budget change testable. Daniel's correction: *"I would have expected you to
+ask me what type of campaign that should be."* Campaign structure is the substance of
+media-buying work, not a detail on the way to it. **Ask.**
+
+He chose campaign-level budget at $20/day. Converting in place worked, so no delete and
+recreate was needed:
+
+```bash
+curl -s -X POST "https://graph.facebook.com/v22.0/<CAMPAIGN_ID>" \
+  -d "daily_budget=2000" -d "access_token=$TOKEN"     # 2000 = $20.00, USD account
+```
+
+### GOTCHA: adding a campaign budget silently changes the bid strategy
+
+After the conversion above, read-back showed `bid_strategy=LOWEST_COST_WITH_BID_CAP`,
+which was never requested. It does not inherit the account convention and nothing in the
+response mentions it. Every other campaign in the account uses
+`LOWEST_COST_WITHOUT_CAP`.
+
+Consequence in a real account: you inherit a bid strategy nobody selected, and every ad
+set underneath then needs an explicit bid cap value.
+
+**Always read `bid_strategy` back after touching a campaign budget**, and reset it:
+
+```bash
+curl -s -X POST "https://graph.facebook.com/v22.0/<CAMPAIGN_ID>" \
+  -d "bid_strategy=LOWEST_COST_WITHOUT_CAP" -d "access_token=$TOKEN"
+```
+
+---
+
+## Case 2 — All three bid strategies, side by side
+
+Created 2026-07-26 so each shape can be tested and compared. All leads objective, all
+campaign-level budget at $20/day, all PAUSED.
+
+| Campaign | `bid_strategy` | Id |
+|---|---|---|
+| `AOT // API TEST // Leads // Lowest Cost // 26 Jul 2026` | `LOWEST_COST_WITHOUT_CAP` | `120247186199170225` |
+| `AOT // API TEST // Leads // Bid Cap // 26 Jul 2026` | `LOWEST_COST_WITH_BID_CAP` | `120247186255230225` |
+| `AOT // API TEST // Leads // Cost Cap // 26 Jul 2026` | `COST_CAP` | `120247186255420225` |
+
+Both cap strategies validated and created cleanly with the strategy set **at creation
+time**, no cap value required at campaign level. The cap amount is an ad-set field
+(`bid_amount`), so these campaigns are usable as-is and the cap only becomes mandatory
+when an ad set is added.
+
+**Standing default (Daniel, 2026-07-26): always `LOWEST_COST_WITHOUT_CAP`.** Only use bid
+cap or cost cap when he asks for one proactively. The two cap campaigns above exist as
+test fixtures, not as a pattern to copy.
+
+---
+
+## Media-buying rules that constrain what we may test
+
+Not API behaviour. Daniel's rules, and they override convenience.
+
+**Never edit an ad set or an ad that has received spend.** Editing settings after spend
+resets Meta's learning phase and throws away the optimisation that spend paid for. The
+correct response to "change this winner" is normally "build a new one".
+
+**What IS allowed on a spent or running ad set:**
+- Pausing individual ads inside it.
+- Adding new ads to it while it runs.
+
+**At campaign level: never change the bidding strategy or the conversion goal.** Not on
+anything active, not on anything that has ever spent, and as a habit not after creation at
+all. Build a new campaign instead.
+
+This makes the creation-time choice the whole decision, and it is why the silent bid-cap
+default above is dangerous rather than annoying: on a real campaign you would be stuck
+with it permanently. Correcting it is legitimate only on a brand-new, never-active,
+zero-spend campaign where the value was an API default nobody chose — which was the case
+here on 2026-07-26. Do not generalise from that.
+
+**Standing default: bid strategy is always lowest cost** (`LOWEST_COST_WITHOUT_CAP`). Use
+bid cap or cost cap only when Daniel asks proactively.
+
+**Ask before choosing structure.** Campaign vs ad-set budget is a media-buying decision,
+not an implementation detail. Same for optimisation goal. Flagging a choice after making
+it is not the same as asking. (Naming format, API version, and validate-first are not in
+this category — those are routine.)
+
+Our safety layer already enforces a version of this (see R5–R8 below): on an object with
+lifetime spend it permits only `name` and status→PAUSED/ARCHIVED. Two differences worth
+noting: it still allows a **rename** on a spent object, which the rule as stated would
+not; and it only engages once spend is above zero, which is consistent, since an unspent
+object has no learnings to lose.
+
+---
+
+## Rail behaviours to re-verify
+
+These are the protections themselves. They are not Meta API behaviour, they are ours,
+and they are the things that must never silently stop working. All verified by
+execution on 2026-07-26 against the practice account.
+
+Run via the safety layer directly:
+
+```python
+import sys; sys.path.insert(0, '<bmad>/pma/tools/creative-uploader')
+import safe_meta_api as S
+api = S.SafeMetaAPI(S.get_access_token('AOT'), 'AOT')
+```
+
+| # | Check | Expected |
+|---|---|---|
+| R1 | Constructing for an unknown client (e.g. `MTN`) | `SafetyError` before any network call |
+| R2 | `pause_adset` on an ad set outside the locked campaign | `SafetyError` naming both campaigns |
+| R3 | `pause_ad` / `pause_adset` inside the locked campaign | Succeeds |
+| R4 | Rename via `set_adset_action_marker` | Succeeds, and is undone by `clear_adset_action_marker` |
+| R5 | Budget change on an object **with** lifetime spend | Refused by the spend guard |
+| R6 | `status=ACTIVE` on an object **with** lifetime spend | Refused by the spend guard |
+| R7 | Rename on an object with spend | **Allowed** — a name cannot affect delivery |
+| R8 | `status=PAUSED` on an object with spend | **Allowed** — the kill switch must always work |
+| R9 | Any campaign create/modify/delete method | Does not exist |
+| R10 | Any delete/archive method | Does not exist |
+
+**Known limitation, asserted rather than hidden:** R5 and R6 only bite once an object
+has spent. On a brand new object the guard permits both, including turning it on. Ada
+has no verb to ask for either, so this is not currently reachable, but the protection
+is narrower than "Ada cannot turn things on".
+
+Guard-level equivalents live in `tests/guard-account-allowlist.test.ts` and run with
+`pnpm test`.
+
+---
+
+## Objects created for testing
+
+Anything here is disposable. If a session ends without cleaning up, that is fine while
+the campaign is off, but do not let this list grow forever.
+
+| Created | Object | Id | State |
+|---|---|---|---|
+| 2026-07-26 | Campaign, Lowest Cost | `120247186199170225` | PAUSED, empty, $20/day CBO |
+| 2026-07-26 | Campaign, Bid Cap | `120247186255230225` | PAUSED, empty, $20/day CBO |
+| 2026-07-26 | Campaign, Cost Cap | `120247186255420225` | PAUSED, empty, $20/day CBO |
+
+## Open questions / not yet tested
+
+- Ad-set-level budget change. Still untestable: all seven campaigns in the account now
+  hold budget at campaign level, so no ad set has a budget of its own. Needs either an
+  ad-set-budget campaign or Daniel's go-ahead to convert one.
+- Creating ad sets and ads in these campaigns (the "maximizing conversions" optimisation
+  goal lives on the ad set, not the campaign).
+- Whether a cap strategy campaign refuses an ad set that omits `bid_amount`.
+- Adding an ad to a *running* ad set, which Daniel confirms is allowed. Cannot be tested
+  here while every campaign is off, so it needs a different approach or a read of a live
+  client account.
