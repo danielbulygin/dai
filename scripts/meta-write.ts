@@ -257,6 +257,196 @@ function defaultContext(): ToolContext {
   };
 }
 
+// ---------------------------------------------------------------------------
+// ACCOUNT READINESS — what you must know BEFORE changing anything in an account
+// ---------------------------------------------------------------------------
+/**
+ * Dan, 2026-07-26: "prior to making changes in the account, you need to know: which is the
+ * correct data set ID, which is the standard conversion event, the URL mapping, the
+ * correct Instagram and Facebook page IDs."
+ *
+ * Every account has its own. Assuming another account's values is how ads end up on the
+ * wrong page, firing the wrong event, or pointing at a dead URL.
+ *
+ * This DISCOVERS the answers from the account itself (what live objects actually use)
+ * rather than trusting config, then flags disagreement. That makes it work for a brand-new
+ * client account where no config exists yet, which is the onboarding case.
+ *
+ * Verdicts: 'pass' = established and consistent. 'warn' = usable but something is off, a
+ * human should look. 'fail' = do not build until resolved.
+ */
+export interface ReadinessCheck {
+  item: string;
+  verdict: 'pass' | 'warn' | 'fail';
+  value: string;
+  note: string;
+}
+
+export interface ReadinessReport {
+  ok: boolean;
+  blocking: number;
+  warnings: number;
+  checks: ReadinessCheck[];
+}
+
+export async function accountReadiness(
+  accountId: string = PRACTICE_ACCOUNT,
+  landingPages: string[] = [],
+): Promise<ReadinessReport> {
+  const t = token();
+  const checks: ReadinessCheck[] = [];
+  const modal = <T>(counts: Map<T, number>): [T | null, number, number] => {
+    let top: T | null = null;
+    let n = 0;
+    let total = 0;
+    for (const [k, v] of counts) {
+      total += v;
+      if (v > n) { top = k; n = v; }
+    }
+    return [top, n, total];
+  };
+
+  // --- 1 + 2. dataset (pixel) and conversion event, from live ad sets -------
+  const adsets = (await (
+    await fetch(
+      `${API}/${accountId}/adsets?fields=name,optimization_goal,promoted_object{pixel_id,custom_event_type,page_id}` +
+        `&limit=200&access_token=${t}`,
+    )
+  ).json()) as { data?: Array<Record<string, any>> };
+
+  const pixels = new Map<string, number>();
+  const events = new Map<string, number>();
+  const goals = new Map<string, number>();
+  for (const a of adsets.data ?? []) {
+    const po = a.promoted_object ?? {};
+    if (po.pixel_id) pixels.set(po.pixel_id, (pixels.get(po.pixel_id) ?? 0) + 1);
+    if (po.custom_event_type) events.set(po.custom_event_type, (events.get(po.custom_event_type) ?? 0) + 1);
+    if (a.optimization_goal) goals.set(a.optimization_goal, (goals.get(a.optimization_goal) ?? 0) + 1);
+  }
+
+  const [pixel, pixelN, pixelTotal] = modal(pixels);
+  checks.push({
+    item: 'Dataset / pixel id',
+    verdict: !pixel ? 'fail' : pixels.size > 1 ? 'warn' : 'pass',
+    value: pixel ?? '(none found)',
+    note: !pixel
+      ? 'No ad set in this account declares a pixel. Cannot build a conversion ad set until one is established.'
+      : pixels.size > 1
+        ? `${pixels.size} different pixels in use. Dominant one is used by ${pixelN}/${pixelTotal} ad sets; others: ` +
+          [...pixels.entries()].filter(([k]) => k !== pixel).map(([k, v]) => `${k} (${v})`).join(', ') +
+          '. Confirm which is correct before building.'
+        : `Consistent across all ${pixelN} ad sets that declare one.`,
+  });
+
+  const [event, eventN, eventTotal] = modal(events);
+  checks.push({
+    item: 'Standard conversion event',
+    verdict: !event ? 'fail' : events.size > 1 ? 'warn' : 'pass',
+    value: event ?? '(none found)',
+    note: !event
+      ? 'No conversion event established in this account.'
+      : events.size > 1
+        ? `${events.size} events in use. Dominant is ${event} (${eventN}/${eventTotal}); others: ` +
+          [...events.entries()].filter(([k]) => k !== event).map(([k, v]) => `${k} (${v})`).join(', ') +
+          '. Per Daniel 2026-07-26 the conversion goal is FIXED at creation — get this right first.'
+        : `Consistent across all ${eventN} ad sets.`,
+  });
+
+  const [goal] = modal(goals);
+  checks.push({
+    item: 'Optimisation goal',
+    verdict: goal ? 'pass' : 'warn',
+    value: goal ?? '(none found)',
+    note: goal ? `Dominant goal across existing ad sets.` : 'No existing ad sets to learn from.',
+  });
+
+  // --- 3. page + instagram, from live ads ----------------------------------
+  const ads = (await (
+    await fetch(
+      `${API}/${accountId}/ads?fields=creative{object_story_spec{page_id,instagram_actor_id,instagram_user_id}}` +
+        `&limit=100&access_token=${t}`,
+    )
+  ).json()) as { data?: Array<Record<string, any>> };
+
+  const pages = new Map<string, number>();
+  const igs = new Map<string, number>();
+  for (const a of ads.data ?? []) {
+    const oss = a.creative?.object_story_spec ?? {};
+    if (oss.page_id) pages.set(oss.page_id, (pages.get(oss.page_id) ?? 0) + 1);
+    const ig = oss.instagram_actor_id ?? oss.instagram_user_id;
+    if (ig) igs.set(ig, (igs.get(ig) ?? 0) + 1);
+  }
+
+  const [page, pageN] = modal(pages);
+  let pageNote = '';
+  let pageVerdict: ReadinessCheck['verdict'] = 'fail';
+  if (page) {
+    const p = (await (await fetch(`${API}/${page}?fields=id,name,is_published&access_token=${t}`)).json()) as Record<string, any>;
+    if (p.error) { pageVerdict = 'warn'; pageNote = `Used by ${pageN} ads but does not resolve with this token: ${p.error.message}`; }
+    else if (p.is_published === false) { pageVerdict = 'warn'; pageNote = `"${p.name}" is NOT published.`; }
+    else { pageVerdict = pages.size > 1 ? 'warn' : 'pass'; pageNote = `"${p.name}", published, used by ${pageN} ads.` + (pages.size > 1 ? ` NOTE: ${pages.size} different pages in use.` : ''); }
+  } else {
+    pageNote = 'No page found on any ad. A page is mandatory for ad creation.';
+  }
+  checks.push({ item: 'Facebook page id', verdict: pageVerdict, value: page ?? '(none)', note: pageNote });
+
+  const [ig, igN] = modal(igs);
+  checks.push({
+    item: 'Instagram account id',
+    verdict: !ig ? 'warn' : igs.size > 1 ? 'warn' : 'pass',
+    value: ig ?? '(none)',
+    note: !ig
+      ? 'No Instagram account on any ad. Ads will run Facebook-only placements unless one is set.'
+      : `Used by ${igN} ads, so Meta accepts it. CANNOT be independently verified with a System User token ` +
+        `(direct GET fails with subcode 33; the page edge needs a Page token). Confirm the handle in Business Manager if it matters.` +
+        (igs.size > 1 ? ` NOTE: ${igs.size} different Instagram accounts in use.` : ''),
+  });
+
+  // --- 4. URL mapping: every mapped URL must actually load -----------------
+  for (const url of landingPages) {
+    let verdict: ReadinessCheck['verdict'] = 'fail';
+    let note = '';
+    let value = url;
+    try {
+      const r = await fetch(url, {
+        redirect: 'follow',
+        headers: { 'user-agent': 'Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/120 Safari/537.36' },
+        signal: AbortSignal.timeout(20_000),
+      });
+      const movedHost = new URL(r.url).host !== new URL(url).host;
+      if (!r.ok) { verdict = 'fail'; note = `HTTP ${r.status}. Dead destination — do not point an ad at this.`; }
+      else if (movedHost) { verdict = 'warn'; note = `200, but redirects to a DIFFERENT domain: ${r.url}. Redirects are where tracking parameters get dropped.`; }
+      else { verdict = 'pass'; note = `HTTP ${r.status}, no cross-domain redirect.`; }
+      value = `${url}${r.url !== url ? ` -> ${r.url}` : ''}`;
+    } catch (e) {
+      note = `Unreachable: ${(e as Error).message}`;
+    }
+    checks.push({ item: 'Landing page', verdict, value, note });
+  }
+  if (!landingPages.length) {
+    checks.push({
+      item: 'URL mapping',
+      verdict: 'warn',
+      value: '(not supplied)',
+      note: 'No landing pages passed in, so none were checked. Pass the account\'s mapped URLs — an unchecked mapping is the failure mode this exists to catch.',
+    });
+  }
+
+  const blocking = checks.filter((c) => c.verdict === 'fail').length;
+  const warnings = checks.filter((c) => c.verdict === 'warn').length;
+  return { ok: blocking === 0, blocking, warnings, checks };
+}
+
+export function formatReadiness(r: ReadinessReport): string {
+  const icon = { pass: '✅', warn: '⚠️ ', fail: '❌' };
+  const lines = r.checks.map((c) => `${icon[c.verdict]} ${c.item}: ${c.value}\n     ${c.note}`);
+  return (
+    lines.join('\n') +
+    `\n\n${r.ok ? 'No blockers' : `${r.blocking} BLOCKER(S)`}, ${r.warnings} warning(s).` +
+    (r.ok ? '' : ' Do not build until the blockers are resolved.')
+  );
+}
+
 /** Pre-flight the standing safety rule: every campaign off, and no recent spend. */
 export async function preflight(): Promise<{ ok: boolean; detail: string }> {
   const t = token();

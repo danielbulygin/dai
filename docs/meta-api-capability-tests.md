@@ -244,6 +244,115 @@ Guard-level equivalents live in `tests/guard-account-allowlist.test.ts` and run 
 
 ---
 
+## MANDATORY: account readiness, before changing anything
+
+Dan, 2026-07-26: *"prior to making changes in the account, you need to know: which is the
+correct data set ID, which is the standard conversion event, the URL mapping, the correct
+Instagram and Facebook page IDs."*
+
+**Every account has its own.** Carrying another account's values across is how ads end up
+on the wrong page, firing the wrong event, or pointing at a dead URL. This is not optional
+and it is not a checklist someone reads — it is code:
+
+```ts
+import { accountReadiness, formatReadiness, preflight } from './scripts/meta-write.js';
+
+const safety = await preflight();                       // campaigns off? no spend?
+const ready  = await accountReadiness(ACCOUNT, URLS);   // the four questions
+console.log(formatReadiness(ready));
+if (!ready.ok) throw new Error('blockers — do not build');
+```
+
+It **discovers the answers from the account itself** — the pixel, event, page and Instagram
+account that live objects actually use — rather than trusting config. That means it works
+on a brand-new client account with no config at all, which is the onboarding case, and it
+catches config that has drifted from reality.
+
+Verdicts: `pass` established and consistent · `warn` usable but a human should look ·
+`fail` do not build.
+
+**Two checks deserve special weight**, because per Daniel's rule the conversion goal and
+bid strategy are FIXED at creation and cannot be corrected later. A wrong pixel or event is
+not a tidy-up job afterwards, it is a rebuild.
+
+### Result for the practice account, 2026-07-26
+
+```
+⚠️  Dataset / pixel:    480938037639047 — but 2 pixels in use (36/37 vs 744943614558963)
+⚠️  Conversion event:   LEAD — but 2 in use: LEAD (27), PURCHASE (10)
+✅ Optimisation goal:  OFFSITE_CONVERSIONS
+✅ Facebook page:      476517508878115 "Ads On Tap", published, all 74 ads
+✅ Instagram:          17841469793617911, all 74 ads (not independently verifiable)
+⚠️  adsontap.io/       200 but redirects to ads-on-tap.com
+❌ adsontap.io/about   404
+✅ adsontap.io/contact 200
+❌ adsontap.io/services 404
+→ 2 BLOCKERS, 3 warnings. Do not build.
+```
+
+The split conversion event is the sharpest finding: 27 LEAD vs 10 PURCHASE means there is
+no safe majority to assume, and the choice cannot be undone. Ask.
+
+**This should become an Ada skill.** She needs the same check before any launch, and she
+currently has no equivalent. Blocked behind the skills-reachability work.
+
+## Account defaults — the two places config lives
+
+Every ad account has its own page, Instagram account, pixel and URL mapping. Never assume;
+they are per-account. For the practice account (`AOT`), config lives in two places that can
+drift apart:
+
+- `safe_meta_api.py` → `CLIENT_CONFIGS['AOT']` (page, Instagram, pixel, locked campaign,
+  targeting defaults, url_tags)
+- Supabase `client_meta_configs` row (landing page mapping, CTA, naming templates,
+  compliance rules)
+
+**Verified 2026-07-26:**
+
+| Thing | Value | Status |
+|---|---|---|
+| Ad account | `act_1570076840279279` | USD, Europe/Berlin, active |
+| Page | `476517508878115` | ✅ resolves to "Ads On Tap", published, used by all 12 existing ads |
+| Instagram | `17841469793617911` | ⚠️ used successfully by all 12 existing ads, but **not independently verifiable** with our System User token |
+| Pixel | `480938037639047` | Used by 36 of 37 ad sets (one uses `744943614558963`) |
+| Default CTA | `LEARN_MORE` | |
+| url_tags | `utm_source=facebook&utm_medium=cpc&...` | |
+
+**Instagram cannot be verified with the agency token.** Three routes all fail: direct GET
+on the actor id (`error_subcode 33`), the page's `instagram_accounts` edge (needs a *Page*
+access token, `#190`), and `act_*/instagram_accounts` (returns empty). The only evidence
+the id is correct is that Meta accepted it on 12 live ads. To confirm the actual handle,
+use a Page token or Business Manager.
+
+### URL mapping — 2 of 4 dead as of 2026-07-26
+
+| Keyword | URL | Result |
+|---|---|---|
+| `default` | `https://adsontap.io/` | 200 but **redirects to `https://ads-on-tap.com/`**, title "Ads On Tap — Design Directions" |
+| `agency` | `https://adsontap.io/about` | **404** |
+| `contact` | `https://adsontap.io/contact` | 200 |
+| `services` | `https://adsontap.io/services` | **404** |
+
+The domain appears to have moved from `adsontap.io` to `ads-on-tap.com` while the mapping
+still points at the old one. Redirects are where tracking parameters get lost, so this
+matters beyond tidiness. The default destination also looks like a design page rather than
+a homepage — needs Daniel's eye before any real ad points at it.
+
+The 404s return an honest 404 status with a branded page, not a soft-404, so an automated
+check catches them cleanly.
+
+**Check URLs like this** (follow redirects, compare the final URL, read the title):
+
+```bash
+curl -s -o /tmp/b.html -w "%{http_code}" -L --max-time 20 \
+  -A "Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/120 Safari/537.36" "$URL"
+curl -s -o /dev/null -w "%{url_effective}" -L --max-time 20 "$URL"   # did it redirect?
+```
+
+The production version of this is the `ada-dead-url-scan` skill (daily, all clients,
+browser-confirms before alerting). Note it is one of the skills Ada cannot currently reach
+— see the skills-reachability backlog item.
+
 ## Objects created for testing
 
 Anything here is disposable. If a session ends without cleaning up, that is fine while
