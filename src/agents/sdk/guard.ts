@@ -225,6 +225,29 @@ export function decide(
     return { ...base, decision: 'deny', reason: `delete tool hard-blocked — never autonomous (${bare})` };
   }
 
+  // ACCOUNT ALLOW-LIST — checked BEFORE the production allow-list, deliberately.
+  //
+  // BUG FIXED 2026-07-26: this used to sit BELOW the PRODUCTION_WRITES branch, which
+  // matches launch verbs — so the account check was unreachable dead code whenever
+  // allowProductionWrites was on. Proved by trying, not reading: the guard approved a
+  // launch aimed at another client's account, and a launch with no account named at
+  // all. Nothing was ever exposed, because SafeMetaAPI resolves the account from the
+  // client's own config and refuses a client it has no config for — but the guard was
+  // advertising a protection it did not provide, which invites false confidence.
+  //
+  // Ordering it first is what makes "Ada is read-only everywhere except the test
+  // account" (Dan, 2026-07-26) an enforceable statement rather than an intention.
+  // Fail-closed: an empty allow-list denies every client-targeted launch.
+  if (LAUNCH_MUTATIONS.has(bare) && policy.testClientCodes.length > 0) {
+    if (clientCode && !policy.testClientCodes.includes(clientCode)) {
+      return {
+        ...base,
+        decision: 'deny',
+        reason: `client_code ${clientCode} is not in the allowed account list ${JSON.stringify(policy.testClientCodes)}`,
+      };
+    }
+  }
+
   // PRODUCTION write allow-list (airtight: explicit set only; everything else falls
   // through to deny). launch_ads/upload are allow-listed here in production mode and
   // are paused-bank-only by SafeMetaAPI construction.

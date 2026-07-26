@@ -31,6 +31,24 @@ function summarizeResult(result: string): string {
   return result.slice(0, MAX_RESULT_SUMMARY_CHARS) + `…[truncated, ${result.length} chars total]`;
 }
 
+/**
+ * Which client did this action affect? A client-scoped session carries it on the
+ * context; an agency session (agent_id='ada') carries it only in the tool params,
+ * which is why "what changed in client X's account?" needed a real column
+ * (migration 20260726140000). Context wins — it is server-derived and cannot be
+ * talked into a different value by the model.
+ */
+function resolveClientCode(
+  context: ToolContext,
+  params?: Record<string, unknown>,
+): string | null {
+  const scoped = context.clientScope?.clientCode;
+  if (scoped) return scoped.toUpperCase();
+  const fromParams = params?.client_code;
+  if (typeof fromParams === 'string' && fromParams.trim()) return fromParams.trim().toUpperCase();
+  return null;
+}
+
 export interface ToolCallLogInput {
   toolName: string;
   context: ToolContext;
@@ -60,6 +78,8 @@ async function writeToolCallRow(input: ToolCallLogInput): Promise<void> {
     session_id: input.context.threadTs ?? null,
     channel_id: input.context.channelId ?? null,
     user_id: input.context.userId ?? null,
+    client_code: resolveClientCode(input.context, input.params),
+    reason: typeof input.params?.reason === 'string' ? input.params.reason : null,
     action_type: 'tool_call',
     tool_name: input.toolName,
     initiator: input.context.userId ?? null,
@@ -80,9 +100,71 @@ export interface WriteLogInput {
   targetId: string;
   before: unknown;
   after: unknown;
+  /**
+   * Machine-readable undo instruction, or null when this write is NOT
+   * automatically reversible. Pass null explicitly rather than omitting it —
+   * a null with a summary explaining why is honest; a missing field reads as
+   * "nobody thought about it".
+   */
   reverse: unknown;
   summary: string;
   status?: 'success' | 'failed' | 'partial';
+  /** Client whose account was affected. Falls back to the session's client scope. */
+  clientCode?: string;
+  /** Ada's own stated reasoning. Falls back to the tool's `reason` param. */
+  reason?: string;
+  /**
+   * Who caused this action. Omit to let resolveInitiation() derive it from the
+   * runtime — which is preferable, because a derived value cannot be talked into
+   * saying "the client approved this". Only pass it explicitly for the one case
+   * the runtime genuinely cannot see: a human agreeing in conversation. When you
+   * do, it is recorded as self_reported.
+   */
+  initiatedBy?: InitiatedBy;
+}
+
+export type InitiatedBy =
+  | 'autonomous'
+  | 'scheduled'
+  | 'client_requested'
+  | 'client_approved'
+  | 'agency_requested'
+  | 'agency_approved';
+
+/**
+ * Establish who caused an action, and how much that answer can be trusted.
+ *
+ * Derived beats self-reported. The runtime knows three things for certain:
+ *   - a client-scoped session is, by definition, client-initiated
+ *   - a cron/timer run involves no decision at all
+ *   - a session with a real human user id was triggered by that human
+ * Everything else ("they said yes in the thread") is the model's claim, and is
+ * marked as such so a reader knows which rows are evidence and which are hearsay.
+ */
+function resolveInitiation(
+  context: ToolContext,
+  claimed?: InitiatedBy,
+): { initiated_by: InitiatedBy; initiation_evidence: 'derived' | 'self_reported' } {
+  // A timer left no human behind it — no decision was made by anyone.
+  if (context.userId === 'cron' || context.channelId === 'cron') {
+    return { initiated_by: 'scheduled', initiation_evidence: 'derived' };
+  }
+  // Client-scoped sessions can only have been started by that client.
+  if (context.clientScope?.clientCode) {
+    return {
+      initiated_by: claimed === 'client_approved' ? 'client_approved' : 'client_requested',
+      initiation_evidence: claimed === 'client_approved' ? 'self_reported' : 'derived',
+    };
+  }
+  // A named human in an agency channel asked for this.
+  if (context.userId && context.userId !== 'cron') {
+    if (claimed === 'agency_approved' || claimed === 'autonomous') {
+      return { initiated_by: claimed, initiation_evidence: 'self_reported' };
+    }
+    return { initiated_by: 'agency_requested', initiation_evidence: 'derived' };
+  }
+  // No human, no client scope, no timer: genuinely unprompted.
+  return { initiated_by: claimed ?? 'autonomous', initiation_evidence: claimed ? 'self_reported' : 'derived' };
 }
 
 // Dual-emit rule (master plan 2026-06-09 §1.5): scoped Notion writes that
@@ -128,6 +210,76 @@ export function logWrite(input: WriteLogInput): void {
   }
 }
 
+/**
+ * Log a Meta account change from a tool that returns a JSON string.
+ *
+ * Never throws and never alters the caller's return value — an audit failure must
+ * not turn a successful launch into an error. A FAILED write is logged too, with
+ * status='failed' and no undo instruction: "we tried and it didn't take" is
+ * exactly the kind of thing you want in an audit trail.
+ */
+export function logMetaWrite(args: {
+  context: ToolContext;
+  toolName: string;
+  rawResult: string;
+  fallbackTargetId: string;
+  clientCode?: string;
+  reason?: string;
+  initiatedBy?: InitiatedBy;
+  build: (parsed: Record<string, unknown>) => {
+    targetId?: string;
+    before: unknown;
+    after: unknown;
+    reverse: unknown;
+    summary: string;
+  };
+}): void {
+  try {
+    const parsed = (JSON.parse(args.rawResult) ?? {}) as Record<string, unknown>;
+    const common = {
+      context: args.context,
+      toolName: args.toolName,
+      targetSystem: 'meta' as const,
+      clientCode:
+        args.clientCode ??
+        (typeof parsed.client_code === 'string' ? parsed.client_code : undefined),
+      reason: args.reason,
+      initiatedBy: args.initiatedBy,
+    };
+
+    if (parsed.error) {
+      logWrite({
+        ...common,
+        targetId: args.fallbackTargetId,
+        before: null,
+        after: null,
+        reverse: null,
+        summary: `FAILED: ${String(parsed.error).slice(0, 300)}`,
+        status: 'failed',
+      });
+      return;
+    }
+
+    const built = args.build(parsed);
+    logWrite({
+      ...common,
+      targetId: built.targetId ?? args.fallbackTargetId,
+      before: built.before,
+      after: built.after,
+      reverse: built.reverse,
+      summary: built.summary,
+      status: 'success',
+    });
+  } catch (err) {
+    // Includes a non-JSON result. Losing an audit row is bad; failing the tool
+    // call that already succeeded against Meta is worse.
+    logger.warn(
+      { toolName: args.toolName, err: (err as Error).message },
+      'meta write-log skipped (non-fatal)',
+    );
+  }
+}
+
 async function writeWriteRow(input: WriteLogInput): Promise<void> {
   const supabase = getDaiSupabase();
   const { error } = await supabase.from('piper_actions').insert({
@@ -136,6 +288,10 @@ async function writeWriteRow(input: WriteLogInput): Promise<void> {
     channel_id: input.context.channelId ?? null,
     user_id: input.context.userId ?? null,
     initiator: input.context.userId ?? null,
+    client_code:
+      input.clientCode?.trim().toUpperCase() || resolveClientCode(input.context),
+    reason: input.reason?.trim() || null,
+    ...resolveInitiation(input.context, input.initiatedBy),
     action_type: 'write',
     tool_name: input.toolName,
     target_system: input.targetSystem,

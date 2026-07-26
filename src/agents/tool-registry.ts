@@ -24,7 +24,7 @@ import * as reportTools from '../reports/index.js';
 import * as methodologySanitizer from '../client-agents/methodology-sanitizer.js';
 import { detectSoftError } from './sdk/observe-after.js';
 import { logger } from '../utils/logger.js';
-import { logToolCall, logWrite, fetchRecentActions } from './action-log.js';
+import { logToolCall, logWrite, logMetaWrite, fetchRecentActions } from './action-log.js';
 import * as piperMovesTools from './tools/piper-moves-tools.js';
 import * as piperBrainTools from './tools/piper-brain-tools.js';
 import * as piperCommentsTools from './tools/piper-comments-tools.js';
@@ -693,8 +693,31 @@ register({
       required: ['batch_id', 'idempotency_key'],
     },
   },
-  async execute(input) {
-    return adLaunchTools.launchAds(input as Parameters<typeof adLaunchTools.launchAds>[0]);
+  async execute(input, context) {
+    const raw = await adLaunchTools.launchAds(input as Parameters<typeof adLaunchTools.launchAds>[0]);
+    logMetaWrite({
+      context,
+      toolName: 'launch_ads',
+      rawResult: raw,
+      fallbackTargetId: String(input.batch_id ?? 'unknown'),
+      reason: typeof input.reason === 'string' ? input.reason : undefined,
+      build: (r) => ({
+        targetId: String(r.adset_id ?? input.batch_id),
+        // Nothing existed before a launch — that IS the before state.
+        before: null,
+        after: { adset_id: r.adset_id, ad_ids: r.ad_ids, status: r.status ?? 'PAUSED' },
+        // pause_launch is the documented and only undo verb for a batch.
+        reverse: r.batch_id ?? input.batch_id
+          ? { pause_launch: { batch_id: String(r.batch_id ?? input.batch_id) } }
+          : null,
+        summary:
+          `Launched ad set ${r.adset_id ?? '?'} with ` +
+          `${Array.isArray(r.ad_ids) ? r.ad_ids.length : 0} ad(s), created PAUSED. ` +
+          `Undo: pause the batch. Note that pausing is NOT the same as removing — ` +
+          `deleting ads is manual in Ads Manager, by design.`,
+      }),
+    });
+    return raw;
   },
 });
 
@@ -712,8 +735,32 @@ register({
       required: ['batch_id', 'reason'],
     },
   },
-  async execute(input) {
-    return adLaunchTools.pauseLaunch({ batch_id: input.batch_id as string, reason: input.reason as string });
+  async execute(input, context) {
+    const raw = await adLaunchTools.pauseLaunch({
+      batch_id: input.batch_id as string,
+      reason: input.reason as string,
+    });
+    logMetaWrite({
+      context,
+      toolName: 'pause_launch',
+      rawResult: raw,
+      fallbackTargetId: String(input.batch_id ?? 'unknown'),
+      reason: input.reason as string,
+      build: (r) => ({
+        targetId: String(r.adset_id ?? input.batch_id),
+        before: { status: 'launched' },
+        after: { status: 'paused', paused_ads: r.paused_ads, paused_adset: r.paused_adset },
+        // HONEST NULL: there is no un-pause verb. Turning an ad back on is the
+        // capability we confirmed missing on 2026-07-26 — so the only truthful
+        // undo is a human in Ads Manager. Do not invent a reverse here.
+        reverse: null,
+        summary:
+          `Paused batch ${input.batch_id}. NOT automatically reversible: Ada has no ` +
+          `verb that turns an ad or ad set back on. To undo, a person must re-enable ` +
+          `the ad set in Ads Manager.`,
+      }),
+    });
+    return raw;
   },
 });
 
@@ -736,8 +783,44 @@ register({
       required: ['client_code', 'keyword'],
     },
   },
-  async execute(input) {
-    return adLaunchTools.updateLandingPageMapping(input as Parameters<typeof adLaunchTools.updateLandingPageMapping>[0]);
+  async execute(input, context) {
+    const raw = await adLaunchTools.updateLandingPageMapping(
+      input as Parameters<typeof adLaunchTools.updateLandingPageMapping>[0],
+    );
+    logMetaWrite({
+      context,
+      toolName: 'update_landing_page_mapping',
+      rawResult: raw,
+      fallbackTargetId: `${String(input.client_code)}/${String(input.keyword)}`,
+      clientCode: input.client_code as string | undefined,
+      reason: typeof input.reason === 'string' ? input.reason : undefined,
+      build: (r) => ({
+        targetId: `${String(input.client_code)}/${String(input.keyword)}`,
+        before: { urls: r.previous ?? null },
+        after: { urls: r.urls ?? input.urls ?? input.url ?? null },
+        // Fully reversible: this is our own config row, and we captured what was
+        // there before. The only case with no undo is a first-time mapping, where
+        // the reverse is "remove the keyword" rather than "restore a value".
+        reverse:
+          r.previous == null
+            ? { remove_landing_page_mapping: { client_code: input.client_code, keyword: input.keyword } }
+            : {
+                update_landing_page_mapping: {
+                  client_code: input.client_code,
+                  keyword: input.keyword,
+                  urls: r.previous,
+                  source: 'manual',
+                },
+              },
+        summary:
+          `Landing page for ${String(input.client_code)}/${String(input.keyword)} set to ` +
+          `${JSON.stringify(r.urls ?? input.urls ?? input.url ?? null).slice(0, 120)}. ` +
+          (r.previous == null
+            ? 'This is a NEW mapping — undo means removing it.'
+            : 'Fully reversible: previous value captured.'),
+      }),
+    });
+    return raw;
   },
 });
 
@@ -832,8 +915,34 @@ register({
       required: ['client_code', 'adset_id', 'marker_text'],
     },
   },
-  async execute(input) {
-    return adLaunchTools.setAdsetMarker(input as Parameters<typeof adLaunchTools.setAdsetMarker>[0]);
+  async execute(input, context) {
+    const raw = await adLaunchTools.setAdsetMarker(input as Parameters<typeof adLaunchTools.setAdsetMarker>[0]);
+    logMetaWrite({
+      context,
+      toolName: 'set_adset_marker',
+      rawResult: raw,
+      fallbackTargetId: String(input.adset_id ?? 'unknown'),
+      clientCode: input.client_code as string | undefined,
+      reason: typeof input.reason === 'string' ? input.reason : undefined,
+      build: (r) => ({
+        targetId: String(input.adset_id),
+        before: { name: r.previous_name ?? null },
+        after: { name: r.name ?? null, marker: input.marker_text },
+        // The safety layer HAS a clear-marker method, but no Ada tool exposes it
+        // (the tool description says clearing is manual by design). So the undo is
+        // known and precise, but a human performs it.
+        reverse: {
+          manual: true,
+          instruction: `Remove the "(🔴 ${String(input.marker_text)})" prefix from ad set ${String(input.adset_id)}`,
+          restore_name: r.previous_name ?? null,
+        },
+        summary:
+          `Marked ad set ${input.adset_id} with "${String(input.marker_text)}". ` +
+          `Cosmetic only, cannot affect delivery. Undo: strip the marker prefix ` +
+          `(manual in Ads Manager — no Ada verb clears it).`,
+      }),
+    });
+    return raw;
   },
 });
 

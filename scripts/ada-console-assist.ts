@@ -98,6 +98,23 @@ const MAX_TURNS = Number(process.env.ADA_ASSIST_MAX_TURNS ?? 15);
 const CHAT_MAX_BUDGET_USD = Number(process.env.ADA_CHAT_MAX_BUDGET ?? 2.0);
 const CHAT_MAX_TURNS = Number(process.env.ADA_CHAT_MAX_TURNS ?? 24);
 
+/**
+ * Which client accounts may Ada WRITE to. Empty = no account restriction, which is
+ * today's production behaviour (she launches for all configured clients). Set to
+ * `AOT` to confine every write to the practice account while testing.
+ *
+ *   ADA_WRITE_ACCOUNT_ALLOWLIST=AOT        → practice account only
+ *   ADA_WRITE_ACCOUNT_ALLOWLIST=AOT,SLB    → those two
+ *   (unset)                                → unrestricted (current live behaviour)
+ *
+ * Enforced by guard.ts ahead of the production-write allow-list. Deletes stay
+ * hard-blocked regardless, and launches remain paused-bank-only regardless.
+ */
+const WRITE_ACCOUNT_ALLOWLIST = (process.env.ADA_WRITE_ACCOUNT_ALLOWLIST ?? '')
+  .split(',')
+  .map((c) => c.trim().toUpperCase())
+  .filter(Boolean);
+
 // ---------------------------------------------------------------------------
 // Types mirroring the documented request/response contract.
 // ---------------------------------------------------------------------------
@@ -812,7 +829,25 @@ async function handleChatStream(
         // rails are below the guard and ALWAYS on: launch_ads/upload_to_media_library
         // create PAUSED-bank-only objects via SafeMetaAPI (zero spend; a human enables to
         // go live), and the delete rail hard-blocks every delete in any mode.
-        ...(scope ? {} : { policy: { allowProductionWrites: true } }),
+        //
+        // ACCOUNT RESTRICTION (Dan, 2026-07-26): "Ada is read only for all the new
+        // accounts, but I would love for Ada to be able to operate in the test account."
+        //
+        // Client-scoped (customer) sessions need nothing here — they are already
+        // read-only twice over: no write policy above, and `client_media_buyer` contains
+        // no write tools at all.
+        //
+        // For the internal path, ADA_WRITE_ACCOUNT_ALLOWLIST restricts which accounts
+        // Ada may write to. Deliberately EMPTY by default, which preserves today's
+        // behaviour: the agency Ada launches for all 14 configured clients, and that is
+        // how real client launches happen. Setting it to `AOT` makes the practice account
+        // the ONLY account she can write to — the configuration to use when testing.
+        // Do NOT set it on the live service without meaning to stop real launches.
+        //
+        // The guard checks this list BEFORE its production-write allow-list (fixed
+        // 2026-07-26 — it used to sit below and was unreachable). See
+        // tests/guard-account-allowlist.test.ts.
+        ...(scope ? {} : { policy: { allowProductionWrites: true, testClientCodes: WRITE_ACCOUNT_ALLOWLIST } }),
         thinking: true,
         streamPartial: true,
         maxBudgetUsd: CHAT_MAX_BUDGET_USD,
