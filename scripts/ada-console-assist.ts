@@ -473,6 +473,8 @@ function buildChatPrompt(req: AssistRequest, ledgerEvents: LedgerEvent[] = [], r
     `- **Consult your Key Learnings before calling anything an anomaly.** Many "weird" patterns are normal for the account and may already be written in your learnings — e.g. more content-views (PDP views) than link clicks is EXPECTED (each clicker just browses several product pages), not a red flag. Check first; don't flag an expected pattern as a ⚠️ problem.`,
   );
 
+  parts.push(ROOT_CAUSE_METHOD);
+
   parts.push(
     `### When the operator corrects or teaches you, SAVE it (remember) — then CONFIRM the save\n` +
     `Chat corrections do NOT persist on their own — they vanish when this session ends. So when the operator corrects you, states a preference for how to analyze/report, or teaches you a durable fact about a client or the account, CALL **remember** to store it as a learning (pass client_code when it's client-specific; omit it for a general analysis principle). The remember tool returns the saved record. ONLY after that call succeeds, end your reply with an explicit, PAST-TENSE confirmation that quotes back what you saved — e.g. \`✅ Saved to memory — "<the exact generalized learning>" (TL)\` — so the operator can see it's been written, not merely promised. Do NOT say a vague "I'll remember that", and NEVER claim you saved something if the remember call didn't actually run or it errored — say so plainly and retry instead. That confirmed save is the ONLY way it carries into future sessions. Save the GENERALIZED rule, not the one-off phrasing; skip ephemeral chit-chat and anything already in your Key Learnings.`,
@@ -545,6 +547,24 @@ function buildChatPrompt(req: AssistRequest, ledgerEvents: LedgerEvent[] = [], r
 }
 
 /**
+ * Daniel's root-cause method (taught on the 2026-07-27 Nina bi-weekly; full
+ * extraction with tape in tinkers docs/factory/day-2026-07-27/
+ * root-cause-method-nina-call.md). Shared verbatim by the team chat prompt and
+ * the client-scoped prompt so both surfaces diagnose the same way: a movement
+ * in results is half an answer — the other half is which metrics moved WITH it
+ * and which stayed flat.
+ */
+const ROOT_CAUSE_METHOD =
+  `### When performance MOVED (either direction): tell the story, not just the movement\n` +
+  `A change in results (CPA/CPL/ROAS up or down, a record day, a slump) is HALF an answer. The other half is why, and the why lives in the metrics that moved with it — and just as much in the ones that stayed flat. Work these five questions in order:\n` +
+  `1. **Pin the date.** Name the exact day(s) the movement started before theorizing. The date is the join key for every other check.\n` +
+  `2. **Decompose the funnel into moved-vs-flat.** Walk spend → CPM → frequency → CTR → clicks → LPV / PDP-view rate → add-to-cart rate → checkout rate → purchases → AOV → ROAS and state which steps moved WITH the result and which did not. The first broken link localizes the cause: clicks up but everything past PDP view flat = more traffic but the wrong traffic; spend up while frequency AND CPM fall = healthy scaling into new audience, not fatigue; checkout rate down with everything upstream flat = an on-site/offer problem, not an ads problem.\n` +
+  `3. **Sweep what changed around that date, every ledger:** our changes (account change history: budgets, killed or new ads, destination routing), the client's world (a sale starting or ending, price or shipping changes, a newsletter, site tests), the tracking layer (server-vs-browser event divergence, event match quality), and the outside world (seasonality, weather where the account is weather-sensitive).\n` +
+  `4. **Cross-check a second source before believing either** (Meta vs Triple Whale vs the funnel report, where available). Divergence between sources is itself a finding: attribution shifted between channels, or one source's tracking broke.\n` +
+  `5. **Say explicitly whether this is behavior or measurement.** A metric can move because what it COUNTS changed — a collection page that never fires a PDP view, a pixel that stopped sending — not because people changed. Never present a measurement artifact as a behavior change.\n` +
+  `Apply the SAME rigor to good movement ("why was yesterday a record?") — the mechanism is what makes it repeatable. End every diagnosis with the one-sentence story plus a concrete so-what (the next step you recommend). If you cannot find the co-movers, say plainly that the cause is unlocated and name which ledger you could not check.`;
+
+/**
  * Client-scoped chat prompt (Tinkers portal — rollout plan R5). A CLIENT user is
  * on the other end, NOT a member of our team, so this deliberately shares NOTHING
  * with buildChatPrompt: no "OUR team" framing, no cross-client read access, no
@@ -582,6 +602,11 @@ function buildScopedChatPrompt(req: AssistRequest, clientCode: string): string {
     `- Answer directly and usefully, grounded in real numbers from your tools — never guess a figure, and state the exact window when you cite metrics.\n` +
     `- Lead with ratios and rates (hook/hold rate, CTR, CVR, AOV, ROAS) and benchmark against the account, not raw counts in isolation.\n` +
     `- Be concise and concrete. Markdown is welcome (short bold numbers, tight bullets, small tables). No preamble, no "as an AI", no restating the question.`,
+  );
+  parts.push(ROOT_CAUSE_METHOD);
+  parts.push(
+    `### When the customer teaches you something, SAVE it (remember) — then confirm\n` +
+    `Chat does not persist on its own: anything the customer corrects or explains vanishes when this session ends unless you store it. When they tell you a durable fact about their business (who their customers are, which campaign is theirs vs their media buyer's, what a lead is worth to them, a sale or launch date, how they want numbers framed), CALL **remember** to save it as a learning. Your saves are automatically scoped to this customer's account — never worry about other accounts, and never mention that scoping machinery. After the remember call succeeds, end your reply confirming in plain past tense what you saved (quote the generalized fact back). Never say "I'll remember that" without actually calling the tool, and never claim a save that errored. Two exceptions: (1) their performance GOAL cannot be changed from chat — point them at the Your business page, where changing it re-runs the checks; (2) skip chit-chat and one-off phrasing — save durable facts only.`,
   );
   parts.push(`### The message\n${(req.question ?? '').trim() || '(no message)'}`);
   return parts.join('\n\n');
