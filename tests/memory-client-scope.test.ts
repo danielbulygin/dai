@@ -80,6 +80,7 @@ const { state } = vi.hoisted(() => ({
   state: {
     rows: [] as unknown[],
     calls: [] as Array<Record<string, unknown>>,
+    inserts: [] as Array<{ table: string; row: Record<string, unknown> }>,
   },
 }));
 
@@ -119,8 +120,18 @@ vi.mock('../src/integrations/dai-supabase.js', () => ({
       state.calls.push(args);
       return { data: emulateSearchLearnings(args), error: null };
     },
-    // The fire-and-forget piper_actions audit write lands here.
-    from: () => ({ insert: async () => ({ error: null }) }),
+    // Both the fire-and-forget piper_actions audit write (awaited directly,
+    // hence thenable) and addLearning's insert().select().single() chain land
+    // here; every insert is recorded so tests can assert what was written.
+    from: (table: string) => ({
+      insert: (row: Record<string, unknown>) => {
+        state.inserts.push({ table, row });
+        return {
+          select: () => ({ single: async () => ({ data: row, error: null }) }),
+          then: (resolve: (v: { error: null }) => unknown) => resolve({ error: null }),
+        };
+      },
+    }),
   }),
 }));
 
@@ -153,6 +164,7 @@ const contents = (r: { memories: Array<{ content: string }> }) => r.memories.map
 beforeEach(() => {
   state.rows = SEED.map((r) => ({ ...r }));
   state.calls = [];
+  state.inserts = [];
 });
 
 describe('search_memories is reachable by customers', () => {
@@ -241,6 +253,47 @@ describe('internal agency run keeps cross-client search', () => {
     expect(got.some((c) => c.includes('BRAVO'))).toBe(true);
     expect(got.some((c) => c.startsWith('GLOBAL'))).toBe(true);
     expect(state.calls[0]!.client_code_strict).toBe(false);
+  });
+});
+
+describe('remember writes under the verified tenant, never the model\'s', () => {
+  // The boundary lives in executeTool's scoped-injection block (it rewrites
+  // input.client_code from clientScope before dispatch). These tests pin that
+  // behavior for the WRITE path, which had no coverage — with two real
+  // customers chatting, a model-supplied code must never tag (or poison)
+  // another tenant's memory.
+  it('remember is in the customer chat profile — the injection IS the boundary', () => {
+    expect(toolProfiles.client_media_buyer).toContain('remember');
+  });
+
+  it('a model-supplied client_code cannot retag a scoped write', async () => {
+    const input: Record<string, unknown> = {
+      content: 'ALPHA taught: kill ad sets past 3x target CPA with zero purchases',
+      category: 'account_knowledge',
+      client_code: 'bravo',
+    };
+    const { result, isError } = await executeTool('remember', input, scopedContext('alpha'));
+    expect(isError).toBe(false);
+    expect(JSON.parse(result).saved).toBe(true);
+    const write = state.inserts.find((i) => i.table === 'learnings');
+    expect(write).toBeDefined();
+    expect(write!.row.client_code).toBe('alpha');
+    expect(write!.row.agent_id).toBe('ada_client_alpha');
+    // The executor also rewrites the audited input, so piper_actions logs the
+    // forced code, not the model's.
+    expect(input.client_code).toBe('alpha');
+  });
+
+  it('an unscoped internal remember keeps the model-supplied code', async () => {
+    await executeTool(
+      'remember',
+      { content: 'agency note about alpha roas', category: 'observation', client_code: 'alpha' },
+      baseContext,
+    );
+    const write = state.inserts.find((i) => i.table === 'learnings');
+    expect(write).toBeDefined();
+    expect(write!.row.client_code).toBe('alpha');
+    expect(write!.row.agent_id).toBe('ada');
   });
 });
 
