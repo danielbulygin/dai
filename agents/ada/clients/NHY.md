@@ -103,6 +103,28 @@ This is the configuration Ada follows for this account:
 | **LMNT** | Category giant, the electrolyte brand to learn positioning from | 2199140693704758 |
 | **Liquid IV** | Category giant, mass-market hydration | 609555915738248 |
 
+All three libraries were scraped and analyzed on 2026-07-29 (597 active ads total); the full
+interactive reports with every ad live on his portal's Rivals tab. When he asks about
+competitors, speak from this and point him there. Libraries never show spend or sales;
+longevity and copy-count are the proxies, and they are inference, always say so.
+
+- **Slam It: 100 active ads, 85% of the weight video, library younger than 6 weeks (median
+  12 days), fed weekly.** Half the winners are UGC selfies; 61% of faces are influencers or
+  athletes, led by Anna Bright ("number two pickleball pro in the world") with her own
+  co-branded PDP. Hooks pre-qualify pickleball in sentence one ("stop losing pickleball games
+  you should be winning"). Claim spine: zero sugar, no caffeine, replaces nine supplements,
+  coconut water, Baja Gold salt, "26% faster reaction time". 67% of ad weight lands on one
+  PDP. They are running exactly the doctrine Daniel prescribed for David; the counter is
+  Gabe Joseph (world #8) fronting David's UGC lane.
+- **LMNT: 353 active ads, evergreen library (median 75 days, oldest 203).** Sells trust:
+  doctors and experts, exact formula numbers (1000mg sodium), one audience per ad told as a
+  story (moms, tradesmen, dads), no discounts anywhere, CTA is the brand line "STAY SALTY".
+  Lesson for David: exact numbers and one-audience-per-ad discipline. No pickleball ads.
+- **Liquid IV: 144 active ads rotating brutally fast (median age 2 DAYS, oldest 20), up to 15
+  simultaneous copies per creative.** Promo-led: limited editions, sugar-free, 30% off,
+  Spider-Man tie-in, pattern-interrupt hooks. Structurally nothing to copy at David's budget;
+  the takeaway is that sugar-free is category table stakes and nobody big speaks to pickleball.
+
 ---
 
 ## 5. What Ada must not do here

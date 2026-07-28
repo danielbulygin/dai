@@ -150,7 +150,31 @@ across those two buckets, because that split is a live question for them.
 
 ---
 
-## 6. Open questions for the setup call
+## 6. Rivals: what their ad libraries say (read 2026-07-27, refreshed 2026-07-29)
+
+Their three named rivals were scraped and analyzed; the full interactive report with every ad
+lives on their portal's Rivals tab. When they ask about competitors, speak from this and point
+them there for the ads themselves. Public libraries never show spend or results; longevity and
+copy-count are the only proxies, always label them as inference.
+
+- **WealthLink Media: the only one buying Meta attention. 38 active ads, 100% video.** 82%
+  founder-at-a-podcast-mic (Andre Slyter), word-by-word captions, no music. Everything anchors
+  on "$97/mo" and attacks agencies ("stop overpaying an agency", "scam marketing agencies").
+  Every ad routes to one page, rankflow.wealthlinkmedia.com, with a phone-only form and a
+  revenue qualifier: the $97 is a tripwire in front of a retainer upsell. Weak flank: claims
+  "100+ five-star Trustpilot reviews", roughly 30 at 4 stars actually visible, a ~3x gap.
+  Oldest ad 62 days, median about a month, 2-3 new cuts weekly: funded and staffed, but no
+  evergreen winner yet. Steal for Matrinova: the price-anchored call-out hook and the
+  founder-at-a-mic format. Avoid: fighting them on price; argue speed to first booked job.
+- **Stone Systems: zero active Meta ads, and zero recoverable history** (US-only advertisers
+  keep no public archive). Closest offer overlap on paper ($297/mo productized GHL stack),
+  explicitly anti-ad-spend positioning, and they sell their playbook to other agency owners,
+  so they mint new rivals. Never claim they "used to run ads": nothing verifiable exists.
+- **NiceJob: zero active Meta ads, consistent with their "grow without ads" positioning.**
+  Reputation SaaS, $75-125/mo, grows through Jobber/Housecall Pro/ServiceTitan integrations.
+  Honestly not a demand-generation competitor; a potential partner conversation instead.
+
+## 7. Open questions for the setup call
 
 1. Does `TM` mean a partner agency still has access? Who else edits this account?
 2. What defines a *qualified* lead for them, precisely enough to fire an event?
