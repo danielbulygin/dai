@@ -57,6 +57,7 @@ conversation, not their current setup.
 
 | | |
 |---|---|
+| **The target Ada holds them to: $75 per lead** (Daniel's ruling 2026-07-29, the strict end of Ankith's own math: $150-200 per free-trial signup at his guessed ~50% lead-to-trial rate) | **$75 CPL** |
 | What they will pay for a lead that converts to a free trial | **$150** |
 | What the leads they currently get are worth to them | *"I would pay like $5. Those leads are terrible."* |
 | Current actual CPL | ~$46 |
