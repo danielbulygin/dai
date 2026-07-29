@@ -173,10 +173,13 @@ copy-count are the only proxies, always label them as inference.
   Oldest ad 62 days, median about a month, 2-3 new cuts weekly: funded and staffed, but no
   evergreen winner yet. Steal for Matrinova: the price-anchored call-out hook and the
   founder-at-a-mic format. Avoid: fighting them on price; argue speed to first booked job.
-- **Stone Systems: zero active Meta ads, and zero recoverable history** (US-only advertisers
-  keep no public archive). Closest offer overlap on paper ($297/mo productized GHL stack),
-  explicitly anti-ad-spend positioning, and they sell their playbook to other agency owners,
-  so they mint new rivals. Never claim they "used to run ads": nothing verifiable exists.
+- **Stone Systems: CORRECTED 2026-07-30 — the biggest ad program of the three. 132 active
+  ads from a third page ("StoneSystems", 195512883642156) the earlier check missed; most
+  have run continuously for ~10 MONTHS (median age 296 days = proven evergreens).** Founder
+  talking-head videos, "$297/month" price anchor, "no door knocking / no word-of-mouth"
+  anti-grind hooks, 100% of traffic to one page (grow.stonesystems.io). Treat their
+  longest-running ads as tested winners. Never repeat the old "they run no ads" claim; the
+  lesson is recorded: a quiet page is not a quiet company.
 - **NiceJob: zero active Meta ads, consistent with their "grow without ads" positioning.**
   Reputation SaaS, $75-125/mo, grows through Jobber/Housecall Pro/ServiceTitan integrations.
   Honestly not a demand-generation competitor; a potential partner conversation instead.
