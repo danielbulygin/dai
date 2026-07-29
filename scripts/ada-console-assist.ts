@@ -49,6 +49,9 @@ import { join } from 'node:path';
 import { runAgentSDK } from '../src/agents/sdk/runAgentSDK.js';
 import { getAgent } from '../src/agents/registry.js';
 import { buildClientOverlay } from '../src/client-agents/prompt-builder.js';
+import { getSupabase } from '../src/integrations/supabase.js';
+import { envTokenFor } from '../src/integrations/meta-token.js';
+import { logWrite } from '../src/agents/action-log.js';
 
 const PORT = Number(process.env.ADA_ASSIST_PORT ?? 8092);
 const HOST = '0.0.0.0';
@@ -625,6 +628,20 @@ function buildScopedChatPrompt(req: AssistRequest, clientCode: string): string {
     `### When the customer teaches you something, SAVE it (remember) — then confirm\n` +
     `Chat does not persist on its own: anything the customer corrects or explains vanishes when this session ends unless you store it. When they tell you a durable fact about their business (who their customers are, which campaign is theirs vs their media buyer's, what a lead is worth to them, a sale or launch date, how they want numbers framed), CALL **remember** to save it as a learning. Your saves are automatically scoped to this customer's account — never worry about other accounts, and never mention that scoping machinery. After the remember call succeeds, end your reply confirming in plain past tense what you saved (quote the generalized fact back). Never say "I'll remember that" without actually calling the tool, and never claim a save that errored. Two exceptions: (1) their performance GOAL cannot be changed from chat — point them at the Your business page, where changing it re-runs the checks; (2) skip chit-chat and one-off phrasing — save durable facts only.`,
   );
+  parts.push(
+    `### Proposing account changes (card 57 — the approve-first rail)\n` +
+    `You cannot change anything in the account yourself, and you never claim otherwise. When the customer asks you to CHANGE something (create an ad set, pause an ad or ad set, change a budget), do this instead of refusing:\n` +
+    `1. Briefly explain what you would do and why, grounded in their numbers and their operating rules.\n` +
+    `2. End your reply with EXACTLY ONE fenced json block of this shape (no other fenced json in the reply):\n` +
+    '```json\n{"proposal": {"type": "create_ad_set" | "pause_ad_set" | "pause_ad" | "update_budget", "campaign_id": "<numeric id>", "campaign_name": "<name>", "target_id": "<ad set / ad id, for pause and budget types>", "settings": {"name": "...", "status": "PAUSED", "daily_budget_usd": 0, "optimization_goal": "...", "billing_event": "...", "targeting_summary": "..."}, "reason": "<one sentence>", "warnings": ["<anything the customer must see, e.g. a budget jump far above their usual>"]}}\n```\n' +
+    `Rules for proposals:\n` +
+    `- Include EVERY setting the change would carry — the customer sees this in a confirmation modal and nothing not listed there may happen. Omit settings keys that do not apply.\n` +
+    `- Creates are ALWAYS status PAUSED. Never propose anything that starts delivery or turns a campaign on.\n` +
+    `- A budget change of 3x or more versus the current value MUST carry a warning naming both numbers.\n` +
+    `- You NEVER propose deletes. If asked to delete something, say plainly that deleting is something you never do, and offer pausing instead (as a proposal).\n` +
+    `- If asked to touch a different account or a campaign outside your allowed list, refuse plainly — no proposal.\n` +
+    `- If the ask is ambiguous (no campaign, no budget), ask the clarifying question instead of proposing.`,
+  );
   parts.push(`### The message\n${(req.question ?? '').trim() || '(no message)'}`);
   return parts.join('\n\n');
 }
@@ -658,6 +675,36 @@ function toolLabel(name: string): string {
 }
 
 /** Extract the optional trailing {"actions":[...]} block from the final answer text. */
+/**
+ * Card 57: a scoped (customer) reply may end with one {"proposal": {...}}
+ * fenced block — Ada proposing an account change for the approve-first rail.
+ * Parsed server-side so the SSE event is SERVER truth, mirroring actions/
+ * creatives/charts. Returns null when absent or malformed (a malformed
+ * proposal is dropped rather than guessed at — nothing may reach the modal
+ * that Ada did not literally write).
+ */
+interface ChatProposal {
+  type: 'create_ad_set' | 'pause_ad_set' | 'pause_ad' | 'update_budget';
+  campaign_id?: string;
+  campaign_name?: string;
+  target_id?: string;
+  settings?: Record<string, unknown>;
+  reason?: string;
+  warnings?: string[];
+}
+const PROPOSAL_TYPES = new Set(['create_ad_set', 'pause_ad_set', 'pause_ad', 'update_budget']);
+function parseChatProposal(text: string): ChatProposal | null {
+  const fences = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
+  for (const fence of fences.reverse()) {
+    try {
+      const obj = JSON.parse(fence[1].trim()) as { proposal?: ChatProposal };
+      const p = obj.proposal;
+      if (p && typeof p === 'object' && PROPOSAL_TYPES.has(p.type)) return p;
+    } catch { /* not this fence */ }
+  }
+  return null;
+}
+
 function parseChatActions(text: string): ChatAction[] {
   const fences = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
   if (!fences.length) return [];
@@ -847,7 +894,18 @@ async function handleChatStream(
         // The guard checks this list BEFORE its production-write allow-list (fixed
         // 2026-07-26 — it used to sit below and was unreachable). See
         // tests/guard-account-allowlist.test.ts.
-        ...(scope ? {} : { policy: { allowProductionWrites: true, testClientCodes: WRITE_ACCOUNT_ALLOWLIST } }),
+        ...(scope
+          ? {}
+          : {
+              policy: {
+                allowProductionWrites: true,
+                testClientCodes: WRITE_ACCOUNT_ALLOWLIST,
+                // Card 48: the campaign fence, loaded fresh per run from
+                // clients.allowed_campaign_ids so a fence change needs no
+                // restart. Only relevant when writes are possible at all.
+                allowedCampaignsByClient: await loadCampaignFences(),
+              },
+            }),
         thinking: true,
         streamPartial: true,
         maxBudgetUsd: CHAT_MAX_BUDGET_USD,
@@ -874,6 +932,12 @@ async function handleChatStream(
     );
     const actions = parseChatActions(fullText);
     if (actions.length) safe('actions', { actions });
+    // Card 57: proposals exist only on client-scoped runs — the internal
+    // console has real write tools and needs no approve-first detour.
+    if (scope) {
+      const proposal = parseChatProposal(fullText);
+      if (proposal) safe('proposal', { proposal });
+    }
     const creatives = parseChatCreatives(fullText);
     if (creatives.length) safe('creatives', { creatives });
     const charts = parseChatCharts(fullText);
@@ -1030,6 +1094,236 @@ function readBody(req: http.IncomingMessage, limitBytes = 256 * 1024): Promise<s
   });
 }
 
+// ---------------------------------------------------------------------------
+// /execute-action — the guarded executor behind the card-57 approve button.
+//
+// Tinkers' approve route calls this AFTER a human clicked APPROVE on the modal.
+// Trust nothing about the caller's judgment; every rail is re-checked here:
+//
+//   1. HARD PRACTICE LOCK — until Daniel enables accounts one by one, the ONLY
+//      account this endpoint will ever write to is act_1570076840279279
+//      ("Ads on Tap USD", the practice account). Everything else is refused,
+//      whatever the intent says. (Daniel, 2026-07-29: "If you make any changes
+//      whatsoever in a meta account, keep the changes to our test account only.")
+//   2. CAMPAIGN FENCE (card 48) — the target campaign must be in the client's
+//      clients.allowed_campaign_ids. Fail-closed: no list, no writes.
+//   3. PAUSED-ONLY — creates carry status PAUSED unconditionally; a proposal
+//      asking for anything else is refused; the parent campaign must itself be
+//      paused (the paused-bank rule), so nothing can ever deliver or spend.
+//   4. NEVER-DELETE — no delete type exists here at all.
+//   5. Budget ceiling $100/day — this is a test rail, not a spend rail.
+//
+// Method: validate_only dry-run first, then the real write, then a read-back
+// of the full object (the meta-write methodology), logged via logWrite with
+// initiated_by derived as client_approved.
+// ---------------------------------------------------------------------------
+
+/**
+ * Card 48: every configured campaign fence, keyed by client code. Clients with
+ * no allowed_campaign_ids value get no entry (no fence configured); clients
+ * with an empty/null value get an explicit empty entry (fail-closed: no writes
+ * anywhere in their account). Loaded per run — cheap, and a fence edit in the
+ * DB takes effect immediately.
+ */
+async function loadCampaignFences(): Promise<Record<string, string[] | null>> {
+  try {
+    const sb = getSupabase();
+    const { data } = await sb
+      .from('clients')
+      .select('code, allowed_campaign_ids')
+      .not('allowed_campaign_ids', 'is', null);
+    const out: Record<string, string[] | null> = {};
+    for (const row of data ?? []) {
+      out[String(row.code).toUpperCase()] = (row.allowed_campaign_ids as string[] | null) ?? [];
+    }
+    return out;
+  } catch (e) {
+    console.error('[ada-console-assist] loadCampaignFences failed (fences unavailable, guard falls back to account gate):', e);
+    return {};
+  }
+}
+
+const PRACTICE_ACCOUNT = 'act_1570076840279279';
+const EXEC_TYPES = new Set(['create_ad_set', 'pause_ad_set', 'pause_ad', 'update_budget']);
+const GRAPH = 'https://graph.facebook.com/v21.0';
+const MAX_DAILY_BUDGET_USD = 100;
+
+interface ExecuteActionRequest {
+  client_code?: string;
+  user_id?: string;
+  intent?: {
+    type?: string;
+    campaign_id?: string;
+    target_id?: string;
+    settings?: Record<string, unknown>;
+    reason?: string;
+  };
+}
+
+async function graphCall(
+  path: string,
+  token: string,
+  params: Record<string, string> = {},
+  method: 'GET' | 'POST' = 'GET',
+): Promise<Record<string, unknown>> {
+  const qs = new URLSearchParams({ ...params, access_token: token });
+  const url = method === 'GET' ? `${GRAPH}/${path}?${qs}` : `${GRAPH}/${path}`;
+  const res = await fetch(url, method === 'GET' ? {} : { method: 'POST', body: qs });
+  const json = (await res.json()) as Record<string, unknown>;
+  if (json.error) {
+    const e = json.error as { message?: string; error_user_msg?: string };
+    throw new Error(e.error_user_msg || e.message || 'Graph error');
+  }
+  return json;
+}
+
+async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<string, unknown>> {
+  const clientCode = (body.client_code ?? '').toUpperCase().trim();
+  const intent = body.intent ?? {};
+  const type = intent.type ?? '';
+  if (!clientCode || !EXEC_TYPES.has(type)) {
+    return { ok: false, refused: `unsupported or missing action type "${type}"` };
+  }
+
+  const sb = getSupabase();
+  const { data: client } = await sb
+    .from('clients')
+    .select('code, name, ad_account_id, allowed_campaign_ids')
+    .eq('code', clientCode)
+    .maybeSingle();
+  if (!client?.ad_account_id) return { ok: false, refused: `unknown client ${clientCode}` };
+
+  // Rail 1: the practice lock.
+  if (client.ad_account_id !== PRACTICE_ACCOUNT) {
+    return {
+      ok: false,
+      refused: 'writes_not_enabled_for_this_account',
+      detail: `Ada's write rail is currently enabled ONLY for the practice account. ${client.name}'s account stays untouched until Daniel switches it on.`,
+    };
+  }
+
+  const token = envTokenFor(clientCode) ?? process.env.META_ACCESS_TOKEN;
+  if (!token) return { ok: false, refused: 'no Meta token available on this rail' };
+
+  // Rail 2: the campaign fence (card 48), fail-closed.
+  const allowed: string[] = (client.allowed_campaign_ids as string[] | null) ?? [];
+  if (allowed.length === 0) {
+    return { ok: false, refused: `campaign fence: ${clientCode} has no allowed campaigns — writes are disabled (fail-closed)` };
+  }
+
+  // Resolve the campaign the write actually lands in. For creates it is named
+  // in the intent; for pause/budget on an existing object we read the object's
+  // own campaign from Meta rather than trusting the caller.
+  let campaignId = String(intent.campaign_id ?? '');
+  let before: Record<string, unknown> | null = null;
+  if (type !== 'create_ad_set') {
+    const targetId = String(intent.target_id ?? '');
+    if (!targetId) return { ok: false, refused: 'missing target_id' };
+    const edge = type === 'pause_ad' ? 'ad' : 'adset';
+    before = await graphCall(
+      targetId,
+      token,
+      { fields: edge === 'ad' ? 'id,name,status,effective_status,campaign_id,account_id' : 'id,name,status,effective_status,daily_budget,campaign_id,account_id' },
+    );
+    if (`act_${String(before.account_id)}` !== PRACTICE_ACCOUNT) {
+      return { ok: false, refused: `target ${targetId} lives in a different account — refused` };
+    }
+    campaignId = String(before.campaign_id ?? campaignId);
+  }
+  if (!campaignId || !allowed.includes(campaignId)) {
+    return {
+      ok: false,
+      refused: `campaign fence: ${campaignId || '(none named)'} is not in ${clientCode}'s allowed campaigns ${JSON.stringify(allowed)}`,
+    };
+  }
+
+  const settings = intent.settings ?? {};
+  const context = {
+    agentId: `ada_client_${clientCode}`,
+    channelId: 'tinkers-approve-modal',
+    userId: body.user_id ?? 'tinkers-customer',
+    clientScope: { clientCode },
+  };
+
+  if (type === 'create_ad_set') {
+    // Rail 3: paused-only, paused parent.
+    if (settings.status && settings.status !== 'PAUSED') {
+      return { ok: false, refused: `creates are PAUSED-only; got status ${String(settings.status)}` };
+    }
+    const campaign = await graphCall(campaignId, token, { fields: 'id,name,status,effective_status,objective,daily_budget' });
+    if (campaign.effective_status !== 'PAUSED') {
+      return { ok: false, refused: `parent campaign ${campaignId} is ${String(campaign.effective_status)} — the paused-bank rule requires a PAUSED campaign` };
+    }
+
+    const params: Record<string, string> = {
+      name: String(settings.name ?? `ADA TEST // ${new Date().toISOString().slice(0, 10)}`),
+      campaign_id: campaignId,
+      status: 'PAUSED',
+      billing_event: String(settings.billing_event ?? 'IMPRESSIONS'),
+      optimization_goal: String(settings.optimization_goal ?? 'LINK_CLICKS'),
+      targeting: JSON.stringify(settings.targeting ?? { geo_locations: { countries: ['US'] } }),
+    };
+    // Budget only when the campaign is NOT CBO (a CBO campaign carries the budget).
+    const cbo = Boolean(campaign.daily_budget);
+    const budgetUsd = Number(settings.daily_budget_usd ?? 0);
+    if (!cbo) {
+      if (!budgetUsd) return { ok: false, refused: 'campaign is not CBO, so the ad set needs daily_budget_usd' };
+      if (budgetUsd > MAX_DAILY_BUDGET_USD) return { ok: false, refused: `daily budget $${budgetUsd} exceeds the $${MAX_DAILY_BUDGET_USD} test-rail ceiling` };
+      params.daily_budget = String(Math.round(budgetUsd * 100));
+    }
+    if (settings.bid_amount_usd) params.bid_amount = String(Math.round(Number(settings.bid_amount_usd) * 100));
+
+    // Dry-run first (validate_only), then the real create, then read back.
+    await graphCall(`${PRACTICE_ACCOUNT}/adsets`, token, { ...params, execution_options: JSON.stringify(['validate_only']) }, 'POST');
+    const created = await graphCall(`${PRACTICE_ACCOUNT}/adsets`, token, params, 'POST');
+    const after = await graphCall(String(created.id), token, {
+      fields: 'id,name,status,effective_status,daily_budget,campaign_id,optimization_goal,billing_event,targeting',
+    });
+    logWrite({
+      context, toolName: 'execute_action:create_ad_set', targetSystem: 'meta',
+      targetId: String(created.id), before: null, after,
+      reverse: { note: 'delete requires a human — Ada never deletes', object: 'adset', id: String(created.id) },
+      summary: `Created PAUSED ad set "${params.name}" in sandbox campaign ${campaignId} (approve-modal)`,
+      initiatedBy: 'client_approved',
+    });
+    return { ok: true, applied: true, object: after };
+  }
+
+  if (type === 'pause_ad_set' || type === 'pause_ad') {
+    if (before?.status === 'PAUSED') {
+      return { ok: true, applied: false, object: before, note: 'already paused' };
+    }
+    await graphCall(String(intent.target_id), token, { status: 'PAUSED' }, 'POST');
+    const after = await graphCall(String(intent.target_id), token, { fields: 'id,name,status,effective_status,campaign_id' });
+    logWrite({
+      context, toolName: `execute_action:${type}`, targetSystem: 'meta',
+      targetId: String(intent.target_id), before, after,
+      reverse: { method: 'POST', path: String(intent.target_id), params: { status: String(before?.status ?? 'ACTIVE') } },
+      summary: `Paused ${type === 'pause_ad' ? 'ad' : 'ad set'} ${String(before?.name ?? intent.target_id)} (approve-modal)`,
+      initiatedBy: 'client_approved',
+    });
+    return { ok: true, applied: true, object: after };
+  }
+
+  // update_budget on an existing ad set (practice rail only, hard ceiling).
+  const budgetUsd = Number(settings.daily_budget_usd ?? 0);
+  if (!budgetUsd) return { ok: false, refused: 'missing daily_budget_usd' };
+  if (budgetUsd > MAX_DAILY_BUDGET_USD) {
+    return { ok: false, refused: `daily budget $${budgetUsd} exceeds the $${MAX_DAILY_BUDGET_USD} test-rail ceiling` };
+  }
+  await graphCall(String(intent.target_id), token, { daily_budget: String(Math.round(budgetUsd * 100)), execution_options: JSON.stringify(['validate_only']) }, 'POST');
+  await graphCall(String(intent.target_id), token, { daily_budget: String(Math.round(budgetUsd * 100)) }, 'POST');
+  const after = await graphCall(String(intent.target_id), token, { fields: 'id,name,status,effective_status,daily_budget,campaign_id' });
+  logWrite({
+    context, toolName: 'execute_action:update_budget', targetSystem: 'meta',
+    targetId: String(intent.target_id), before, after,
+    reverse: { method: 'POST', path: String(intent.target_id), params: { daily_budget: String(before?.daily_budget ?? '') } },
+    summary: `Set daily budget $${budgetUsd} on ad set ${String(before?.name ?? intent.target_id)} (approve-modal)`,
+    initiatedBy: 'client_approved',
+  });
+  return { ok: true, applied: true, object: after };
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     const url = req.url ?? '/';
@@ -1095,6 +1389,30 @@ const server = http.createServer(async (req, res) => {
       }
       // Internal (unscoped) team chat — unchanged. Streams its own SSE response.
       await handleChatStream(parsed, res);
+      return;
+    }
+
+    if (req.method === 'POST' && (url === '/execute-action' || url === '/execute-action/')) {
+      const key = req.headers['x-assist-key'];
+      if (!ASSIST_SECRET || key !== ASSIST_SECRET) {
+        sendJson(res, 401, { ok: false, error: 'unauthorized' });
+        return;
+      }
+      let parsed: ExecuteActionRequest;
+      try {
+        const raw = await readBody(req);
+        parsed = raw ? (JSON.parse(raw) as ExecuteActionRequest) : {};
+      } catch (e) {
+        sendJson(res, 400, { ok: false, error: `bad request: ${(e as Error).message}` });
+        return;
+      }
+      try {
+        const result = await handleExecuteAction(parsed);
+        sendJson(res, 200, result);
+      } catch (e) {
+        console.error('[ada-console-assist] /execute-action error:', e);
+        sendJson(res, 200, { ok: false, error: `execution failed: ${(e as Error).message}` });
+      }
       return;
     }
 

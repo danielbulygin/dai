@@ -56,6 +56,16 @@ export interface GuardPolicy {
   allowMediaUpload: boolean;
   /** client_codes that resolve to the TEST account/BM. Empty = deny all client-targeted mutations. */
   testClientCodes: string[];
+  /**
+   * CAMPAIGN FENCE (card 48). Per client_code, the campaign ids Ada may write
+   * inside — the code-level home of "Ada works ONLY in [MD Managed]"
+   * (Matrinova's explicit ask, 2026-07-27 call). Semantics:
+   *   - key absent            → no fence configured for that client (unchanged behavior)
+   *   - empty list / null     → Ada may write NOWHERE in that client's account (fail-closed)
+   *   - non-empty list        → any write naming a campaign outside the list is denied
+   * Loaded from clients.allowed_campaign_ids by the caller. Reads are never fenced.
+   */
+  allowedCampaignsByClient?: Record<string, string[] | null>;
   /** Telemetry callback fired on every decision (used to PROVE the guard fired). */
   onDecision?: (d: GuardDecision) => void;
 }
@@ -202,6 +212,28 @@ function readClientCode(input: unknown): string | undefined {
   return undefined;
 }
 
+/**
+ * Every campaign id named anywhere in a tool input (campaign_id / campaignId /
+ * campaign_ids, up to three levels deep). Used by the campaign fence: a write
+ * that names a campaign outside the client's allow-list is denied no matter
+ * which tool carries it.
+ */
+export function readCampaignIds(input: unknown, depth = 0): string[] {
+  if (depth > 3 || !input || typeof input !== 'object') return [];
+  const out: string[] = [];
+  for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
+    if (/^campaign_?ids?$/i.test(key)) {
+      const values = Array.isArray(value) ? value : [value];
+      for (const v of values) {
+        if (typeof v === 'string' || typeof v === 'number') out.push(String(v));
+      }
+    } else if (value && typeof value === 'object') {
+      out.push(...readCampaignIds(value, depth + 1));
+    }
+  }
+  return out;
+}
+
 /** The core policy decision. Pure function — easy to unit-test. */
 export function decide(
   toolName: string,
@@ -244,6 +276,35 @@ export function decide(
         ...base,
         decision: 'deny',
         reason: `client_code ${clientCode} is not in the allowed account list ${JSON.stringify(policy.testClientCodes)}`,
+      };
+    }
+  }
+
+  // CAMPAIGN FENCE (card 48) — checked before ANY write can be allowed, so no
+  // later allow-list can override it. Reads exited at the top of this function
+  // and are never fenced. Two teeth:
+  //   1. A write that NAMES a campaign outside the client's allow-list → deny.
+  //   2. A client whose fence is configured EMPTY (allowed_campaign_ids = []
+  //      or null in the clients row) gets NO launch mutations at all, even
+  //      ones that name no campaign → fail-closed, "Ada may write nowhere in
+  //      this account" is enforceable, not aspirational.
+  const fence = clientCode ? policy.allowedCampaignsByClient?.[clientCode] : undefined;
+  if (fence !== undefined) {
+    const allowed = fence ?? [];
+    const named = readCampaignIds(input);
+    const outside = named.filter((id) => !allowed.includes(id));
+    if (outside.length > 0) {
+      return {
+        ...base,
+        decision: 'deny',
+        reason: `campaign fence: ${outside.join(', ')} not in ${clientCode}'s allowed campaigns ${JSON.stringify(allowed)}`,
+      };
+    }
+    if (allowed.length === 0 && LAUNCH_MUTATIONS.has(bare)) {
+      return {
+        ...base,
+        decision: 'deny',
+        reason: `campaign fence: ${clientCode} has no allowed campaigns — writes are disabled for this account (fail-closed)`,
       };
     }
   }
