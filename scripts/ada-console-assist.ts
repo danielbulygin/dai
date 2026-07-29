@@ -1657,9 +1657,27 @@ const server = http.createServer(async (req, res) => {
       }
       try {
         const result = await handleExecuteAction(parsed);
+        // Customer watch: refusals and failures land in ops_events so
+        // "did it all work for them?" is answerable with one query.
+        if (!result.ok) {
+          void getSupabase()
+            .from('ops_events')
+            .insert({
+              level: result.refused ? 'warn' : 'error',
+              source: 'executor',
+              client_code: (parsed.client_code ?? '').toUpperCase() || null,
+              message: String(result.refused ?? result.error ?? 'execution failed').slice(0, 2000),
+              meta: { type: parsed.intent?.type ?? null },
+            })
+            .then(({ error }) => { if (error) console.error('[execute-action] ops log failed:', error.message); });
+        }
         sendJson(res, 200, result);
       } catch (e) {
         console.error('[ada-console-assist] /execute-action error:', e);
+        void getSupabase()
+          .from('ops_events')
+          .insert({ level: 'error', source: 'executor', client_code: (parsed.client_code ?? '').toUpperCase() || null, message: `execution threw: ${(e as Error).message}`.slice(0, 2000), meta: { type: parsed.intent?.type ?? null } })
+          .then(() => undefined);
         sendJson(res, 200, { ok: false, error: `execution failed: ${(e as Error).message}` });
       }
       return;
