@@ -52,6 +52,7 @@ import { buildClientOverlay } from '../src/client-agents/prompt-builder.js';
 import { getSupabase } from '../src/integrations/supabase.js';
 import { envTokenFor } from '../src/integrations/meta-token.js';
 import { logWrite } from '../src/agents/action-log.js';
+import { remember as rememberLearning } from '../src/agents/tools/memory-tools.js';
 
 const PORT = Number(process.env.ADA_ASSIST_PORT ?? 8092);
 const HOST = '0.0.0.0';
@@ -1603,6 +1604,40 @@ const server = http.createServer(async (req, res) => {
       }
       // Internal (unscoped) team chat — unchanged. Streams its own SSE response.
       await handleChatStream(parsed, res);
+      return;
+    }
+
+    if (req.method === 'POST' && (url === '/learn' || url === '/learn/')) {
+      // Card 39's learning half: a customer's reasoned thumbs-down becomes a
+      // tenant-scoped learning. Server-side scoping only — the client code
+      // comes from the authenticated tinkers route, and the learning is
+      // written under agent ada_client_<CODE> with the code as its row scope,
+      // exactly like a scoped chat's own remember call.
+      const key = req.headers['x-assist-key'];
+      if (!ASSIST_SECRET || key !== ASSIST_SECRET) {
+        sendJson(res, 401, { ok: false, error: 'unauthorized' });
+        return;
+      }
+      let parsed: { client_code?: string; category?: string; content?: string };
+      try {
+        const raw = await readBody(req);
+        parsed = raw ? JSON.parse(raw) : {};
+      } catch (e) {
+        sendJson(res, 400, { ok: false, error: `bad request: ${(e as Error).message}` });
+        return;
+      }
+      const code = (parsed.client_code ?? '').toUpperCase().trim();
+      if (!code || !parsed.content) {
+        sendJson(res, 400, { ok: false, error: 'client_code and content required' });
+        return;
+      }
+      const result = await rememberLearning({
+        content: String(parsed.content).slice(0, 2000),
+        category: (parsed.category ?? 'customer_feedback').slice(0, 60),
+        agent_id: `ada_client_${code}`,
+        client_code: code,
+      });
+      sendJson(res, 200, { ok: result.saved, id: result.id, deduplicated: result.deduplicated ?? false });
       return;
     }
 
