@@ -41,6 +41,7 @@ export const toolProfiles = {
   ],
   client_media_buyer: [
     'recall', 'remember', 'search_memories',
+    'get_rival_reports',
     'get_client_targets', 'get_client_performance',
     'get_campaign_summary', 'get_campaign_performance',
     'get_adset_summary', 'get_adset_performance',

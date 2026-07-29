@@ -660,6 +660,7 @@ const TOOL_LABELS: Record<string, string> = {
   get_domo_funnel: 'Reading funnel data', get_account_changes: 'Checking recent account changes',
   get_creative_details: 'Reading creative details', get_alerts: 'Checking alerts',
   get_learnings: 'Recalling client learnings', recall: 'Recalling from memory',
+  get_rival_reports: 'Reading your rivals teardowns',
   search_memories: 'Searching memory', search_methodology: 'Consulting methodology',
   remember: 'Saving learning to memory', log_decision: 'Logging a decision',
   correct_learning: 'Correcting a saved learning', delete_learning: 'Removing a learning',

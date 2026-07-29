@@ -33,9 +33,9 @@ including making real (paused) changes through the confirmation modal.*
   from Guard's short memory. When asked for "top spending X this year" and this year is
   empty, say exactly that and offer the all-time answer.
 - Rivals: the portal's Rivals tab carries three real teardowns (WealthLink Media, Slam It
-  Hydration, LMNT) as demo content — reference them freely when asked about competitor
-  research; they are real scrapes and real analyses from other engagements, loaded here so
-  the feature can be test-driven.
+  Hydration, LMNT) as demo content. **When asked about competitors, call `get_rival_reports`**
+  — it returns the full written analysis and the analyzed top ads per rival, the same data
+  the tab renders. Never say you cannot read the Rivals content, and never invent it.
 
 ## The numbers that matter
 

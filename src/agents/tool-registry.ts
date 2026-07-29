@@ -3365,6 +3365,73 @@ register({
 
 register({
   definition: {
+    name: 'get_rival_reports',
+    description:
+      "Read the client's rival teardowns — the same content their Rivals tab renders: per rival, the library stats (ads live, video share, ad ages), Ada's full written analysis, and the analyzed top ads (hook, days live, copy count). Use whenever the customer asks about their competitors, rivals, or what the competition is running.",
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        rival: {
+          type: 'string',
+          description: 'Optional: a rival name or slug to fetch just one report (e.g. "slamit"). Omit for all rivals.',
+        },
+      },
+    },
+  },
+  async execute(input, context) {
+    // Tenant boundary: rivals data is read strictly through the verified
+    // client scope — the same member-wide resolution the Rivals tab uses.
+    const clientCode = context.clientScope?.clientCode;
+    if (!clientCode) return JSON.stringify({ error: 'get_rival_reports requires client scope' });
+    try {
+      const sb = getSupabase();
+      const { data: client } = await sb.from('clients').select('id').eq('code', clientCode).maybeSingle();
+      if (!client) return JSON.stringify({ error: `unknown client ${clientCode}` });
+      const { data: members } = await sb
+        .from('client_memberships')
+        .select('user_id')
+        .eq('client_id', client.id);
+      const ids = (members ?? []).map((m) => m.user_id as string);
+      if (ids.length === 0) return JSON.stringify({ rivals: [], note: 'no members, no teardown row' });
+      const { data: rows } = await sb
+        .from('ada_competitor_teardowns')
+        .select('results')
+        .in('user_id', ids);
+      const results = (rows ?? [])
+        .map((r) => r.results as { rivals?: Array<Record<string, unknown>> } | null)
+        .find((r) => r?.rivals?.length);
+      if (!results?.rivals) {
+        return JSON.stringify({ rivals: [], note: 'no teardown has run for this client yet — say so, never invent rival insights' });
+      }
+      const wanted = typeof input.rival === 'string' ? input.rival.toLowerCase() : null;
+      const rivals = results.rivals
+        .filter((r) =>
+          !wanted ||
+          String(r.slug ?? '').toLowerCase().includes(wanted) ||
+          String(r.name ?? '').toLowerCase().includes(wanted),
+        )
+        .map((r) => ({
+          name: r.name,
+          stats: r.stats,
+          report: r.reportMd,
+          top_ads: ((r.ads as Array<Record<string, unknown>>) ?? []).slice(0, 12).map((a) => ({
+            days_live: a.daysLive,
+            copies: a.copies,
+            kind: a.kind,
+            hook: a.hook ?? a.title,
+            why_it_works: a.read,
+          })),
+          total_ads_analyzed: ((r.ads as unknown[]) ?? []).length,
+        }));
+      return JSON.stringify({ rivals, source: 'the Rivals tab teardown data (real scrapes, real analyses)' });
+    } catch (e) {
+      return JSON.stringify({ error: `rival reports unavailable: ${(e as Error).message}` });
+    }
+  },
+});
+
+register({
+  definition: {
     name: 'search_methodology_safe',
     description:
       'Search media buying methodology knowledge. Returns global best practices and account-specific insights. Results show title, type, category, and confidence — no raw evidence.',

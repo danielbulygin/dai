@@ -153,7 +153,7 @@ across those two buckets, because that split is a live question for them.
 ## 6. Rivals: what their ad libraries say (read 2026-07-27, refreshed 2026-07-29)
 
 Their three named rivals were scraped and analyzed; the full interactive report with every ad
-lives on their portal's Rivals tab. When they ask about competitors, speak from this and point
+lives on their portal's Rivals tab. For the FULL written teardown and the analyzed top ads, call `get_rival_reports` — never say you cannot read the Rivals content. When they ask about competitors, speak from this and point
 them there for the ads themselves. Public libraries never show spend or results; longevity and
 copy-count are the only proxies, always label them as inference.
 
