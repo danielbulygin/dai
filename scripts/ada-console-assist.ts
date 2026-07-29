@@ -630,10 +630,11 @@ function buildScopedChatPrompt(req: AssistRequest, clientCode: string): string {
   );
   parts.push(
     `### Proposing account changes (card 57 — the approve-first rail)\n` +
-    `You cannot change anything in the account yourself, and you never claim otherwise. When the customer asks you to CHANGE something (create an ad set, pause an ad or ad set, change a budget), do this instead of refusing:\n` +
-    `1. Briefly explain what you would do and why, grounded in their numbers and their operating rules.\n` +
+    `You cannot change anything in the account yourself, and you never claim otherwise. When the customer asks you to CHANGE something (create a campaign or ad set, duplicate an ad set, pause an ad or ad set, change a budget), do this instead of refusing:\n` +
+    `1. Briefly explain what you would do and why, grounded in their numbers and their operating rules. NEVER show raw JSON in your prose — the block below renders as a review card, not as text.\n` +
     `2. End your reply with EXACTLY ONE fenced json block of this shape (no other fenced json in the reply):\n` +
-    '```json\n{"proposal": {"type": "create_ad_set" | "pause_ad_set" | "pause_ad" | "update_budget", "campaign_id": "<numeric id>", "campaign_name": "<name>", "target_id": "<ad set / ad id, for pause and budget types>", "settings": {"name": "...", "status": "PAUSED", "daily_budget_usd": 0, "optimization_goal": "...", "billing_event": "...", "targeting_summary": "..."}, "reason": "<one sentence>", "warnings": ["<anything the customer must see, e.g. a budget jump far above their usual>"]}}\n```\n' +
+    '```json\n{"proposal": {"type": "create_ad_set" | "pause_ad_set" | "pause_ad" | "update_budget" | "create_campaign" | "duplicate_ad_set", "campaign_id": "<numeric id>", "campaign_name": "<name>", "target_id": "<ad set / ad id, for pause, budget and duplicate types>", "settings": {"name": "...", "status": "PAUSED", "daily_budget_usd": 0, "bid_strategy": "...", "bid_amount_usd": 0, "optimization_goal": "...", "billing_event": "...", "destination_campaign_id": "...", "targeting_summary": "..."}, "choices": [{"key": "budget_mode", "label": "How should the budget live?", "options": [{"value": "cbo", "label": "One campaign budget (CBO)", "detail": "the campaign spreads it across ad sets"}, {"value": "abo", "label": "Per ad set (ABO)", "detail": "each ad set carries its own budget"}]}], "reason": "<one sentence>", "warnings": ["<anything the customer must see>"]}}\n```\n' +
+    `For create_campaign, ALWAYS put the structure decisions in "choices" instead of deciding yourself — budget_mode (cbo/abo) and bid_strategy (LOWEST_COST_WITHOUT_CAP / LOWEST_COST_WITH_BID_CAP / COST_CAP) at minimum, objective too if the ask is ambiguous (OUTCOME_LEADS / OUTCOME_SALES / OUTCOME_TRAFFIC). Campaign structure is the customer's call, never yours. For duplicate_ad_set, target_id is the SOURCE ad set and settings.destination_campaign_id is where the copy lands.\n` +
     `Rules for proposals:\n` +
     `- Include EVERY setting the change would carry — the customer sees this in a confirmation modal and nothing not listed there may happen. Omit settings keys that do not apply.\n- Settings values must be REAL values (enum constants, numbers, objects). To mirror a setting from the campaign's existing ad sets, OMIT that key entirely (the executor mirrors a sibling ad set for anything omitted) — never write prose like "mirror existing" into a value.\n` +
     `- Creates are ALWAYS status PAUSED. Never propose anything that starts delivery or turns a campaign on.\n` +
@@ -684,15 +685,23 @@ function toolLabel(name: string): string {
  * that Ada did not literally write).
  */
 interface ChatProposal {
-  type: 'create_ad_set' | 'pause_ad_set' | 'pause_ad' | 'update_budget';
+  type: 'create_ad_set' | 'pause_ad_set' | 'pause_ad' | 'update_budget' | 'create_campaign' | 'duplicate_ad_set';
   campaign_id?: string;
   campaign_name?: string;
   target_id?: string;
   settings?: Record<string, unknown>;
+  /** Decisions the CUSTOMER makes in the modal (campaign structure is theirs
+   *  by standing rule): radio groups, merged into settings on approve. */
+  choices?: Array<{
+    key: string;
+    label: string;
+    options: Array<{ value: string; label: string; detail?: string }>;
+    selected?: string;
+  }>;
   reason?: string;
   warnings?: string[];
 }
-const PROPOSAL_TYPES = new Set(['create_ad_set', 'pause_ad_set', 'pause_ad', 'update_budget']);
+const PROPOSAL_TYPES = new Set(['create_ad_set', 'pause_ad_set', 'pause_ad', 'update_budget', 'create_campaign', 'duplicate_ad_set']);
 function parseChatProposal(text: string): ChatProposal | null {
   const fences = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
   for (const fence of fences.reverse()) {
@@ -1144,7 +1153,7 @@ async function loadCampaignFences(): Promise<Record<string, string[] | null>> {
 }
 
 const PRACTICE_ACCOUNT = 'act_1570076840279279';
-const EXEC_TYPES = new Set(['create_ad_set', 'pause_ad_set', 'pause_ad', 'update_budget']);
+const EXEC_TYPES = new Set(['create_ad_set', 'pause_ad_set', 'pause_ad', 'update_budget', 'create_campaign', 'duplicate_ad_set']);
 const GRAPH = 'https://graph.facebook.com/v21.0';
 const MAX_DAILY_BUDGET_USD = 100;
 
@@ -1216,7 +1225,11 @@ async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<s
   // own campaign from Meta rather than trusting the caller.
   let campaignId = String(intent.campaign_id ?? '');
   let before: Record<string, unknown> | null = null;
-  if (type !== 'create_ad_set') {
+  // create_campaign has no campaign to fence yet (it MAKES one, then joins the
+  // fence); duplicate_ad_set fences its DESTINATION inside its own handler —
+  // the source is only read, and reads are never fenced.
+  const selfFenced = type === 'create_campaign' || type === 'duplicate_ad_set';
+  if (type !== 'create_ad_set' && !selfFenced) {
     const targetId = String(intent.target_id ?? '');
     if (!targetId) return { ok: false, refused: 'missing target_id' };
     const edge = type === 'pause_ad' ? 'ad' : 'adset';
@@ -1230,7 +1243,7 @@ async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<s
     }
     campaignId = String(before.campaign_id ?? campaignId);
   }
-  if (!campaignId || !allowed.includes(campaignId)) {
+  if (!selfFenced && (!campaignId || !allowed.includes(campaignId))) {
     return {
       ok: false,
       refused: `campaign fence: ${campaignId || '(none named)'} is not in ${clientCode}'s allowed campaigns ${JSON.stringify(allowed)}`,
@@ -1244,6 +1257,106 @@ async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<s
     userId: body.user_id ?? 'tinkers-customer',
     clientScope: { clientCode },
   };
+
+  if (type === 'create_campaign') {
+    // Campaign creation grows the fence, so it is practice-rail-only twice
+    // over: the account hard-lock above, and this explicit re-check. The new
+    // campaign is appended to the client's allowed_campaign_ids so follow-up
+    // ad sets / duplicates can land inside it — acceptable ONLY because the
+    // practice lock guarantees we are in the sandbox account (Daniel's
+    // standing instruction, 2026-07-30: "for the test account, allow Ada to
+    // write").
+    if (settings.status && settings.status !== 'PAUSED') {
+      return { ok: false, refused: `campaign creates are PAUSED-only; got ${String(settings.status)}` };
+    }
+    const objective = typeof settings.objective === 'string' && /^OUTCOME_[A-Z_]+$/.test(settings.objective)
+      ? settings.objective
+      : 'OUTCOME_LEADS';
+    const params: Record<string, string> = {
+      name: String(settings.name ?? `ADA TEST CAMPAIGN // ${new Date().toISOString().slice(0, 10)}`),
+      objective,
+      status: 'PAUSED',
+      buying_type: 'AUCTION',
+      special_ad_categories: JSON.stringify([]),
+    };
+    if (typeof settings.bid_strategy === 'string' && /^[A-Z_]+$/.test(settings.bid_strategy)) {
+      params.bid_strategy = settings.bid_strategy;
+    }
+    // budget_mode is one of the customer-selected choices: 'cbo' carries the
+    // campaign budget; 'abo' leaves budgets to the ad sets.
+    if (settings.budget_mode === 'cbo') {
+      const b = Number(settings.daily_budget_usd ?? 0);
+      if (!b) return { ok: false, refused: 'CBO chosen but no daily_budget_usd' };
+      if (b > MAX_DAILY_BUDGET_USD) return { ok: false, refused: `daily budget $${b} exceeds the $${MAX_DAILY_BUDGET_USD} test-rail ceiling` };
+      params.daily_budget = String(Math.round(b * 100));
+    }
+    await graphCall(`${PRACTICE_ACCOUNT}/campaigns`, token, { ...params, execution_options: JSON.stringify(['validate_only']) }, 'POST');
+    const created = await graphCall(`${PRACTICE_ACCOUNT}/campaigns`, token, params, 'POST');
+    const after = await graphCall(String(created.id), token, { fields: 'id,name,status,effective_status,objective,daily_budget,bid_strategy' });
+    // Grow the fence to include the new campaign (practice account only, by lock).
+    try {
+      await sb
+        .from('clients')
+        .update({ allowed_campaign_ids: [...allowed, String(created.id)] })
+        .eq('code', clientCode);
+    } catch (e) {
+      console.error('[execute-action] fence grow failed:', e);
+    }
+    logWrite({
+      context, toolName: 'execute_action:create_campaign', targetSystem: 'meta',
+      targetId: String(created.id), before: null, after,
+      reverse: { note: 'delete requires a human — Ada never deletes', object: 'campaign', id: String(created.id) },
+      summary: `Created PAUSED campaign "${params.name}" (${objective}, ${String(settings.budget_mode ?? 'abo')}) and fenced it in (approve-modal)`,
+    });
+    return { ok: true, applied: true, object: after };
+  }
+
+  if (type === 'duplicate_ad_set') {
+    const sourceId = String(intent.target_id ?? '');
+    if (!sourceId) return { ok: false, refused: 'missing target_id (the ad set to duplicate)' };
+    const source = await graphCall(sourceId, token, { fields: 'id,name,campaign_id,account_id' });
+    if (`act_${String(source.account_id)}` !== PRACTICE_ACCOUNT) {
+      return { ok: false, refused: `source ad set ${sourceId} lives in a different account — refused` };
+    }
+    // Destination campaign must be inside the fence (re-read: create_campaign
+    // in the same approval batch may have just grown it).
+    const dest = String(settings.destination_campaign_id ?? intent.campaign_id ?? source.campaign_id);
+    const { data: freshClient } = await sb
+      .from('clients')
+      .select('allowed_campaign_ids')
+      .eq('code', clientCode)
+      .maybeSingle();
+    const freshAllowed: string[] = (freshClient?.allowed_campaign_ids as string[] | null) ?? [];
+    if (!freshAllowed.includes(dest)) {
+      return { ok: false, refused: `campaign fence: destination ${dest} is not in ${clientCode}'s allowed campaigns ${JSON.stringify(freshAllowed)}` };
+    }
+    const copyParams: Record<string, string> = {
+      campaign_id: dest,
+      status_option: 'PAUSED',
+      rename_options: JSON.stringify({ rename_suffix: ' — ADA COPY' }),
+    };
+    const copied = await graphCall(`${sourceId}/copies`, token, copyParams, 'POST');
+    const newId = String((copied.copied_adset_id as string | undefined) ?? copied.id ?? '');
+    const after = newId
+      ? await graphCall(newId, token, { fields: 'id,name,status,effective_status,campaign_id,daily_budget,bid_amount' }).catch(() => copied)
+      : copied;
+    // Optional bid override on the fresh copy (the BitCap flow), ceiling-guarded.
+    if (newId && settings.bid_amount_usd) {
+      const bid = Number(settings.bid_amount_usd);
+      if (bid > 0 && bid <= MAX_DAILY_BUDGET_USD) {
+        await graphCall(newId, token, { bid_amount: String(Math.round(bid * 100)) }, 'POST').catch((e) => {
+          console.error('[execute-action] bid override failed:', e);
+        });
+      }
+    }
+    logWrite({
+      context, toolName: 'execute_action:duplicate_ad_set', targetSystem: 'meta',
+      targetId: newId || sourceId, before: source, after,
+      reverse: { note: 'delete requires a human — Ada never deletes', object: 'adset', id: newId },
+      summary: `Duplicated ad set "${String(source.name)}" into campaign ${dest}, PAUSED (approve-modal)`,
+    });
+    return { ok: true, applied: true, object: after };
+  }
 
   if (type === 'create_ad_set') {
     // Rail 3: paused-only, paused parent.
@@ -1299,6 +1412,7 @@ async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<s
       params.daily_budget = String(Math.round(budgetUsd * 100));
     }
     if (settings.bid_amount_usd) params.bid_amount = String(Math.round(Number(settings.bid_amount_usd) * 100));
+    if (typeof settings.bid_strategy === 'string' && /^[A-Z_]+$/.test(settings.bid_strategy)) params.bid_strategy = settings.bid_strategy;
 
     // Dry-run first (validate_only), then the real create, then read back.
     await graphCall(`${PRACTICE_ACCOUNT}/adsets`, token, { ...params, execution_options: JSON.stringify(['validate_only']) }, 'POST');
