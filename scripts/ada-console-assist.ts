@@ -635,7 +635,7 @@ function buildScopedChatPrompt(req: AssistRequest, clientCode: string): string {
     `2. End your reply with EXACTLY ONE fenced json block of this shape (no other fenced json in the reply):\n` +
     '```json\n{"proposal": {"type": "create_ad_set" | "pause_ad_set" | "pause_ad" | "update_budget", "campaign_id": "<numeric id>", "campaign_name": "<name>", "target_id": "<ad set / ad id, for pause and budget types>", "settings": {"name": "...", "status": "PAUSED", "daily_budget_usd": 0, "optimization_goal": "...", "billing_event": "...", "targeting_summary": "..."}, "reason": "<one sentence>", "warnings": ["<anything the customer must see, e.g. a budget jump far above their usual>"]}}\n```\n' +
     `Rules for proposals:\n` +
-    `- Include EVERY setting the change would carry — the customer sees this in a confirmation modal and nothing not listed there may happen. Omit settings keys that do not apply.\n` +
+    `- Include EVERY setting the change would carry — the customer sees this in a confirmation modal and nothing not listed there may happen. Omit settings keys that do not apply.\n- Settings values must be REAL values (enum constants, numbers, objects). To mirror a setting from the campaign's existing ad sets, OMIT that key entirely (the executor mirrors a sibling ad set for anything omitted) — never write prose like "mirror existing" into a value.\n` +
     `- Creates are ALWAYS status PAUSED. Never propose anything that starts delivery or turns a campaign on.\n` +
     `- A budget change of 3x or more versus the current value MUST carry a warning naming both numbers.\n` +
     `- You NEVER propose deletes. If asked to delete something, say plainly that deleting is something you never do, and offer pausing instead (as a proposal).\n` +
@@ -1270,15 +1270,25 @@ async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<s
       sibling = ((sib.data as Record<string, unknown>[] | undefined) ?? [])[0] ?? null;
     } catch { /* no sibling — fall back to explicit settings/defaults */ }
 
+    // A proposal is model-written: treat every technical field defensively.
+    // Enum-shaped values pass through; prose ("mirror the existing ad sets")
+    // falls back to the sibling mirror instead of reaching Meta verbatim —
+    // that exact string 400'd the first live approve on 2026-07-29.
+    const enumish = (v: unknown): string | undefined =>
+      typeof v === 'string' && /^[A-Z][A-Z0-9_]*$/.test(v) ? v : undefined;
+    const objish = (v: unknown): Record<string, unknown> | undefined =>
+      v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v as object).length > 0
+        ? (v as Record<string, unknown>)
+        : undefined;
     const params: Record<string, string> = {
       name: String(settings.name ?? `ADA TEST // ${new Date().toISOString().slice(0, 10)}`),
       campaign_id: campaignId,
       status: 'PAUSED',
-      billing_event: String(settings.billing_event ?? sibling?.billing_event ?? 'IMPRESSIONS'),
-      optimization_goal: String(settings.optimization_goal ?? sibling?.optimization_goal ?? 'LINK_CLICKS'),
-      targeting: JSON.stringify(settings.targeting ?? sibling?.targeting ?? { geo_locations: { countries: ['US'] } }),
+      billing_event: enumish(settings.billing_event) ?? enumish(sibling?.billing_event) ?? 'IMPRESSIONS',
+      optimization_goal: enumish(settings.optimization_goal) ?? enumish(sibling?.optimization_goal) ?? 'LINK_CLICKS',
+      targeting: JSON.stringify(objish(settings.targeting) ?? objish(sibling?.targeting) ?? { geo_locations: { countries: ['US'] } }),
     };
-    const promotedObject = settings.promoted_object ?? sibling?.promoted_object;
+    const promotedObject = objish(settings.promoted_object) ?? objish(sibling?.promoted_object);
     if (promotedObject) params.promoted_object = JSON.stringify(promotedObject);
     // Budget only when the campaign is NOT CBO (a CBO campaign carries the budget).
     const cbo = Boolean(campaign.daily_budget);
