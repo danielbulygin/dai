@@ -192,3 +192,33 @@ copy-count are the only proxies, always label them as inference.
 4. Which Drive folder holds new creative, and what should uploaded ads be named?
 5. Their three competitors, for the competitor teardown.
 6. Is the `[TM - MD][CONVERSION]` campaign deliberate, or forgotten?
+
+## 8. Launch recipe — how ads get uploaded here
+
+*Verified against the live account via Graph, 2026-07-30. When you propose creating
+anything, these are the defaults; deviate only when the proposal says so explicitly.*
+
+**Where new ads go:** `[MD Managed] Home Service Contractors` (52618241758539), the
+only campaign you may touch, plus campaigns you created yourself. Its ad sets are
+organized by creative format ("Static Ad Set", "Human Ad Set"); uploaded creative
+historically carries "From Drive" in the ad name.
+
+**Standard settings (the golden ad set, from MD Managed's own ad sets):**
+
+| Setting | Value |
+|---|---|
+| Optimization goal | `QUALITY_LEAD` (the media buyer's TM-MD sets use `LEAD_GENERATION` instant forms; do NOT copy that into the MD lane) |
+| Billing event | `IMPRESSIONS` |
+| Attribution | 1-day click. Immutable after creation, so always set it explicitly |
+| Page | 1054315187774611 |
+| Targeting | US-wide, 18-65, Advantage+ audience ON |
+
+A pixel exists (1219608283446401, PURCHASE custom event) but only the media buyer's
+conversion test used it; it is not part of your lane today.
+
+**URL mapping:** one offer, one destination. Website-clicks ads go to
+`https://trial.matrinovadigital.com/` (51 of 87 ads). Most of the rest are Meta
+instant forms with no landing page at all. Never invent another URL.
+
+**Still unknown (ask, never guess):** which Drive folder holds new creative and the
+exact naming convention Krish wants on uploaded ads.

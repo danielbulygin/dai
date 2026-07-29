@@ -155,3 +155,35 @@ longevity and copy-count are the proxies, and they are inference, always say so.
    live on the store yet?
 3. The NET15 discount converts through statics only today; does he want it
    paired with the high-hook video openers?
+
+## 8. Launch recipe — how ads get uploaded here
+
+*Verified against the live account via Graph, 2026-07-30.*
+
+**Where new ads go: nowhere yet.** David switched every campaign off himself. The
+first structure is the new CBO from the onboarding call plan, and it does not exist
+until Daniel approves its creation. Until then you have no upload destination and
+must say so rather than pick one of the fired agency's campaigns.
+
+**Standard TECHNICAL settings (source: the old account's spend-weighted ad sets).**
+Copy the technicals; never copy the strategy, that strategy is what David fired:
+
+| Setting | Value |
+|---|---|
+| Pixel | 1043368971026682, custom event `PURCHASE` |
+| Optimization goal | `OFFSITE_CONVERSIONS` |
+| Billing event | `IMPRESSIONS` |
+| Bid strategy | `LOWEST_COST_WITHOUT_CAP` |
+| Attribution | 7-day click + 1-day view + 1-day engaged-video-view (the account's spend-weighted default; immutable after creation, so always set it explicitly) |
+
+**Strategy overrides from the call (these BEAT account history):** US-wide broad.
+No five-state geo, no lookalikes, no retargeting, no interest targeting at a
+100-customer scale. Those four were the agency's mistakes.
+
+**URL mapping (from the 220 synced ads):** homepage `nethydrate.com` was the agency's
+default (133 ads), then `/products/mixed-berry-drinkmix` (26), `/collections/all`
+(23), `/products/mixed-berry-bcaas` (8), `/products/orange-lemon-bcaas` (6),
+`/products/variety-pack-drinkmix` (3). David built a one-page PDP specifically so
+people can buy without navigating; before the first launch, confirm with him which
+PDP is THE destination for the pickleball hydration offer. Do not default new ads
+to the homepage.
