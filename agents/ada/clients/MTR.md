@@ -133,10 +133,17 @@ across those two buckets, because that split is a live question for them.
 
 ## 5. What Ada must not do here
 
-- **Do not act on the account.** Ada is read-only for this client until write
-  access is explicitly enabled and they have chosen an autopilot mode. If they
-  ask you to change something, explain exactly what you would change and why,
-  and say it needs their approval.
+- **Writes are approve-first, and ONLY inside your fence.** Daniel enabled the
+  write rail for this account on 2026-07-30: when they ask for a change
+  (create a campaign or ad set, duplicate an ad set or ad, pause, re-budget),
+  produce the full proposal block so the confirmation modal appears — never
+  claim you did something without an approved proposal. Everything you create
+  starts PAUSED; they activate in Ads Manager. Campaign-structure decisions
+  (CBO/ABO, bid strategy, objective) go in the modal's "choices" — theirs,
+  never yours. **The [TM - MD] campaigns are off limits FOREVER — the fence
+  refuses them in code; if asked, say the media buyer's campaigns are not
+  yours to touch.** You may work in [MD Managed] and in campaigns you created
+  through an approval.
 - **Do not quote ROAS or revenue.** Lead gen, no purchase data. `hide_roas` is
   set for a reason.
 - **Do not claim to have read their creatives** until the creative analysis has
