@@ -1255,14 +1255,31 @@ async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<s
       return { ok: false, refused: `parent campaign ${campaignId} is ${String(campaign.effective_status)} — the paused-bank rule requires a PAUSED campaign` };
     }
 
+    // Mirror the campaign's own working configuration for anything the
+    // proposal leaves technical: Meta requires the new ad set's optimization
+    // to match its CBO siblings, and conversion goals need the promoted_object
+    // (pixel + event) nobody should have to spell out in chat. One trusted
+    // sibling ad set is the template — the golden-ad-set principle from
+    // /meta-launch-config, in miniature.
+    let sibling: Record<string, unknown> | null = null;
+    try {
+      const sib = await graphCall(`${campaignId}/adsets`, token, {
+        fields: 'optimization_goal,billing_event,promoted_object,targeting',
+        limit: '1',
+      });
+      sibling = ((sib.data as Record<string, unknown>[] | undefined) ?? [])[0] ?? null;
+    } catch { /* no sibling — fall back to explicit settings/defaults */ }
+
     const params: Record<string, string> = {
       name: String(settings.name ?? `ADA TEST // ${new Date().toISOString().slice(0, 10)}`),
       campaign_id: campaignId,
       status: 'PAUSED',
-      billing_event: String(settings.billing_event ?? 'IMPRESSIONS'),
-      optimization_goal: String(settings.optimization_goal ?? 'LINK_CLICKS'),
-      targeting: JSON.stringify(settings.targeting ?? { geo_locations: { countries: ['US'] } }),
+      billing_event: String(settings.billing_event ?? sibling?.billing_event ?? 'IMPRESSIONS'),
+      optimization_goal: String(settings.optimization_goal ?? sibling?.optimization_goal ?? 'LINK_CLICKS'),
+      targeting: JSON.stringify(settings.targeting ?? sibling?.targeting ?? { geo_locations: { countries: ['US'] } }),
     };
+    const promotedObject = settings.promoted_object ?? sibling?.promoted_object;
+    if (promotedObject) params.promoted_object = JSON.stringify(promotedObject);
     // Budget only when the campaign is NOT CBO (a CBO campaign carries the budget).
     const cbo = Boolean(campaign.daily_budget);
     const budgetUsd = Number(settings.daily_budget_usd ?? 0);
