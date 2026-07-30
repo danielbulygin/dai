@@ -1232,8 +1232,26 @@ async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<s
   if (!token) return { ok: false, refused: 'no Meta token available on this rail' };
 
   // Rail 2: the campaign fence (card 48), fail-closed.
+  //
+  // BOOTSTRAP (2026-07-30, opening Net Hydrate's write lane): create_campaign is
+  // the ONE verb exempt from the empty-fence refusal, because it is the only way
+  // an empty fence can ever become non-empty. The handler below grows the fence
+  // with the campaign it creates, and its own comment already claimed it "MAKES
+  // one, then joins the fence" — but this early return sat above that code, so
+  // the bootstrap was unreachable and the claim was false. It never showed on
+  // Matrinova because their fence was seeded by hand with [MD Managed].
+  //
+  // Exempting it is safe by construction and NOT a hole: rail 1 above already
+  // refused unless Daniel set mode=hitl for this account, a human has clicked
+  // APPROVE on the modal before we are called, creates are PAUSED-only (so the
+  // new campaign cannot deliver or spend), the budget ceiling applies, and the
+  // write is dry-run then read back then logged. Every other verb stays
+  // fail-closed here: an account with no fence still gets no pauses, no budget
+  // edits, no ad sets, no duplicates. Net Hydrate specifically must NOT inherit
+  // the fired agency's 18 paused campaigns as writable — they carry spend, and
+  // the no-edit-after-spend rule forbids touching them at all.
   const allowed: string[] = (client.allowed_campaign_ids as string[] | null) ?? [];
-  if (allowed.length === 0) {
+  if (allowed.length === 0 && type !== 'create_campaign') {
     return { ok: false, refused: `campaign fence: ${clientCode} has no allowed campaigns — writes are disabled (fail-closed)` };
   }
 
