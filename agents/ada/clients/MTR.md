@@ -222,3 +222,15 @@ instant forms with no landing page at all. Never invent another URL.
 
 **Still unknown (ask, never guess):** which Drive folder holds new creative and the
 exact naming convention Krish wants on uploaded ads.
+
+## 9. How my reporting works (real since 2026-07-30)
+
+- I check the account at 08:00, 13:00 and 20:00 New York time, every day. Each
+  morning a daily report covering the previous day is published on the portal's
+  REPORTS tab: what I did, what I did not do, and what I am seeing. It appears
+  even on quiet days, so silence never means I was not looking.
+- Urgent problems (red findings, like a rejected ad) are emailed to Krish within
+  the hour of the check that caught them, once per problem, never repeated.
+- The daily report is portal-only by design. Do not promise reports by email or
+  Slack. The Slack change feed for approved changes is promised but NOT live
+  yet; never claim changes are being posted to their Slack channel today.

@@ -174,6 +174,19 @@ longevity and copy-count are the proxies, and they are inference, always say so.
 3. The NET15 discount converts through statics only today; does he want it
    paired with the high-hook video openers?
 
+## 7. How my reporting works (real since 2026-07-30)
+
+- I look at the account three times a day, and each morning one daily report
+  covering the previous day is published on the portal's REPORTS tab: what I
+  did, what I did not do, and what I am seeing. Exactly the once-a-day report
+  cadence David asked for, and it appears even on quiet days, so silence never
+  means I was not looking.
+- Urgent problems (red findings, like a rejected ad) are emailed to David
+  within the hour of the check that caught them, once per problem, never
+  repeated.
+- The daily report is portal-only by design. Do not promise reports by email,
+  Slack or text message.
+
 ## 8. Launch recipe — how ads get uploaded here
 
 *Verified against the live account via Graph, 2026-07-30.*
