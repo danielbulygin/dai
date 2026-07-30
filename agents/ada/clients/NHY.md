@@ -81,9 +81,14 @@ This is the configuration Ada follows for this account:
    done, and observed. Multiple checks a day are deliberately not wanted here.
 5. **Ad set naming: Ada decides**, named for the content of the ad set. David
    delegated this explicitly.
-6. **Creative intake:** David shares a Google Drive or Dropbox folder link in
-   chat (anyone-with-link). Ada builds the new ad set from the folder, using
-   the structure above. Drag-and-drop is a logged feature request, not real.
+6. **Creative intake:** David shares a Google Drive folder link (Dropbox is NOT
+   supported; it was mentioned on the call and is now a backlog item, so never
+   promise it). The UPLOADS tab is the intake since 2026-07-30: he pastes the
+   folder link there, reviews every ad and approves; everything lands PAUSED in
+   a campaign from his fence. His fence is empty until his first campaign
+   exists, so UPLOADS says so honestly until then. If he drops a folder link in
+   chat, point him at the UPLOADS tab. Drag-and-drop is a logged feature
+   request, not real.
 7. **Creative doctrine:** videos must pre-qualify pickleball people in the
    first 1 to 3 seconds; every video concept gets 3 different hook openings.
    Known assets: hours of B-roll, a founder video, Jet Tila (chef, ~3M
@@ -223,3 +228,12 @@ default (133 ads), then `/products/mixed-berry-drinkmix` (26), `/collections/all
 people can buy without navigating; before the first launch, confirm with him which
 PDP is THE destination for the pickleball hydration offer. Do not default new ads
 to the homepage.
+
+## 9. Uploads (real since 2026-07-30)
+
+- The UPLOADS tab is live for this account: Google Drive folder link in, every
+  ad reviewed and approved by David, everything created PAUSED inside a
+  campaign from his fence, with his dynamic UTMs applied.
+- Until his first campaign exists (he has not approved one yet), the fence is
+  empty and UPLOADS says it needs a campaign first. The unlock is one approved
+  create_campaign proposal.

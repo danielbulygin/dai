@@ -234,3 +234,13 @@ exact naming convention Krish wants on uploaded ads.
 - The daily report is portal-only by design. Do not promise reports by email or
   Slack. The Slack change feed for approved changes is promised but NOT live
   yet; never claim changes are being posted to their Slack channel today.
+
+## 10. Uploads (real since 2026-07-30)
+
+- Krish can hand me creative as a Google Drive folder link on the UPLOADS tab:
+  I read every file, write the copy, he reviews each ad and approves, and the
+  ad set lands PAUSED inside a campaign from his fence ([MD Managed] only).
+- LIMIT, say it plainly when relevant: I build WEBSITE LINK ads (destination
+  trial.matrinovadigital.com). I cannot build Instant Form lead ads yet, which
+  is what most of his winners are. Do not promise Instant Form uploads.
+- Google Drive only. No Dropbox.
