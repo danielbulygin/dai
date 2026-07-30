@@ -1175,6 +1175,18 @@ const DEFAULT_MAX_DAILY_BUDGET_USD = 100;
 interface ExecuteActionRequest {
   client_code?: string;
   user_id?: string;
+  /**
+   * Check-only. Runs every rail, resolves every id the intent names against
+   * Graph, and asks Meta itself via validate_only — then STOPS before the
+   * mutating call. Nothing is written and nothing is logged as a write.
+   *
+   * This exists because Krish approved four actions on 2026-07-30 and got
+   * nothing: one ad set create asking QUALITY_LEAD with no promoted_object,
+   * then three duplicate_ads into an ad set id that never existed. Every one
+   * of those was detectable BEFORE he was shown an APPROVE button — the
+   * executor already dry-ran each write, just one step too late to help him.
+   */
+  dry_run?: boolean;
   intent?: {
     type?: string;
     campaign_id?: string;
@@ -1203,6 +1215,9 @@ async function graphCall(
 
 async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<string, unknown>> {
   const clientCode = (body.client_code ?? '').toUpperCase().trim();
+  const dryRun = body.dry_run === true;
+  /** Stop here when checking: everything upstream passed, nothing was written. */
+  const wouldApply = (detail: string) => ({ ok: true, dry_run: true, would_apply: true, detail });
   const intent = body.intent ?? {};
   const type = intent.type ?? '';
   if (!clientCode || !EXEC_TYPES.has(type)) {
@@ -1345,6 +1360,7 @@ async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<s
       params.daily_budget = String(Math.round(b * 100));
     }
     await graphCall(`${acct}/campaigns`, token, { ...params, execution_options: JSON.stringify(['validate_only']) }, 'POST');
+    if (dryRun) return wouldApply(`would create PAUSED campaign "${params.name}" (${objective})`);
     const created = await graphCall(`${acct}/campaigns`, token, params, 'POST');
     const after = await graphCall(String(created.id), token, { fields: 'id,name,status,effective_status,objective,daily_budget,bid_strategy' });
     // Grow the fence to include the new campaign (practice account only, by lock).
@@ -1389,6 +1405,7 @@ async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<s
       if (`act_${String(src.account_id)}` !== acct) {
         return { ok: false, refused: `source ad ${srcAd} lives in a different account — refused` };
       }
+      if (dryRun) return wouldApply(`would duplicate ad "${String(src.name)}" into ad set ${destAdset}, PAUSED`);
       const copied = await graphCall(`${srcAd}/copies`, token, { adset_id: destAdset, status_option: 'PAUSED' }, 'POST');
       const newId = String((copied.copied_ad_id as string | undefined) ?? copied.id ?? '');
       const after = newId ? await graphCall(newId, token, { fields: 'id,name,status,effective_status,adset_id' }).catch(() => copied) : copied;
@@ -1412,6 +1429,7 @@ async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<s
       creative: JSON.stringify({ creative_id: creativeId }),
     };
     await graphCall(`${acct}/ads`, token, { ...params, execution_options: JSON.stringify(['validate_only']) }, 'POST');
+    if (dryRun) return wouldApply(`would create PAUSED ad "${params.name}" in ad set ${destAdset}`);
     const created = await graphCall(`${acct}/ads`, token, params, 'POST');
     const after = await graphCall(String(created.id), token, { fields: 'id,name,status,effective_status,adset_id,creative' });
     logWrite({
@@ -1447,6 +1465,7 @@ async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<s
       status_option: 'PAUSED',
       rename_options: JSON.stringify({ rename_suffix: ' — ADA COPY' }),
     };
+    if (dryRun) return wouldApply(`would duplicate ad set "${String(source.name)}" into campaign ${dest}, PAUSED`);
     const copied = await graphCall(`${sourceId}/copies`, token, copyParams, 'POST');
     const newId = String((copied.copied_adset_id as string | undefined) ?? copied.id ?? '');
     const after = newId
@@ -1528,6 +1547,7 @@ async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<s
 
     // Dry-run first (validate_only), then the real create, then read back.
     await graphCall(`${acct}/adsets`, token, { ...params, execution_options: JSON.stringify(['validate_only']) }, 'POST');
+    if (dryRun) return wouldApply(`would create PAUSED ad set "${params.name}" in campaign ${campaignId} (${params.optimization_goal}/${params.billing_event})`);
     const created = await graphCall(`${acct}/adsets`, token, params, 'POST');
     const after = await graphCall(String(created.id), token, {
       fields: 'id,name,status,effective_status,daily_budget,campaign_id,optimization_goal,billing_event,targeting',
@@ -1546,6 +1566,7 @@ async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<s
     if (before?.status === 'PAUSED') {
       return { ok: true, applied: false, object: before, note: 'already paused' };
     }
+    if (dryRun) return wouldApply(`would pause ${type === 'pause_ad' ? 'ad' : 'ad set'} "${String(before?.name ?? intent.target_id)}"`);
     await graphCall(String(intent.target_id), token, { status: 'PAUSED' }, 'POST');
     const after = await graphCall(String(intent.target_id), token, { fields: 'id,name,status,effective_status,campaign_id' });
     logWrite({
@@ -1565,6 +1586,7 @@ async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<s
     return { ok: false, refused: `daily budget $${budgetUsd} exceeds the $${maxDailyBudgetUsd} ceiling for ${clientCode}` };
   }
   await graphCall(String(intent.target_id), token, { daily_budget: String(Math.round(budgetUsd * 100)), execution_options: JSON.stringify(['validate_only']) }, 'POST');
+  if (dryRun) return wouldApply(`would set ad set ${String(intent.target_id)} to $${budgetUsd}/day`);
   await graphCall(String(intent.target_id), token, { daily_budget: String(Math.round(budgetUsd * 100)) }, 'POST');
   const after = await graphCall(String(intent.target_id), token, { fields: 'id,name,status,effective_status,daily_budget,campaign_id' });
   logWrite({
