@@ -1158,7 +1158,19 @@ async function loadCampaignFences(): Promise<Record<string, string[] | null>> {
 const PRACTICE_ACCOUNT = 'act_1570076840279279';
 const EXEC_TYPES = new Set(['create_ad_set', 'pause_ad_set', 'pause_ad', 'update_budget', 'create_campaign', 'duplicate_ad_set', 'duplicate_ad', 'create_ad']);
 const GRAPH = 'https://graph.facebook.com/v21.0';
-const MAX_DAILY_BUDGET_USD = 100;
+/**
+ * Default daily-budget ceiling for the approve rail, in USD.
+ *
+ * Per-client override lives in clients.max_daily_budget_usd (migration
+ * 20260730140000). This was a flat 100 while the rail only ever touched the
+ * practice account; the moment a real customer's lane opened, one global number
+ * either blocked them inside their own normal spend range or loosened every
+ * other account to raise one. NULL in the DB keeps this default.
+ *
+ * It is a ceiling, never an authorisation: creates stay PAUSED-only, so no
+ * budget here can cause delivery until a human turns the object on in Meta.
+ */
+const DEFAULT_MAX_DAILY_BUDGET_USD = 100;
 
 interface ExecuteActionRequest {
   client_code?: string;
@@ -1200,7 +1212,7 @@ async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<s
   const sb = getSupabase();
   const { data: client } = await sb
     .from('clients')
-    .select('code, name, ad_account_id, allowed_campaign_ids')
+    .select('code, name, ad_account_id, allowed_campaign_ids, max_daily_budget_usd')
     .eq('code', clientCode)
     .maybeSingle();
   if (!client?.ad_account_id) return { ok: false, refused: `unknown client ${clientCode}` };
@@ -1227,6 +1239,14 @@ async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<s
       detail: `Ada's write rail is switched off for ${client.name}'s account (mode: ${gs ? mode : 'no settings row'}${gs?.stopped_at ? ', STOP pressed' : ''}). Daniel enables accounts one by one.`,
     };
   }
+
+  // The per-client budget ceiling, resolved once for every branch below. A
+  // non-positive or non-finite value is treated as unset rather than as "no
+  // budget allowed", so a bad row cannot silently disable a customer's lane.
+  const configuredCeiling = Number(client.max_daily_budget_usd ?? 0);
+  const maxDailyBudgetUsd = Number.isFinite(configuredCeiling) && configuredCeiling > 0
+    ? configuredCeiling
+    : DEFAULT_MAX_DAILY_BUDGET_USD;
 
   const token = envTokenFor(clientCode) ?? process.env.META_ACCESS_TOKEN;
   if (!token) return { ok: false, refused: 'no Meta token available on this rail' };
@@ -1321,7 +1341,7 @@ async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<s
     if (settings.budget_mode === 'cbo') {
       const b = Number(settings.daily_budget_usd ?? 0);
       if (!b) return { ok: false, refused: 'CBO chosen but no daily_budget_usd' };
-      if (b > MAX_DAILY_BUDGET_USD) return { ok: false, refused: `daily budget $${b} exceeds the $${MAX_DAILY_BUDGET_USD} test-rail ceiling` };
+      if (b > maxDailyBudgetUsd) return { ok: false, refused: `daily budget $${b} exceeds the $${maxDailyBudgetUsd} ceiling for ${clientCode}` };
       params.daily_budget = String(Math.round(b * 100));
     }
     await graphCall(`${acct}/campaigns`, token, { ...params, execution_options: JSON.stringify(['validate_only']) }, 'POST');
@@ -1435,7 +1455,7 @@ async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<s
     // Optional bid override on the fresh copy (the BitCap flow), ceiling-guarded.
     if (newId && settings.bid_amount_usd) {
       const bid = Number(settings.bid_amount_usd);
-      if (bid > 0 && bid <= MAX_DAILY_BUDGET_USD) {
+      if (bid > 0 && bid <= maxDailyBudgetUsd) {
         await graphCall(newId, token, { bid_amount: String(Math.round(bid * 100)) }, 'POST').catch((e) => {
           console.error('[execute-action] bid override failed:', e);
         });
@@ -1500,7 +1520,7 @@ async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<s
     const budgetUsd = Number(settings.daily_budget_usd ?? 0);
     if (!cbo) {
       if (!budgetUsd) return { ok: false, refused: 'campaign is not CBO, so the ad set needs daily_budget_usd' };
-      if (budgetUsd > MAX_DAILY_BUDGET_USD) return { ok: false, refused: `daily budget $${budgetUsd} exceeds the $${MAX_DAILY_BUDGET_USD} test-rail ceiling` };
+      if (budgetUsd > maxDailyBudgetUsd) return { ok: false, refused: `daily budget $${budgetUsd} exceeds the $${maxDailyBudgetUsd} ceiling for ${clientCode}` };
       params.daily_budget = String(Math.round(budgetUsd * 100));
     }
     if (settings.bid_amount_usd) params.bid_amount = String(Math.round(Number(settings.bid_amount_usd) * 100));
@@ -1541,8 +1561,8 @@ async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<s
   // update_budget on an existing ad set (practice rail only, hard ceiling).
   const budgetUsd = Number(settings.daily_budget_usd ?? 0);
   if (!budgetUsd) return { ok: false, refused: 'missing daily_budget_usd' };
-  if (budgetUsd > MAX_DAILY_BUDGET_USD) {
-    return { ok: false, refused: `daily budget $${budgetUsd} exceeds the $${MAX_DAILY_BUDGET_USD} test-rail ceiling` };
+  if (budgetUsd > maxDailyBudgetUsd) {
+    return { ok: false, refused: `daily budget $${budgetUsd} exceeds the $${maxDailyBudgetUsd} ceiling for ${clientCode}` };
   }
   await graphCall(String(intent.target_id), token, { daily_budget: String(Math.round(budgetUsd * 100)), execution_options: JSON.stringify(['validate_only']) }, 'POST');
   await graphCall(String(intent.target_id), token, { daily_budget: String(Math.round(budgetUsd * 100)) }, 'POST');
