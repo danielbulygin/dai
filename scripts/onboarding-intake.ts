@@ -200,13 +200,19 @@ function renderProposal(
   const ready =
     bands.metric && (bands.dream ?? bands.happy ?? bands.nervous ?? bands.kill);
   if (ready) {
-    const bandVal = (b: Prov) => (b && b.value !== null && b.value !== undefined ? Number(b.value) : null);
+    // Model values arrive as the speaker said them ("$49", "49 bucks") —
+    // extract the number for the machine block, keep the original above.
+    const bandVal = (b: Prov) => {
+      if (!b || b.value === null || b.value === undefined) return null;
+      const n = Number(String(b.value).replace(/[^0-9.]/g, ''));
+      return Number.isFinite(n) && n > 0 ? n : null;
+    };
     lines.push('');
     lines.push('```json');
     lines.push(
       JSON.stringify(
         {
-          metric: bands.metric,
+          metric: String(bands.metric).toLowerCase(),
           currency: bands.currency ?? 'USD',
           dream: bandVal(bands.dream),
           happy: bandVal(bands.happy),
