@@ -1213,6 +1213,59 @@ async function graphCall(
   return json;
 }
 
+/**
+ * Card 76: the page-permission / lead-ToS gate for verbs that instantiate an
+ * ad from an existing creative (duplicate_ad, duplicate_ad_set).
+ *
+ * /copies ignores validate_only (corpus Case 15a — it CREATES a real copy),
+ * so the only honest pre-flight is validating an equivalent ad create with the
+ * same creative: Meta then checks everything the copy will need — page
+ * ADVERTISE for the acting system user (the MatrNova 2026-07-30 failure,
+ * root-caused 2026-08-06: the partner grant existed but the page was never
+ * assigned to the system user in OUR Business Manager), leadgen ToS (subcode
+ * 1892181, hit live the same day), and ad-set compatibility. Nothing is
+ * written. Refusals name WHICH side must act, per the write-path constitution.
+ */
+async function validateCreativePlacement(
+  acct: string,
+  token: string,
+  adsetId: string,
+  creativeId: string,
+): Promise<{ ok: true } | { ok: false; refused: string }> {
+  try {
+    await graphCall(`${acct}/ads`, token, {
+      name: 'ADA PREFLIGHT (validate_only — never created)',
+      adset_id: adsetId,
+      status: 'PAUSED',
+      creative: JSON.stringify({ creative_id: creativeId }),
+      execution_options: JSON.stringify(['validate_only']),
+    }, 'POST');
+    return { ok: true };
+  } catch (e) {
+    const msg = (e as Error).message;
+    if (/access to create ads for this page/i.test(msg)) {
+      return {
+        ok: false,
+        refused:
+          `page permission: the Facebook Page behind this ad is not advertisable by Ada's system user. ` +
+          `Fix is on the agency side first: assign the Page to the "Ada" system user in Business Settings ` +
+          `(Ads On Tap Business Manager) with "Create ads"; if that toggle is unavailable, the client's partner ` +
+          `grant on the Page is missing the Ads task. Meta said: ${msg}`,
+      };
+    }
+    if (/lead generation terms|lead ads/i.test(msg)) {
+      return {
+        ok: false,
+        refused:
+          `lead ads terms: this is a lead-form ad and the Page has not accepted Facebook's Lead Generation ` +
+          `Terms of Service for this context — a Page admin on the client's side must accept them at ` +
+          `facebook.com/ads/leadgen/tos, then this action will pass. Meta said: ${msg}`,
+      };
+    }
+    return { ok: false, refused: `pre-flight validation failed: ${msg}` };
+  }
+}
+
 async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<string, unknown>> {
   const clientCode = (body.client_code ?? '').toUpperCase().trim();
   const dryRun = body.dry_run === true;
@@ -1295,6 +1348,10 @@ async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<s
   // own campaign from Meta rather than trusting the caller.
   let campaignId = String(intent.campaign_id ?? '');
   let before: Record<string, unknown> | null = null;
+  // Card 77 slice: update_budget may target the CAMPAIGN itself (CBO accounts
+  // like MatrNova hold the budget there; the ad-set-only version bounced with
+  // Meta's "You can only set an ad set budget or a campaign budget").
+  let budgetTargetIsCampaign = false;
   // create_campaign has no campaign to fence yet (it MAKES one, then joins the
   // fence); duplicate_ad_set fences its DESTINATION inside its own handler —
   // the source is only read, and reads are never fenced.
@@ -1303,15 +1360,23 @@ async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<s
     const targetId = String(intent.target_id ?? '');
     if (!targetId) return { ok: false, refused: 'missing target_id' };
     const edge = type === 'pause_ad' ? 'ad' : 'adset';
-    before = await graphCall(
-      targetId,
-      token,
-      { fields: edge === 'ad' ? 'id,name,status,effective_status,campaign_id,account_id' : 'id,name,status,effective_status,daily_budget,campaign_id,account_id' },
-    );
+    try {
+      before = await graphCall(
+        targetId,
+        token,
+        { fields: edge === 'ad' ? 'id,name,status,effective_status,campaign_id,account_id' : 'id,name,status,effective_status,daily_budget,campaign_id,account_id' },
+      );
+    } catch (e) {
+      // A campaign id has no campaign_id field, so the adset-shaped read
+      // throws. For update_budget only, retry campaign-shaped.
+      if (type !== 'update_budget') throw e;
+      before = await graphCall(targetId, token, { fields: 'id,name,status,effective_status,daily_budget,account_id' });
+      budgetTargetIsCampaign = true;
+    }
     if (`act_${String(before.account_id)}` !== acct) {
       return { ok: false, refused: `target ${targetId} lives in a different account — refused` };
     }
-    campaignId = String(before.campaign_id ?? campaignId);
+    campaignId = budgetTargetIsCampaign ? targetId : String(before.campaign_id ?? campaignId);
   }
   if (!selfFenced && (!campaignId || !allowed.includes(campaignId))) {
     return {
@@ -1401,11 +1466,18 @@ async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<s
     if (type === 'duplicate_ad') {
       const srcAd = String(intent.source_id ?? intent.target_id ?? '');
       if (!srcAd || srcAd === destAdset) return { ok: false, refused: 'missing source_id (the ad to duplicate)' };
-      const src = await graphCall(srcAd, token, { fields: 'id,name,account_id' });
+      const src = await graphCall(srcAd, token, { fields: 'id,name,account_id,creative' });
       if (`act_${String(src.account_id)}` !== acct) {
         return { ok: false, refused: `source ad ${srcAd} lives in a different account — refused` };
       }
-      if (dryRun) return wouldApply(`would duplicate ad "${String(src.name)}" into ad set ${destAdset}, PAUSED`);
+      // Card 76: validate an equivalent create before copying (or claiming a
+      // dry-run "would apply") — the copy itself cannot be validate_only'd.
+      const srcCreativeId = String((src.creative as { id?: string } | undefined)?.id ?? '');
+      if (srcCreativeId) {
+        const gate = await validateCreativePlacement(acct, token, destAdset, srcCreativeId);
+        if (!gate.ok) return { ok: false, refused: gate.refused };
+      }
+      if (dryRun) return wouldApply(`would duplicate ad "${String(src.name)}" into ad set ${destAdset}, PAUSED (validated: page permission, lead-ads terms, ad rules)`);
       const copied = await graphCall(`${srcAd}/copies`, token, { adset_id: destAdset, status_option: 'PAUSED' }, 'POST');
       const newId = String((copied.copied_ad_id as string | undefined) ?? copied.id ?? '');
       const after = newId ? await graphCall(newId, token, { fields: 'id,name,status,effective_status,adset_id' }).catch(() => copied) : copied;
@@ -1460,12 +1532,27 @@ async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<s
     if (!freshAllowed.includes(dest)) {
       return { ok: false, refused: `campaign fence: destination ${dest} is not in ${clientCode}'s allowed campaigns ${JSON.stringify(freshAllowed)}` };
     }
+    // Card 76: the copied ad set brings its ads along, and THOSE need page
+    // permission + lead-ads terms. Validate with one sample ad's creative
+    // against the source set (page/ToS gates are account+page level, not
+    // destination-specific) before copying or claiming "would apply".
+    try {
+      const sampleAds = await graphCall(`${sourceId}/ads`, token, { fields: 'id,creative', limit: '1' });
+      const sample = ((sampleAds.data as Array<{ creative?: { id?: string } }> | undefined) ?? [])[0];
+      const sampleCreativeId = String(sample?.creative?.id ?? '');
+      if (sampleCreativeId) {
+        const gate = await validateCreativePlacement(acct, token, sourceId, sampleCreativeId);
+        if (!gate.ok) return { ok: false, refused: gate.refused };
+      }
+    } catch (e) {
+      console.error('[execute-action] duplicate_ad_set sample validation skipped:', e);
+    }
     const copyParams: Record<string, string> = {
       campaign_id: dest,
       status_option: 'PAUSED',
       rename_options: JSON.stringify({ rename_suffix: ' — ADA COPY' }),
     };
-    if (dryRun) return wouldApply(`would duplicate ad set "${String(source.name)}" into campaign ${dest}, PAUSED`);
+    if (dryRun) return wouldApply(`would duplicate ad set "${String(source.name)}" into campaign ${dest}, PAUSED (validated: page permission, lead-ads terms)`);
     const copied = await graphCall(`${sourceId}/copies`, token, copyParams, 'POST');
     const newId = String((copied.copied_adset_id as string | undefined) ?? copied.id ?? '');
     const after = newId
@@ -1579,21 +1666,39 @@ async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<s
     return { ok: true, applied: true, object: after };
   }
 
-  // update_budget on an existing ad set (practice rail only, hard ceiling).
+  // update_budget on an existing ad set OR its campaign (CBO), hard ceiling.
   const budgetUsd = Number(settings.daily_budget_usd ?? 0);
   if (!budgetUsd) return { ok: false, refused: 'missing daily_budget_usd' };
   if (budgetUsd > maxDailyBudgetUsd) {
     return { ok: false, refused: `daily budget $${budgetUsd} exceeds the $${maxDailyBudgetUsd} ceiling for ${clientCode}` };
   }
+  // CBO awareness (card 77): when the ad set's parent campaign carries the
+  // budget, an ad-set budget write can never succeed — refuse in plain English
+  // and point at the level that works, instead of relaying Meta's riddle.
+  if (!budgetTargetIsCampaign) {
+    const parent = await graphCall(campaignId, token, { fields: 'id,name,daily_budget' });
+    if (parent.daily_budget) {
+      return {
+        ok: false,
+        refused:
+          `budget level: campaign "${String(parent.name)}" (${campaignId}) holds the budget (CBO, currently ` +
+          `$${(Number(parent.daily_budget) / 100).toFixed(0)}/day) — this ad set has no budget of its own. ` +
+          `Propose the change with target_id ${campaignId} (the campaign) instead.`,
+      };
+    }
+  }
+  const levelWord = budgetTargetIsCampaign ? 'campaign' : 'ad set';
   await graphCall(String(intent.target_id), token, { daily_budget: String(Math.round(budgetUsd * 100)), execution_options: JSON.stringify(['validate_only']) }, 'POST');
-  if (dryRun) return wouldApply(`would set ad set ${String(intent.target_id)} to $${budgetUsd}/day`);
+  if (dryRun) return wouldApply(`would set ${levelWord} ${String(intent.target_id)} to $${budgetUsd}/day`);
   await graphCall(String(intent.target_id), token, { daily_budget: String(Math.round(budgetUsd * 100)) }, 'POST');
-  const after = await graphCall(String(intent.target_id), token, { fields: 'id,name,status,effective_status,daily_budget,campaign_id' });
+  const after = await graphCall(String(intent.target_id), token, {
+    fields: budgetTargetIsCampaign ? 'id,name,status,effective_status,daily_budget' : 'id,name,status,effective_status,daily_budget,campaign_id',
+  });
   logWrite({
     context, toolName: 'execute_action:update_budget', targetSystem: 'meta',
     targetId: String(intent.target_id), before, after,
     reverse: { method: 'POST', path: String(intent.target_id), params: { daily_budget: String(before?.daily_budget ?? '') } },
-    summary: `Set daily budget $${budgetUsd} on ad set ${String(before?.name ?? intent.target_id)} (approve-modal)`,
+    summary: `Set daily budget $${budgetUsd} on ${levelWord} ${String(before?.name ?? intent.target_id)} (approve-modal)`,
     initiatedBy: 'client_approved',
   });
   return { ok: true, applied: true, object: after };

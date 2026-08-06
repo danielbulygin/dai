@@ -1,4 +1,3 @@
-import { nanoid } from "nanoid";
 import { logger } from "../../utils/logger.js";
 import { getDaiSupabase } from "../../integrations/dai-supabase.js";
 import { recall as memoryRecall } from "../../memory/search.js";
@@ -83,44 +82,61 @@ export async function remember(params: {
   category: string;
   agent_id: string;
   client_code?: string;
-}): Promise<{ id: string; saved: boolean; deduplicated?: boolean }> {
-  try {
-    const clientCode = normalizeClientCode(params.client_code) ?? null;
-
-    // Check for duplicate/near-duplicate learnings before inserting
-    const existing = await findDuplicateLearning(
-      params.agent_id,
-      params.category,
-      params.content,
-      clientCode,
-    );
-
-    if (existing) {
-      logger.debug(
-        { existingId: existing.id, category: params.category },
-        "Duplicate learning found, skipping insert",
+}): Promise<{ id?: string; saved: boolean; deduplicated?: boolean; error?: string }> {
+  // Card 78 (MatrNova post-mortem): a failed save used to collapse into
+  // {saved:false} with a FABRICATED id — no reason for the model, healthy-
+  // looking to detectSoftError, logged as success in piper_actions. The
+  // customer watched Ada apologise for "a system issue" three times in one
+  // session while our telemetry said nothing happened. Rules now: one retry,
+  // then return the REAL error (top-level `error` string, which is exactly
+  // what detectSoftError keys on), and never invent an id.
+  const clientCode = normalizeClientCode(params.client_code) ?? null;
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      // Check for duplicate/near-duplicate learnings before inserting
+      const existing = await findDuplicateLearning(
+        params.agent_id,
+        params.category,
+        params.content,
+        clientCode,
       );
-      return { id: existing.id, saved: true, deduplicated: true };
+
+      if (existing) {
+        logger.debug(
+          { existingId: existing.id, category: params.category },
+          "Duplicate learning found, skipping insert",
+        );
+        return { id: existing.id, saved: true, deduplicated: true };
+      }
+
+      const learning = await addLearning({
+        agent_id: params.agent_id,
+        category: params.category,
+        content: params.content,
+        confidence: 0.5,
+        client_code: clientCode,
+      });
+
+      logger.debug(
+        { id: learning.id, category: params.category, clientCode },
+        "Saved new memory",
+      );
+
+      return { id: learning.id, saved: true };
+    } catch (error) {
+      lastError = error;
+      logger.error(
+        { error, category: params.category, attempt },
+        "Failed to save memory",
+      );
     }
-
-    const learning = await addLearning({
-      agent_id: params.agent_id,
-      category: params.category,
-      content: params.content,
-      confidence: 0.5,
-      client_code: clientCode,
-    });
-
-    logger.debug(
-      { id: learning.id, category: params.category, clientCode },
-      "Saved new memory",
-    );
-
-    return { id: learning.id, saved: true };
-  } catch (error) {
-    logger.error({ error, category: params.category }, "Failed to save memory");
-    return { id: nanoid(), saved: false };
   }
+  const message = lastError instanceof Error ? lastError.message : String(lastError);
+  return {
+    saved: false,
+    error: `memory save failed after retry: ${message}`,
+  };
 }
 
 export async function updateLearning(params: {
