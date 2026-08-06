@@ -14,6 +14,21 @@ export function registerAdaMonitoringJobs(): void {
     },
   );
 
+  // Loop 1 — the agency morning brief for the pilot clients (board card 81):
+  // per-client narrative with numbers AND meaning, posted to #ada. Runs a few
+  // minutes after the hour so the :00 warehouse sync has finished writing.
+  registerJob(
+    'ada-agency-morning-brief',
+    '10 8 * * 1-5',
+    'Europe/Berlin',
+    async () => {
+      const { runAgencyMorningBrief } = await import(
+        '../monitoring/agency-morning-brief.js'
+      );
+      await runAgencyMorningBrief({ post: true });
+    },
+  );
+
   // Ready-to-Upload backlog check: 10:00 + 17:00 Berlin, every day. Posts to #ada
   // tagging Dan + Nina when there are "Upload and Configure" tasks ready, so the
   // gated launch flow can be kicked off in-thread. Silent when the backlog is empty.

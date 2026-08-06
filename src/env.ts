@@ -20,6 +20,8 @@ const envSchema = z.object({
   NOTION_TOKEN: z.string().optional(),
   NOTION_KANBAN_DB_ID: z.string().optional(),
   SLACK_REVIEW_CHANNEL_ID: z.string().optional(),
+  // Loop 1 agency morning brief channel; defaults to #ada in the module.
+  AGENCY_BRIEF_CHANNEL_ID: z.string().optional(),
   SLACK_USER_TOKEN: z.string().optional(),
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),
