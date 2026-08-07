@@ -666,13 +666,19 @@ async function writeInsights(briefs: AccountBrief[]): Promise<number> {
   return rows.length;
 }
 
-/** Movers already on the ledger from earlier days → persistence phrasing. */
+/**
+ * Movers already on the ledger from earlier days → persistence phrasing.
+ * Two distinct cases (Daniel's question, 2026-08-07): the SAME signal firing
+ * again ("second day running") vs a DIFFERENT signal on an ad that was
+ * already worth watching — in which case yesterday's actual finding is quoted
+ * so the multi-day story reads itself.
+ */
 async function markPersistence(briefs: AccountBrief[]): Promise<void> {
   for (const b of briefs) {
     if (!b.movers.length) continue;
     const { data } = await getDaiSupabase()
       .from('ada_insights')
-      .select('entity_id, derived_at')
+      .select('entity_id, claim, evidence, derived_at')
       .eq('client_code', b.clientRow.code)
       .eq('entity_level', 'ad')
       .eq('kind', 'daily-observation')
@@ -680,10 +686,28 @@ async function markPersistence(briefs: AccountBrief[]): Promise<void> {
       .gte('derived_at', new Date(Date.now() - 3 * 86400_000).toISOString())
       // Rows written within the last 12h are this morning's own run (or a
       // same-day re-run) — yesterday's genuine signals are ~24h old.
-      .lt('derived_at', new Date(Date.now() - 12 * 3600_000).toISOString());
-    const repeat = new Set((data ?? []).map((r: { entity_id: string }) => r.entity_id));
+      .lt('derived_at', new Date(Date.now() - 12 * 3600_000).toISOString())
+      .order('derived_at', { ascending: false });
+    const priorByAd = new Map<string, Array<{ claim: string; kind?: string }>>();
+    for (const r of (data ?? []) as Array<{
+      entity_id: string;
+      claim: string;
+      evidence: { kind?: string } | null;
+    }>) {
+      if (!priorByAd.has(r.entity_id)) priorByAd.set(r.entity_id, []);
+      priorByAd.get(r.entity_id)!.push({ claim: r.claim, kind: r.evidence?.kind });
+    }
     for (const m of b.movers) {
-      if (repeat.has(m.adId)) m.line += ' — _repeat signal, second day running_';
+      const prior = priorByAd.get(m.adId);
+      if (!prior?.length) continue;
+      if (prior.some((p) => p.kind === m.kind)) {
+        m.line += ' — _same signal, second day running_';
+      } else {
+        // Different signal on an already-flagged ad: quote what fired before.
+        // Claims start with the ad name — strip it, the reader is on that line.
+        const prev = prior[0]!.claim.replace(/^"[^"]*" — /, '');
+        m.line += ` — _also flagged yesterday: ${truncate(prev, 90)}_`;
+      }
     }
   }
 }
