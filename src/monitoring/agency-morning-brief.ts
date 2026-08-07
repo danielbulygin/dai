@@ -31,6 +31,11 @@ import {
   findOnset,
   type WhyResult,
 } from './why-clause.js';
+import {
+  judgeSafely,
+  selfCheckLine,
+  type JudgeVerdict,
+} from './daniel-judge.js';
 
 // v1 pilots (Daniel, 2026-08-06). Top-level codes; children join via parent_code.
 export const PILOT_CLIENTS = ['BFM', 'PL'];
@@ -139,6 +144,7 @@ export interface AgencyBriefResult {
   posted: boolean;
   channel: string | null;
   insightsWritten: number;
+  judge: JudgeVerdict | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -967,6 +973,9 @@ export interface RunOptions {
   pilots?: string[];
   now?: Date;
   writeToLedger?: boolean;
+  /** Run the simulated-Dan judge over the composed brief. Defaults to the
+   * value of `post` — every real post is judged, dry runs opt in. */
+  judge?: boolean;
 }
 
 export async function runAgencyMorningBrief(
@@ -1004,15 +1013,42 @@ export async function runAgencyMorningBrief(
     timeZone: 'Europe/Berlin',
   }).format(now);
 
-  const text = [
+  let text = [
     `☀️ *Agency morning brief* — ${dateLine}`,
     ...sections,
     '_Numbers are each account\'s own local day, verified against the warehouse sync before quoting. Pilot: Brain.fm + Press London._',
   ].join('\n\n');
 
+  // The simulated-Dan judge: grade before posting; a weak brief still posts,
+  // wearing its self-check. A judge failure never blocks the brief.
+  let judge: JudgeVerdict | null = null;
+  if (opts.judge ?? opts.post ?? false) {
+    judge = await judgeSafely(text);
+    if (judge) {
+      const check = selfCheckLine(judge);
+      if (check) text = `${text}\n\n${check}`;
+      logger.info(
+        { overall: judge.overall, linter: judge.linter.length },
+        'Daniel-judge verdict on the brief',
+      );
+    }
+  }
+
   let insightsWritten = 0;
   if (writeToLedger) {
     insightsWritten = await writeInsights(allBriefs);
+    if (judge) {
+      await getDaiSupabase().from('ada_insights').insert({
+        client_code: 'AGENCY',
+        entity_level: 'business',
+        kind: 'judge',
+        claim: `Brief ${dateLine}: ${judge.overall}/10 on the Daniel bar. Unanswerable question: ${judge.daniel_question}`,
+        evidence: judge as unknown as Record<string, unknown>,
+        recheck: { metric: 'judge_score', note: 'does tomorrow’s brief answer this question and score higher?' },
+        source: 'loop-1-brief',
+      });
+      insightsWritten += 1;
+    }
   }
 
   let posted = false;
@@ -1023,5 +1059,5 @@ export async function runAgencyMorningBrief(
     logger.info({ channel, insightsWritten }, 'Agency morning brief posted');
   }
 
-  return { text, accounts: allBriefs, posted, channel: opts.post ? channel : null, insightsWritten };
+  return { text, accounts: allBriefs, posted, channel: opts.post ? channel : null, insightsWritten, judge };
 }
