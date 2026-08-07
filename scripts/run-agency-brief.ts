@@ -34,6 +34,9 @@ async function main(): Promise<void> {
       .map((a) => `${a.clientRow.code}:${a.status}`)
       .join(' ')} · insights written: ${result.insightsWritten} · posted: ${result.posted}`,
   );
+  if (result.judge) {
+    console.log(`judge: ${JSON.stringify(result.judge)}`);
+  }
 }
 
 main().catch((err) => {
