@@ -41,6 +41,12 @@ import {
   type LaunchVerdict,
   type WatchInput,
 } from './launch-verdicts.js';
+import {
+  applyWalkOutcomes,
+  walkAdInsights,
+  type LedgerInsight,
+  type WalkedInsight,
+} from './ledger-walker.js';
 
 // v1 pilots (Daniel, 2026-08-06). Top-level codes; children join via parent_code.
 export const PILOT_CLIENTS = ['BFM', 'PL'];
@@ -140,6 +146,8 @@ export interface AccountBrief {
   movers: Mover[];
   newAds: Array<{ adId: string; adName: string; spend: number; results: number }>;
   watchVerdicts: LaunchVerdict[];
+  /** Prior days' ad-level claims, re-checked against this reporting day. */
+  followUps: WalkedInsight[];
   day?: AccountDay;
   trailing?: AccountDay[];
 }
@@ -205,7 +213,7 @@ function money(value: number, currency: string, decimals = 0): string {
 // ---------------------------------------------------------------------------
 
 /** Pilot code → its clients row + all active children (parent_code). */
-async function fetchClientGroup(code: string): Promise<ClientRow[]> {
+export async function fetchClientGroup(code: string): Promise<ClientRow[]> {
   const { data, error } = await getSupabase()
     .from('clients')
     .select(
@@ -246,7 +254,7 @@ async function fetchAccountDaily(clientId: string, since: string): Promise<Accou
  * has ~2800 ad-days in the window. Page explicitly; silent truncation here
  * would quietly blind the movers detector to the newest days.
  */
-async function fetchAdDaily(clientId: string, since: string): Promise<AdDay[]> {
+export async function fetchAdDaily(clientId: string, since: string): Promise<AdDay[]> {
   const pageSize = 1000;
   const raw: Record<string, unknown>[] = [];
   for (let from = 0; ; from += pageSize) {
@@ -338,7 +346,7 @@ async function fetchMixShifts(
   );
 }
 
-async function fetchConfigTargets(code: string): Promise<ConfigTargets | null> {
+export async function fetchConfigTargets(code: string): Promise<ConfigTargets | null> {
   const { data } = await getSupabase()
     .from('client_configs')
     .select('config')
@@ -583,7 +591,7 @@ export function detectMovers(
 // What's new (Loop 2's detection seed; keyed on ad_id, and says so)
 // ---------------------------------------------------------------------------
 
-async function detectNewAds(
+export async function detectNewAds(
   clientId: string,
   ads: AdDay[],
   yesterday: string,
@@ -746,7 +754,24 @@ async function writeInsights(briefs: AccountBrief[]): Promise<number> {
         },
       });
     }
+    // The intraday pulse may already have opened a watch for these ads the
+    // afternoon they first spent — one watch per ad, whichever path was first.
+    let alreadyWatched = new Set<string>();
+    if (b.newAds.length) {
+      const { data: watchRows } = await getDaiSupabase()
+        .from('ada_insights')
+        .select('entity_id')
+        .eq('client_code', b.clientRow.code)
+        .eq('kind', 'launch-watch')
+        .in('entity_id', b.newAds.map((n) => n.adId));
+      alreadyWatched = new Set(
+        ((watchRows ?? []) as Array<{ entity_id: string | null }>)
+          .map((r) => r.entity_id)
+          .filter((id): id is string => !!id),
+      );
+    }
     for (const n of b.newAds) {
+      if (alreadyWatched.has(n.adId)) continue;
       rows.push({
         ...base,
         entity_level: 'ad',
@@ -793,6 +818,35 @@ async function fetchActiveWatches(clientCode: string): Promise<WatchInput[]> {
       adId: r.entity_id!,
       adName: r.entity_name ?? r.entity_id!,
       firstSpendDate: r.evidence!.first_spend_date!,
+    }));
+}
+
+/** Live ad-level claims from earlier mornings — the re-check walker's queue. */
+async function fetchActiveAdObservations(clientCode: string): Promise<LedgerInsight[]> {
+  const { data } = await getDaiSupabase()
+    .from('ada_insights')
+    .select('id, entity_id, entity_name, evidence, derived_at')
+    .eq('client_code', clientCode)
+    .eq('entity_level', 'ad')
+    .eq('kind', 'daily-observation')
+    .eq('status', 'active')
+    .gte('derived_at', new Date(Date.now() - 10 * 86400_000).toISOString())
+    .order('derived_at', { ascending: false })
+    .limit(200);
+  return ((data ?? []) as Array<{
+    id: string;
+    entity_id: string | null;
+    entity_name: string | null;
+    evidence: Record<string, unknown> | null;
+    derived_at: string;
+  }>)
+    .filter((r) => r.entity_id && r.evidence)
+    .map((r) => ({
+      id: r.id,
+      entity_id: r.entity_id!,
+      entity_name: r.entity_name,
+      evidence: r.evidence!,
+      derived_at: r.derived_at,
     }));
 }
 
@@ -909,6 +963,7 @@ async function briefAccount(row: ClientRow, now: Date): Promise<AccountBrief> {
     movers: [],
     newAds: [],
     watchVerdicts: [],
+    followUps: [],
   };
 
   if (status === 'dormant') {
@@ -975,6 +1030,21 @@ async function briefAccount(row: ClientRow, now: Date): Promise<AccountBrief> {
         // Ad set spend floors are not in the warehouse — unknown, and the
         // module phrases delivery lines neutrally because of it.
         flooredAdsetIds: undefined,
+        dayLabel,
+      });
+    }
+
+    // Loop 3's ledger walker: yesterday's claims get closed out, not dropped.
+    const openObservations = await fetchActiveAdObservations(row.code);
+    if (openObservations.length) {
+      brief.followUps = walkAdInsights({
+        insights: openObservations,
+        ads,
+        yesterday,
+        accountSpendYesterday: day.spend,
+        trailingAvgDailySpend: avgDaily,
+        currency,
+        todaysMoverAdIds: new Set(brief.movers.map((m) => m.adId)),
         dayLabel,
       });
     }
@@ -1063,6 +1133,10 @@ function renderClientSection(
         ].join('\n'),
       );
     }
+    const followUpLines = b.followUps.filter((f) => f.line);
+    if (followUpLines.length) {
+      out.push(['Follow-ups:', ...followUpLines.map((f) => `• ${f.line}`)].join('\n'));
+    }
   }
   return out.join('\n');
 }
@@ -1138,6 +1212,7 @@ export async function runAgencyMorningBrief(
     insightsWritten = await writeInsights(allBriefs);
     for (const b of allBriefs) {
       if (b.watchVerdicts.length) await updateWatchRows(b.watchVerdicts, b.yesterday);
+      if (b.followUps.length) await applyWalkOutcomes(b.followUps, b.yesterday);
     }
     if (judge) {
       await getDaiSupabase().from('ada_insights').insert({

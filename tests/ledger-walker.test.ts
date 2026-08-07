@@ -1,0 +1,396 @@
+/**
+ * Loop 3's ledger walker — one case per signal × outcome, plus the three rules
+ * that decide what the reader actually SEES.
+ *
+ * What these cases exist to protect:
+ *   1. Every prior-day claim gets an answer. confirmed / resolved / stale is
+ *      always computed — a claim never just stops being mentioned.
+ *   2. Direction matters. A CPA that swung the other way has not confirmed the
+ *      original claim, however big the new move is.
+ *   3. Lines are scarce and never duplicated: an ad already in today's Movers
+ *      section gets an outcome but no follow-up line, one thread gets one line,
+ *      and the section caps at 3 with closures winning the slots.
+ *   4. No relative day words. Days are named via dayLabel or not at all.
+ */
+
+import { describe, expect, it } from 'vitest';
+import {
+  walkAdInsights,
+  type LedgerInsight,
+  type WalkAdDay,
+  type WalkArgs,
+} from '../src/monitoring/ledger-walker.js';
+
+const Y = '2026-08-06'; // the reporting day under test
+const TRAIL = ['2026-08-01', '2026-08-02', '2026-08-03', '2026-08-04', '2026-08-05'];
+
+/** Same shape as the brief's dayLabel: '2026-08-05' → 'Wed, Aug 5'. */
+const dayLabel = (d: string): string =>
+  new Intl.DateTimeFormat('en-US', {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    timeZone: 'UTC',
+  }).format(new Date(`${d}T12:00:00Z`));
+
+interface DaySpec {
+  spend: number;
+  purchases?: number;
+}
+
+/** A trailing series at `trailing` per day plus the reporting day at `day`. */
+function series(adId: string, trailing: DaySpec, day: DaySpec | null): WalkAdDay[] {
+  const row = (date: string, s: DaySpec): WalkAdDay => ({
+    date,
+    ad_id: adId,
+    spend: s.spend,
+    purchases: s.purchases ?? 0,
+    impressions: 20_000,
+    link_clicks: 300,
+  });
+  const rows = TRAIL.map((d) => row(d, trailing));
+  if (day) rows.push(row(Y, day));
+  return rows;
+}
+
+function insight(
+  adId: string,
+  kind: string,
+  evidence: Record<string, unknown> = {},
+  date = '2026-08-05',
+): LedgerInsight {
+  return {
+    id: `ins-${adId}-${kind}-${date}`,
+    entity_id: adId,
+    entity_name: adId,
+    evidence: { date, kind, ...evidence },
+    // The brief derives a claim the morning AFTER its data day.
+    derived_at: `${date}T06:10:00Z`,
+  };
+}
+
+function args(over: Partial<WalkArgs> = {}): WalkArgs {
+  return {
+    insights: [],
+    ads: [],
+    yesterday: Y,
+    accountSpendYesterday: 1000,
+    trailingAvgDailySpend: 1000,
+    currency: 'USD',
+    todaysMoverAdIds: new Set<string>(),
+    dayLabel,
+    ...over,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// cpa_shift
+// ---------------------------------------------------------------------------
+
+describe('cpa_shift re-check', () => {
+  // Trailing: $300/day for 10 purchases → $30 pooled CPA.
+  const trailing: DaySpec = { spend: 300, purchases: 10 };
+  const claim = insight('a1', 'cpa_shift', {
+    yesterday_cpa: 75,
+    trailing_cpa: 30,
+    rel_change: 1.5,
+    yesterday_spend: 300,
+  });
+
+  it('still >25% adverse in the same direction → confirmed, with the day count', () => {
+    // $300 on 5 purchases = $60 CPA vs $30 usual.
+    const [w] = walkAdInsights(
+      args({ insights: [claim], ads: series('a1', trailing, { spend: 300, purchases: 5 }) }),
+    );
+    expect(w!.outcome).toBe('confirmed');
+    expect(w!.value).toBe(60);
+    expect(w!.line).toContain('still elevated');
+    expect(w!.line).toContain('$60.00');
+    expect(w!.line).toContain('$30.00');
+    expect(w!.line).toContain('day 2 of the story');
+  });
+
+  it('back within 25% → resolved, and the closure quotes both numbers', () => {
+    // $330 on 10 purchases = $33 CPA vs $30 usual → 10% off, inside the band.
+    const [w] = walkAdInsights(
+      args({ insights: [claim], ads: series('a1', trailing, { spend: 330, purchases: 10 }) }),
+    );
+    expect(w!.outcome).toBe('resolved');
+    expect(w!.line).toContain('back in range');
+    expect(w!.line).toContain('$33.00');
+    expect(w!.line).toContain('$30.00');
+  });
+
+  it('a big move the OTHER way does not confirm an expensive-CPA claim', () => {
+    // $150 on 10 purchases = $15 CPA — half the usual, opposite of rel_change.
+    const [w] = walkAdInsights(
+      args({ insights: [claim], ads: series('a1', trailing, { spend: 150, purchases: 10 }) }),
+    );
+    expect(w!.outcome).toBe('resolved');
+    expect(w!.evidence.same_direction).toBe(false);
+  });
+
+  it('a cheap-CPA claim confirms on a cheap day, not an expensive one', () => {
+    const cheapClaim = insight('a1', 'cpa_shift', {
+      trailing_cpa: 30,
+      rel_change: -0.5,
+      yesterday_spend: 300,
+    });
+    const stillCheap = walkAdInsights(
+      args({ insights: [cheapClaim], ads: series('a1', trailing, { spend: 150, purchases: 10 }) }),
+    );
+    expect(stillCheap[0]!.outcome).toBe('confirmed');
+    expect(stillCheap[0]!.line).toContain('still cheaper');
+  });
+
+  it('no spend, or too few purchases to judge → stale', () => {
+    const noSpend = walkAdInsights(
+      args({ insights: [claim], ads: series('a1', trailing, null) }),
+    );
+    expect(noSpend[0]!.outcome).toBe('stale');
+    expect(noSpend[0]!.line).toContain('no longer enough delivery to judge');
+    expect(noSpend[0]!.value).toBeNull();
+
+    // Spend is there, but 2 purchases is under the small-numbers floor.
+    const thin = walkAdInsights(
+      args({ insights: [claim], ads: series('a1', trailing, { spend: 300, purchases: 2 }) }),
+    );
+    expect(thin[0]!.outcome).toBe('stale');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// zero_results_on_spend
+// ---------------------------------------------------------------------------
+
+describe('zero_results_on_spend re-check', () => {
+  const trailing: DaySpec = { spend: 300, purchases: 10 };
+  const claim = insight('z1', 'zero_results_on_spend', {
+    yesterday_spend: 320,
+    trailing_avg_purchases: 10,
+  });
+
+  it('still spending at least half as much, still nothing back → confirmed', () => {
+    const [w] = walkAdInsights(
+      args({ insights: [claim], ads: series('z1', trailing, { spend: 280, purchases: 0 }) }),
+    );
+    expect(w!.outcome).toBe('confirmed');
+    expect(w!.value).toBe(0);
+    expect(w!.line).toContain('still nothing back on $280');
+    expect(w!.line).toContain('day 2 of the story');
+  });
+
+  it('a purchase lands → resolved, converting again', () => {
+    const [w] = walkAdInsights(
+      args({ insights: [claim], ads: series('z1', trailing, { spend: 290, purchases: 4 }) }),
+    );
+    expect(w!.outcome).toBe('resolved');
+    expect(w!.value).toBe(4);
+    expect(w!.line).toContain('converting again, 4 purchases on $290');
+  });
+
+  it('spend collapsed → stale, quoting what it used to spend', () => {
+    const [w] = walkAdInsights(
+      args({ insights: [claim], ads: series('z1', trailing, { spend: 12, purchases: 0 }) }),
+    );
+    expect(w!.outcome).toBe('stale');
+    expect(w!.line).toContain('spend collapsed to $12');
+    expect(w!.line).toContain('$320');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// spend_share_shift
+// ---------------------------------------------------------------------------
+
+describe('spend_share_shift re-check', () => {
+  // Trailing $100/day on a $1000/day account → 10% usual share.
+  const trailing: DaySpec = { spend: 100, purchases: 3 };
+  const claim = insight('s1', 'spend_share_shift', {
+    yesterday_spend: 400,
+    trailing_avg_spend: 100,
+    yesterday_share: 0.4,
+    trailing_share: 0.1,
+  });
+
+  it('still more than 8 points shifted the same way → confirmed', () => {
+    // $450 of a $1000 day = 45% vs 10% usual.
+    const [w] = walkAdInsights(
+      args({ insights: [claim], ads: series('s1', trailing, { spend: 450, purchases: 4 }) }),
+    );
+    expect(w!.outcome).toBe('confirmed');
+    expect(w!.value).toBe(0.45);
+    expect(w!.line).toContain('still shifted, $450 vs $100/day usual');
+    expect(w!.line).toContain('10% → 45%');
+  });
+
+  it('share back inside 8 points → resolved', () => {
+    // $150 of a $1000 day = 15% vs 10% usual → a 5-point gap.
+    const [w] = walkAdInsights(
+      args({ insights: [claim], ads: series('s1', trailing, { spend: 150, purchases: 5 }) }),
+    );
+    expect(w!.outcome).toBe('resolved');
+    expect(w!.line).toContain('back to its usual share');
+  });
+
+  it('an ad at zero is stale, never "back to normal"', () => {
+    const [w] = walkAdInsights(
+      args({ insights: [claim], ads: series('s1', trailing, null) }),
+    );
+    expect(w!.outcome).toBe('stale');
+    expect(w!.line).toContain('not spending at all now');
+    expect(w!.line).not.toContain('usual share');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Which claims get walked at all
+// ---------------------------------------------------------------------------
+
+describe('the walk queue', () => {
+  const trailing: DaySpec = { spend: 300, purchases: 10 };
+
+  it('a claim about THIS reporting day is not a prior thread', () => {
+    const sameDay = insight('a1', 'cpa_shift', { trailing_cpa: 30, rel_change: 1.5 }, Y);
+    expect(
+      walkAdInsights(
+        args({ insights: [sameDay], ads: series('a1', trailing, { spend: 300, purchases: 5 }) }),
+      ),
+    ).toHaveLength(0);
+  });
+
+  it('claims older than 10 days are history, not a live thread', () => {
+    const old = insight('a1', 'cpa_shift', { trailing_cpa: 30, rel_change: 1.5 }, '2026-07-20');
+    expect(
+      walkAdInsights(
+        args({ insights: [old], ads: series('a1', trailing, { spend: 300, purchases: 5 }) }),
+      ),
+    ).toHaveLength(0);
+  });
+
+  it('a kind with no cheap re-check is skipped rather than guessed at', () => {
+    const other = insight('a1', 'creative_fatigue', {});
+    expect(
+      walkAdInsights(
+        args({ insights: [other], ads: series('a1', trailing, { spend: 300, purchases: 5 }) }),
+      ),
+    ).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lines: suppression, one-thread-one-line, and the cap
+// ---------------------------------------------------------------------------
+
+describe('follow-up lines', () => {
+  const trailing: DaySpec = { spend: 300, purchases: 10 };
+  const claim = insight('a1', 'cpa_shift', { trailing_cpa: 30, rel_change: 1.5 });
+
+  it("an ad in today's Movers gets an outcome but no duplicate line", () => {
+    const [w] = walkAdInsights(
+      args({
+        insights: [claim],
+        ads: series('a1', trailing, { spend: 330, purchases: 10 }),
+        todaysMoverAdIds: new Set(['a1']),
+      }),
+    );
+    expect(w!.outcome).toBe('resolved'); // the ledger still learns the answer
+    expect(w!.line).toBeNull(); // the Movers section is telling this story
+  });
+
+  it('several days of the same ad+signal are one thread, so one line', () => {
+    const walked = walkAdInsights(
+      args({
+        insights: [
+          insight('a1', 'cpa_shift', { trailing_cpa: 30, rel_change: 1.5 }, '2026-08-04'),
+          insight('a1', 'cpa_shift', { trailing_cpa: 30, rel_change: 1.5 }, '2026-08-05'),
+        ],
+        ads: series('a1', trailing, { spend: 300, purchases: 5 }),
+      }),
+    );
+    expect(walked).toHaveLength(2); // both rows get an outcome...
+    expect(walked.every((w) => w.outcome === 'confirmed')).toBe(true);
+    const lines = walked.filter((w) => w.line);
+    expect(lines).toHaveLength(1); // ...and the oldest owns the line
+    expect(lines[0]!.line).toContain('day 3 of the story'); // Aug 4 → Aug 6
+  });
+
+  it('caps at 3 lines, and closures win the slots over live signals', () => {
+    const ads: WalkAdDay[] = [
+      // Three resolved threads: CPA back in range.
+      ...series('r1', trailing, { spend: 330, purchases: 10 }),
+      ...series('r2', trailing, { spend: 320, purchases: 10 }),
+      ...series('r3', trailing, { spend: 310, purchases: 10 }),
+      // Two still-confirmed threads.
+      ...series('c1', trailing, { spend: 300, purchases: 5 }),
+      ...series('c2', trailing, { spend: 300, purchases: 4 }),
+    ];
+    const cpa = (id: string) => insight(id, 'cpa_shift', { trailing_cpa: 30, rel_change: 1.5 });
+    const walked = walkAdInsights(
+      args({
+        insights: [cpa('c1'), cpa('r1'), cpa('c2'), cpa('r2'), cpa('r3')],
+        ads,
+        accountSpendYesterday: 5000,
+        trailingAvgDailySpend: 5000,
+      }),
+    );
+    expect(walked).toHaveLength(5);
+    const lined = walked.filter((w) => w.line);
+    expect(lined).toHaveLength(3);
+    expect(lined.map((w) => w.adId).sort()).toEqual(['r1', 'r2', 'r3']);
+  });
+
+  it('never uses a relative day word — days are named or not mentioned', () => {
+    // One walk per case, so every composed sentence wins a slot and gets read:
+    // the 3-line cap must never be what saves the phrasing rule.
+    const cases: Array<[LedgerInsight, WalkAdDay[]]> = [
+      [
+        insight('a1', 'cpa_shift', { trailing_cpa: 30, rel_change: 1.5 }),
+        series('a1', trailing, { spend: 300, purchases: 5 }), // confirmed
+      ],
+      [
+        insight('a2', 'cpa_shift', { trailing_cpa: 30, rel_change: 1.5 }),
+        series('a2', trailing, { spend: 330, purchases: 10 }), // resolved
+      ],
+      [
+        insight('a3', 'cpa_shift', { trailing_cpa: 30, rel_change: 1.5 }),
+        series('a3', trailing, null), // stale
+      ],
+      [
+        insight('z1', 'zero_results_on_spend', { yesterday_spend: 320 }),
+        series('z1', trailing, { spend: 300, purchases: 0 }), // confirmed
+      ],
+      [
+        insight('z2', 'zero_results_on_spend', { yesterday_spend: 320 }),
+        series('z2', trailing, { spend: 10, purchases: 0 }), // stale
+      ],
+      [
+        insight('s1', 'spend_share_shift', {
+          yesterday_spend: 400,
+          yesterday_share: 0.4,
+          trailing_share: 0.1,
+        }),
+        series('s1', { spend: 100, purchases: 3 }, { spend: 450, purchases: 4 }), // confirmed
+      ],
+      [
+        insight('s2', 'spend_share_shift', {
+          yesterday_spend: 400,
+          yesterday_share: 0.4,
+          trailing_share: 0.1,
+        }),
+        series('s2', { spend: 100, purchases: 3 }, null), // stale
+      ],
+    ];
+
+    for (const [claim, ads] of cases) {
+      const [w] = walkAdInsights(args({ insights: [claim], ads }));
+      expect(w!.line).not.toBeNull();
+      const text = `${w!.line} ${JSON.stringify(w!.evidence)}`.toLowerCase();
+      expect(text).not.toContain('yesterday');
+      expect(text).not.toContain('today');
+      expect(text).not.toContain('tomorrow');
+      // And the day that IS named is named the way the brief names days.
+      expect(w!.line).toContain('Wed, Aug 5');
+    }
+  });
+});
