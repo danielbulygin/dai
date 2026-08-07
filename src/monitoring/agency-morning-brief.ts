@@ -26,6 +26,11 @@ import { getDaiSupabase } from '../integrations/dai-supabase.js';
 import { getDedicatedBotClient } from '../slack/dedicated-bots.js';
 import { env } from '../env.js';
 import { logger } from '../utils/logger.js';
+import {
+  composeWhy,
+  findOnset,
+  type WhyResult,
+} from './why-clause.js';
 
 // v1 pilots (Daniel, 2026-08-06). Top-level codes; children join via parent_code.
 export const PILOT_CLIENTS = ['BFM', 'PL'];
@@ -77,8 +82,14 @@ interface AdDay {
   date: string;
   ad_id: string;
   ad_name: string | null;
+  adset_id: string | null;
   campaign_id: string | null;
   spend: number;
+  impressions: number;
+  link_clicks: number;
+  hook_rate: number | null;
+  frequency: number | null;
+  content_views: number;
   purchases: number;
   results: number | null;
 }
@@ -108,6 +119,7 @@ export interface Mover {
   spendAtStake: number;
   score: number;
   evidence: Record<string, unknown>;
+  why?: WhyResult;
 }
 
 export interface AccountBrief {
@@ -228,7 +240,9 @@ async function fetchAdDaily(clientId: string, since: string): Promise<AdDay[]> {
   for (let from = 0; ; from += pageSize) {
     const { data, error } = await getSupabase()
       .from('ad_daily')
-      .select('date, ad_id, ad_name, campaign_id, spend, purchases, results')
+      .select(
+        'date, ad_id, ad_name, adset_id, campaign_id, spend, impressions, link_clicks, hook_rate, frequency, content_views, purchases, results',
+      )
       .eq('client_id', clientId)
       .gte('date', since)
       .order('date', { ascending: true })
@@ -242,11 +256,74 @@ async function fetchAdDaily(clientId: string, since: string): Promise<AdDay[]> {
     date: String(r.date),
     ad_id: String(r.ad_id),
     ad_name: r.ad_name ? String(r.ad_name) : null,
+    adset_id: r.adset_id ? String(r.adset_id) : null,
     campaign_id: r.campaign_id ? String(r.campaign_id) : null,
     spend: Number(r.spend) || 0,
+    impressions: Number(r.impressions) || 0,
+    link_clicks: Number(r.link_clicks) || 0,
+    hook_rate: r.hook_rate === null ? null : Number(r.hook_rate),
+    frequency: r.frequency === null ? null : Number(r.frequency),
+    content_views: Number(r.content_views) || 0,
     purchases: Number(r.purchases) || 0,
     results: r.results === null ? null : Number(r.results),
   }));
+}
+
+/** Change ledger around the reporting day, for the why-clause join. */
+async function fetchAccountChanges(
+  clientId: string,
+  sinceIso: string,
+): Promise<import('./why-clause.js').ChangeEvent[]> {
+  const { data } = await getSupabase()
+    .from('account_changes')
+    .select('event_time, event_type, object_type, object_id, object_name, actor_name')
+    .eq('client_id', clientId)
+    .gte('event_time', sinceIso)
+    .order('event_time', { ascending: false })
+    .limit(200);
+  return (data ?? []) as import('./why-clause.js').ChangeEvent[];
+}
+
+/** Account-level country/platform spend-mix shifts, yesterday vs trailing. */
+async function fetchMixShifts(
+  clientId: string,
+  yesterday: string,
+  since: string,
+): Promise<import('./why-clause.js').MixShift[]> {
+  const { data } = await getSupabase()
+    .from('breakdowns')
+    .select('date, breakdown_type, breakdown_value, spend')
+    .eq('client_id', clientId)
+    .eq('entity_type', 'account')
+    .in('breakdown_type', ['country', 'platform'])
+    .gte('date', since)
+    .limit(2000);
+  const rows = (data ?? []) as Array<{
+    date: string;
+    breakdown_type: string;
+    breakdown_value: string;
+    spend: number;
+  }>;
+  const shifts: import('./why-clause.js').MixShift[] = [];
+  for (const dim of ['country', 'platform']) {
+    const dimRows = rows.filter((r) => r.breakdown_type === dim);
+    const yRows = dimRows.filter((r) => r.date === yesterday);
+    const tRows = dimRows.filter((r) => r.date < yesterday);
+    const yTotal = yRows.reduce((s, r) => s + (Number(r.spend) || 0), 0);
+    const tTotal = tRows.reduce((s, r) => s + (Number(r.spend) || 0), 0);
+    if (yTotal <= 0 || tTotal <= 0) continue;
+    const values = new Set(dimRows.map((r) => r.breakdown_value));
+    for (const v of values) {
+      const yShare = yRows.filter((r) => r.breakdown_value === v).reduce((s, r) => s + (Number(r.spend) || 0), 0) / yTotal;
+      const tShare = tRows.filter((r) => r.breakdown_value === v).reduce((s, r) => s + (Number(r.spend) || 0), 0) / tTotal;
+      if (Math.abs(yShare - tShare) > 0.08) {
+        shifts.push({ dimension: dim, value: v, fromShare: tShare, toShare: yShare });
+      }
+    }
+  }
+  return shifts.sort(
+    (a, b) => Math.abs(b.toShare - b.fromShare) - Math.abs(a.toShare - a.fromShare),
+  );
 }
 
 async function fetchConfigTargets(code: string): Promise<ConfigTargets | null> {
@@ -641,12 +718,19 @@ async function writeInsights(briefs: AccountBrief[]): Promise<number> {
         entity_id: m.adId,
         entity_name: m.adName,
         kind: 'daily-observation',
-        claim: m.line,
-        evidence: { date: b.yesterday, kind: m.kind, ...m.evidence },
+        claim: m.why ? `${m.line} | why: ${m.why.text}` : m.line,
+        evidence: {
+          date: b.yesterday,
+          kind: m.kind,
+          ...m.evidence,
+          ...(m.why ? { cause_class: m.why.causeClass, why_evidence: m.why.evidence } : {}),
+        },
         recheck: {
           metric: m.kind,
           scope: { client_code: b.clientRow.code, ad_id: m.adId },
-          note: 'does the same signal fire on the next day? escalate on second day',
+          note: m.why
+            ? `is the diagnosed cause (${m.why.causeClass}) still present the next day?`
+            : 'does the same signal fire on the next day? escalate on second day',
         },
       });
     }
@@ -797,6 +881,44 @@ async function briefAccount(row: ClientRow, now: Date): Promise<AccountBrief> {
       : day.spend;
     brief.movers = detectMovers(ads, yesterday, day.spend, avgDaily, currency);
     brief.newAds = await detectNewAds(row.id, ads, yesterday);
+
+    // The why-clause: each mover carries its diagnosis (Loop 3, slice 1).
+    if (brief.movers.length) {
+      const dayBefore = new Date(`${yesterday}T00:00:00Z`);
+      dayBefore.setUTCDate(dayBefore.getUTCDate() - 1);
+      const [changes, mixShifts] = await Promise.all([
+        fetchAccountChanges(row.id, dayBefore.toISOString()),
+        fetchMixShifts(row.id, yesterday, since),
+      ]);
+      for (const m of brief.movers) {
+        const adRows = ads.filter((a) => a.ad_id === m.adId);
+        const ids = new Set(
+          [m.adId, adRows[0]?.adset_id, adRows[0]?.campaign_id].filter(Boolean) as string[],
+        );
+        const direction =
+          m.kind === 'cpa_shift' && Number(m.evidence.rel_change) < 0 ? 'good' : 'bad';
+        m.why = composeWhy({
+          moverKind: m.kind,
+          direction,
+          adRows,
+          peerRows: ads,
+          yesterday,
+          changes: changes.filter((c) => c.object_id && ids.has(c.object_id)),
+          mixShifts,
+          dayLabel,
+        });
+        // Onset: a CPA story that started before yesterday says so.
+        if (m.kind === 'cpa_shift' && direction === 'bad' && m.why) {
+          const trailingCpa = Number(m.evidence.trailing_cpa);
+          if (trailingCpa > 0) {
+            const onset = findOnset(adRows, yesterday, trailingCpa);
+            if (onset.days > 1) {
+              m.why.text = `building since ${dayLabel(onset.firstDate)} (${onset.days} days) — ${m.why.text}`;
+            }
+          }
+        }
+      }
+    }
   }
   return brief;
 }
@@ -815,7 +937,17 @@ function renderClientSection(
     const head = `${label}${b.lines.join('\n')}`;
     out.push(head);
     if (b.movers.length) {
-      out.push(['Movers:', ...b.movers.map((m) => `• ${m.line}`)].join('\n'));
+      out.push(
+        [
+          'Movers:',
+          ...b.movers.map((m) => {
+            const why = m.why
+              ? `\n    ↳ why: ${m.why.text}\n    ↳ next: ${m.why.next}`
+              : '';
+            return `• ${m.line}${why}`;
+          }),
+        ].join('\n'),
+      );
     }
     if (b.newAds.length) {
       const items = b.newAds
