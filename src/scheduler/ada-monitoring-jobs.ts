@@ -29,6 +29,20 @@ export function registerAdaMonitoringJobs(): void {
     },
   );
 
+  // The intraday pulse — between the morning briefs, twice on weekdays (13:40 +
+  // 17:40 Berlin, after the :00 warehouse syncs settle). Posts to #ada ONLY when
+  // something event-worthy happened on a pilot account today; total silence
+  // otherwise. Event-shaped claims only — a partial day is never judged as a day.
+  registerJob(
+    'ada-intraday-pulse',
+    '40 13,17 * * 1-5',
+    'Europe/Berlin',
+    async () => {
+      const { runIntradayPulse } = await import('../monitoring/intraday-pulse.js');
+      await runIntradayPulse({ post: true });
+    },
+  );
+
   // Ready-to-Upload backlog check: 10:00 + 17:00 Berlin, every day. Posts to #ada
   // tagging Dan + Nina when there are "Upload and Configure" tasks ready, so the
   // gated launch flow can be kicked off in-thread. Silent when the backlog is empty.
