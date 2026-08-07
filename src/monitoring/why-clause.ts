@@ -119,14 +119,20 @@ export function readFunnel(adRows: AdDayWhy[], yesterday: string): FunnelRead | 
   const yClicks = sum(y, (r) => r.link_clicks);
   const tClicks = sum(t, (r) => r.link_clicks);
 
-  // hook_rate is stored per-day; weight by impressions to pool it.
-  const yHooks = sum(y, (r) => (r.hook_rate ?? 0) * r.impressions);
-  const tHooks = sum(t, (r) => (r.hook_rate ?? 0) * r.impressions);
+  // hook_rate is stored per-day; weight by impressions to pool it — but ONLY
+  // over rows that carry the field. A null hook_rate (image ads, unpopulated
+  // days) is absence of data, not a 0% hook (review fix 2026-08-08).
+  const yHookRows = y.filter((r) => r.hook_rate !== null);
+  const tHookRows = t.filter((r) => r.hook_rate !== null);
+  const yHooks = sum(yHookRows, (r) => (r.hook_rate ?? 0) * r.impressions);
+  const tHooks = sum(tHookRows, (r) => (r.hook_rate ?? 0) * r.impressions);
+  const yHookImp = sum(yHookRows, (r) => r.impressions);
+  const tHookImp = sum(tHookRows, (r) => r.impressions);
 
   const hasEcomStages = sum(t, (r) => r.content_views) > 0;
 
   return {
-    hook: readStage(yHooks, yImp, tHooks, tImp, 1000),
+    hook: readStage(yHooks, yHookImp, tHooks, tHookImp, 1000),
     click: readStage(yClicks, yImp, tClicks, tImp, 1000),
     convert: readStage(sum(y, (r) => r.purchases), yClicks, sum(t, (r) => r.purchases), tClicks, 20, 0.25),
     cpm: readStage(sum(y, (r) => r.spend) * 1000, yImp, sum(t, (r) => r.spend) * 1000, tImp, 1000),

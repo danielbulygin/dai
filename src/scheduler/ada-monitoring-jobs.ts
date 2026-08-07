@@ -35,7 +35,7 @@ export function registerAdaMonitoringJobs(): void {
   // otherwise. Event-shaped claims only — a partial day is never judged as a day.
   registerJob(
     'ada-intraday-pulse',
-    '40 13,17 * * 1-5',
+    '40 13,17,20 * * 1-5',
     'Europe/Berlin',
     async () => {
       const { runIntradayPulse } = await import('../monitoring/intraday-pulse.js');

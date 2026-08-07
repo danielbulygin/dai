@@ -423,7 +423,7 @@ function recheckOne(
         outcome: 'stale',
         value: null,
         line: `${head}: not enough account history to judge its share (${money(daySpend, currency)} spent)`,
-        evidence: { ...base, origin_spend: round2(originSpend) },
+        evidence: { ...base, origin_spend: originSpend !== null ? round2(originSpend) : null },
       };
     }
     const dayShare = daySpend / args.accountSpendYesterday;
@@ -436,7 +436,7 @@ function recheckOne(
     const sameDirection = originShift === null || (shift >= 0) === (originShift >= 0);
     const ev = {
       ...base,
-      origin_spend: round2(originSpend),
+      origin_spend: originSpend !== null ? round2(originSpend) : null,
       day_share: round2(dayShare),
       trailing_share: round2(trailShare),
       share_shift: round2(shift),

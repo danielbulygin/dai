@@ -388,7 +388,9 @@ function evaluateWatch(
 
   // 7. The calendar floor. Nothing fired, so the checkpoint mornings carry an
   //    honest status rather than silence — and day 7 closes the watch.
-  if (ageDays === 1 || ageDays === 3 || ageDays === 7) {
+  // >= 7, not === 7: a day-7 that lands on a weekend (no weekday brief) must
+  // still close the watch on the next covered morning (review fix 2026-08-08).
+  if (ageDays === 1 || ageDays === 3 || ageDays >= 7) {
     const next =
       ageDays >= 7
         ? 'closing the watch — a week in without enough evidence to judge; it rides the daily movers check from here'

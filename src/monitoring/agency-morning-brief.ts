@@ -310,15 +310,31 @@ async function fetchMixShifts(
   yesterday: string,
   since: string,
 ): Promise<import('./why-clause.js').MixShift[]> {
-  const { data } = await getSupabase()
-    .from('breakdowns')
-    .select('date, breakdown_type, breakdown_value, spend')
-    .eq('client_id', clientId)
-    .eq('entity_type', 'account')
-    .in('breakdown_type', ['country', 'platform'])
-    .gte('date', since)
-    .limit(2000);
-  const rows = (data ?? []) as Array<{
+  // Review fix 2026-08-08: PostgREST caps at 1000 rows and an unordered query
+  // returned an arbitrary (oldest-first) slice — fabrication risk. Mix shifts
+  // only need yesterday vs its trailing week, ordered newest-first, paged.
+  void since;
+  const mixSince = new Date(`${yesterday}T12:00:00Z`);
+  mixSince.setUTCDate(mixSince.getUTCDate() - 8);
+  const mixSinceStr = mixSince.toISOString().slice(0, 10);
+  const pageSize = 1000;
+  const raw: unknown[] = [];
+  for (let from = 0; ; from += pageSize) {
+    const { data, error } = await getSupabase()
+      .from('breakdowns')
+      .select('date, breakdown_type, breakdown_value, spend')
+      .eq('client_id', clientId)
+      .eq('entity_type', 'account')
+      .in('breakdown_type', ['country', 'platform'])
+      .gte('date', mixSinceStr)
+      .lte('date', yesterday)
+      .order('date', { ascending: false })
+      .range(from, from + pageSize - 1);
+    if (error) return [];
+    raw.push(...(data ?? []));
+    if (!data || data.length < pageSize) break;
+  }
+  const rows = raw as Array<{
     date: string;
     breakdown_type: string;
     breakdown_value: string;
@@ -497,7 +513,13 @@ export function detectMovers(
     const trail = history.slice(-7);
     const tSpend = trail.reduce((s, r) => s + r.spend, 0);
     const tPurch = trail.reduce((s, r) => s + r.purchases, 0);
-    const tAvgSpend = tSpend / trail.length;
+    // Review fix 2026-08-08: divide by the ACCOUNT's trailing day count, not
+    // the ad's own spending-day count — an intermittent ad's "usual per day"
+    // must include its zero days, or the money line overstates and the share
+    // direction can invert.
+    const accountTrailingDays =
+      new Set(ads.filter((r) => r.date < yesterday && r.spend > 0).map((r) => r.date)).size || 1;
+    const tAvgSpend = tSpend / Math.min(accountTrailingDays, 7);
     const tAvgPurch = tPurch / trail.length;
     const name = yRow.ad_name ?? yRow.ad_id;
 
@@ -890,6 +912,7 @@ async function markPersistence(briefs: AccountBrief[]): Promise<void> {
       .eq('client_code', b.clientRow.code)
       .eq('entity_level', 'ad')
       .eq('kind', 'daily-observation')
+      .eq('source', 'loop-1-brief') // pulse dedupe rows are events, not flags
       .in('entity_id', b.movers.map((m) => m.adId))
       .gte('derived_at', new Date(Date.now() - 3 * 86400_000).toISOString())
       // Rows written within the last 12h are this morning's own run (or a
@@ -1164,7 +1187,18 @@ export async function runAgencyMorningBrief(
   const allBriefs: AccountBrief[] = [];
 
   for (const code of pilots) {
-    const group = await fetchClientGroup(code);
+    // Per-account isolation (review fix 2026-08-08): one broken account or a
+    // flaky query must never silence the whole brief — it gets an honest
+    // error line instead.
+    let group: ClientRow[] = [];
+    try {
+      group = await fetchClientGroup(code);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error({ err: msg, code }, 'client group fetch failed');
+      sections.push(`*${code}* — ⚠️ could not load this client's accounts (${msg.slice(0, 80)})`);
+      continue;
+    }
     if (!group.length) {
       sections.push(`*${code}* — ⚠️ no active client rows found`);
       continue;
@@ -1172,10 +1206,29 @@ export async function runAgencyMorningBrief(
     const top = group.find((g) => g.code === code) ?? group[0]!;
     const briefs: AccountBrief[] = [];
     for (const row of group) {
-      briefs.push(await briefAccount(row, now));
+      try {
+        briefs.push(await briefAccount(row, now));
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error({ err: msg, code: row.code }, 'account brief failed');
+        briefs.push({
+          clientRow: row,
+          status: 'unverified',
+          yesterday: accountYesterday(row.timezone ?? 'Europe/Berlin', now),
+          lines: [`⚠️ could not build this account's brief (${msg.slice(0, 100)}) — numbers withheld rather than guessed.`],
+          movers: [],
+          newAds: [],
+          watchVerdicts: [],
+          followUps: [],
+        });
+      }
     }
     allBriefs.push(...briefs);
-    await markPersistence(briefs);
+    try {
+      await markPersistence(briefs);
+    } catch (err) {
+      logger.error({ err: err instanceof Error ? err.message : String(err) }, 'persistence pass failed — lines post without repeat tags');
+    }
     sections.push(renderClientSection(top.name, briefs));
   }
 
@@ -1207,7 +1260,18 @@ export async function runAgencyMorningBrief(
     }
   }
 
+  // The post comes FIRST (review fix 2026-08-08): the brief reaching #ada is
+  // the product; bookkeeping failing afterwards is a logged wound, never a
+  // silent morning.
+  let posted = false;
+  const channel = env.AGENCY_BRIEF_CHANNEL_ID ?? DEFAULT_CHANNEL;
+  if (opts.post) {
+    await getDedicatedBotClient('ada').chat.postMessage({ channel, text });
+    posted = true;
+  }
+
   let insightsWritten = 0;
+  try {
   if (writeToLedger) {
     insightsWritten = await writeInsights(allBriefs);
     for (const b of allBriefs) {
@@ -1227,14 +1291,13 @@ export async function runAgencyMorningBrief(
       insightsWritten += 1;
     }
   }
-
-  let posted = false;
-  const channel = env.AGENCY_BRIEF_CHANNEL_ID ?? DEFAULT_CHANNEL;
-  if (opts.post) {
-    await getDedicatedBotClient('ada').chat.postMessage({ channel, text });
-    posted = true;
-    logger.info({ channel, insightsWritten }, 'Agency morning brief posted');
+  } catch (err) {
+    logger.error(
+      { err: err instanceof Error ? err.message : String(err) },
+      'ledger phase failed after posting — brief delivered, bookkeeping incomplete',
+    );
   }
+  if (posted) logger.info({ channel, insightsWritten }, 'Agency morning brief posted');
 
   return { text, accounts: allBriefs, posted, channel: opts.post ? channel : null, insightsWritten, judge };
 }
