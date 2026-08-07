@@ -204,7 +204,13 @@ function renderProposal(
     // extract the number for the machine block, keep the original above.
     const bandVal = (b: Prov) => {
       if (!b || b.value === null || b.value === undefined) return null;
-      const n = Number(String(b.value).replace(/[^0-9.]/g, ''));
+      const raw = String(b.value);
+      // A spoken range ("$100-150") is a human call, not a number — leave the
+      // machine field null and let the quote above carry it (review fix).
+      if (/\d\s*[-–]\s*\d/.test(raw)) return null;
+      const m = raw.match(/(\d+(?:\.\d+)?)\s*(k)?/i);
+      if (!m) return null;
+      const n = Number(m[1]) * (m[2] ? 1000 : 1);
       return Number.isFinite(n) && n > 0 ? n : null;
     };
     lines.push('');
@@ -213,7 +219,8 @@ function renderProposal(
       JSON.stringify(
         {
           metric: String(bands.metric).toLowerCase(),
-          currency: bands.currency ?? 'USD',
+          // null when the calls never named it — inventing USD lied (review fix)
+          currency: bands.currency ?? null,
           dream: bandVal(bands.dream),
           happy: bandVal(bands.happy),
           nervous: bandVal(bands.nervous),

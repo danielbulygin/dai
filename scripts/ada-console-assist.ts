@@ -524,19 +524,34 @@ export function renderDecisionLearningsBlock(
  * learningClientCodeCandidates) and the client agent's own rows
  * (ada_client_<CODE>, what the portal's scoped chat saves).
  */
-async function fetchDecisionLearnings(clientCode: string): Promise<DecisionLearning[]> {
+async function fetchDecisionLearnings(
+  clientCode: string,
+  /** TENANCY WALL (review finding, 2026-08-08): the customer-facing scoped
+   *  chat may ONLY see the client agent's own store (`ada_client_<code>`) —
+   *  agency-authored 'ada' rows are internal notes and quoting them to a
+   *  customer as "decisions you made" is a leak. Internal console: both. */
+  audience: 'internal' | 'customer',
+): Promise<DecisionLearning[]> {
   const code = clientCode.trim();
   if (!code) return [];
   // The client agent id is `ada_client_<code>` with the code's casing as the
   // caller had it (the portal uppercases; a Slack-side config may not), so ask
   // for both spellings rather than silently missing a whole store.
   const agentIds = [...new Set([`ada_client_${code}`, `ada_client_${code.toUpperCase()}`])];
+  // Fetch deep (50) and re-sort by created_at ourselves: getLearnings orders
+  // by updated_at, which incrementApplied bumps on every injection — a fresh
+  // rejection would be evicted from a top-8 cut by frequently-applied old
+  // rows (review finding, 2026-08-08).
+  const FETCH_DEPTH = 50;
   try {
-    const [agencyRows, ...clientRowSets] = await Promise.all([
-      getLearnings('ada', undefined, DECISION_LEARNINGS_LIMIT, learningClientCodeCandidates(code)),
-      ...agentIds.map((id) => getLearnings(id, undefined, DECISION_LEARNINGS_LIMIT)),
+    const sets = await Promise.all([
+      ...(audience === 'internal'
+        ? [getLearnings('ada', undefined, FETCH_DEPTH, learningClientCodeCandidates(code))]
+        : []),
+      ...agentIds.map((id) => getLearnings(id, undefined, FETCH_DEPTH)),
     ]);
-    return [...agencyRows, ...clientRowSets.flat()]
+    return sets
+      .flat()
       .map((l) => ({ id: l.id, created_at: l.created_at, content: l.content }))
       .sort((a, b) => (b.created_at ?? '').localeCompare(a.created_at ?? ''))
       .slice(0, DECISION_LEARNINGS_LIMIT);
@@ -1005,7 +1020,9 @@ async function handleChatStream(
   // AFTER the stream head so the heartbeat is already flowing, and fail-open —
   // an empty list just means no block.
   const decisionClientCode = (scope?.clientCode ?? req.context?.client_code ?? '').trim();
-  const decisionLearnings = decisionClientCode ? await fetchDecisionLearnings(decisionClientCode) : [];
+  const decisionLearnings = decisionClientCode
+    ? await fetchDecisionLearnings(decisionClientCode, scope ? 'customer' : 'internal')
+    : [];
   let proposalType: string | null = null;
 
   let fullText = '';
