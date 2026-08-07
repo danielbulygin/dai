@@ -152,6 +152,17 @@ function isWeekendDate(dateStr: string): boolean {
   return day === 0 || day === 6;
 }
 
+/** '2026-08-05' → 'Wed Aug 5'. Any line touching more than one day names the
+ * days explicitly — relative words ("yesterday") get ambiguous across briefs. */
+function dayLabel(dateStr: string): string {
+  return new Intl.DateTimeFormat('en-US', {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    timeZone: 'UTC',
+  }).format(new Date(`${dateStr}T12:00:00Z`));
+}
+
 function money(value: number, currency: string, decimals = 0): string {
   try {
     return new Intl.NumberFormat('en-US', {
@@ -323,7 +334,7 @@ function composeYesterdayLine(
   config: ConfigTargets | null,
 ): string {
   const parts: string[] = [];
-  parts.push(`${money(day.spend, currency)} spent`);
+  parts.push(`${dayLabel(day.date)}: ${money(day.spend, currency)} spent`);
   parts.push(`${day.purchases} purchase${day.purchases === 1 ? '' : 's'}`);
 
   if (day.purchases >= 3 && day.spend > 0) {
@@ -688,26 +699,30 @@ async function markPersistence(briefs: AccountBrief[]): Promise<void> {
       // same-day re-run) — yesterday's genuine signals are ~24h old.
       .lt('derived_at', new Date(Date.now() - 12 * 3600_000).toISOString())
       .order('derived_at', { ascending: false });
-    const priorByAd = new Map<string, Array<{ claim: string; kind?: string }>>();
+    const priorByAd = new Map<
+      string,
+      Array<{ claim: string; kind?: string; date?: string }>
+    >();
     for (const r of (data ?? []) as Array<{
       entity_id: string;
       claim: string;
-      evidence: { kind?: string } | null;
+      evidence: { kind?: string; date?: string } | null;
     }>) {
       if (!priorByAd.has(r.entity_id)) priorByAd.set(r.entity_id, []);
-      priorByAd.get(r.entity_id)!.push({ claim: r.claim, kind: r.evidence?.kind });
+      priorByAd
+        .get(r.entity_id)!
+        .push({ claim: r.claim, kind: r.evidence?.kind, date: r.evidence?.date });
     }
     for (const m of b.movers) {
       const prior = priorByAd.get(m.adId);
       if (!prior?.length) continue;
-      if (prior.some((p) => p.kind === m.kind)) {
-        m.line += ' — _same signal, second day running_';
-      } else {
-        // Different signal on an already-flagged ad: quote what fired before.
-        // Claims start with the ad name — strip it, the reader is on that line.
-        const prev = prior[0]!.claim.replace(/^"[^"]*" — /, '');
-        m.line += ` — _also flagged yesterday: ${truncate(prev, 90)}_`;
-      }
+      // Claims start with the ad name — strip it, the reader is on that line.
+      const latest = prior[0]!;
+      const prev = truncate(latest.claim.replace(/^"[^"]*" — /, ''), 90);
+      const when = latest.date ? dayLabel(latest.date) : 'the prior brief';
+      m.line += prior.some((p) => p.kind === m.kind)
+        ? ` — _same signal on ${when} too: ${prev}_`
+        : ` — _this ad was also flagged for ${when}: ${prev}_`;
     }
   }
 }
