@@ -23,6 +23,7 @@ async function main(): Promise<void> {
     pilots: val('--pilots')?.split(','),
     writeToLedger: !has('--no-ledger'),
     now: val('--now') ? new Date(val('--now')!) : undefined,
+    judge: has('--judge') ? true : undefined,
   });
 
   console.log('────────────────────────────────────────────');
