@@ -455,14 +455,18 @@ export function detectMovers(
       const tShare = tAvgSpend / accountAvgDailySpend;
       const shift = yShare - tShare;
       if (Math.abs(shift) > 0.08) {
+        // Daniel's rule (2026-08-07): the currency amount leads; the share is
+        // only the meaning, and only worth voicing because it changed.
         movers.push({
           adId: yRow.ad_id,
           adName: name,
           kind: 'spend_share_shift',
           spendAtStake: yRow.spend,
           score: yRow.spend * Math.abs(shift) * 4,
-          line: `"${truncate(name, 48)}" — ${Math.round(yShare * 100)}% of account spend vs ${Math.round(tShare * 100)}% usual`,
+          line: `"${truncate(name, 48)}" — ${money(yRow.spend, currency)} vs ${money(tAvgSpend, currency)}/day usual (share of account ${Math.round(tShare * 100)}% → ${Math.round(yShare * 100)}%)`,
           evidence: {
+            yesterday_spend: yRow.spend,
+            trailing_avg_spend: round2(tAvgSpend),
             yesterday_share: round2(yShare),
             trailing_share: round2(tShare),
           },
@@ -673,7 +677,10 @@ async function markPersistence(briefs: AccountBrief[]): Promise<void> {
       .eq('entity_level', 'ad')
       .eq('kind', 'daily-observation')
       .in('entity_id', b.movers.map((m) => m.adId))
-      .gte('derived_at', new Date(Date.now() - 3 * 86400_000).toISOString());
+      .gte('derived_at', new Date(Date.now() - 3 * 86400_000).toISOString())
+      // Rows written within the last 12h are this morning's own run (or a
+      // same-day re-run) — yesterday's genuine signals are ~24h old.
+      .lt('derived_at', new Date(Date.now() - 12 * 3600_000).toISOString());
     const repeat = new Set((data ?? []).map((r: { entity_id: string }) => r.entity_id));
     for (const m of b.movers) {
       if (repeat.has(m.adId)) m.line += ' — _repeat signal, second day running_';
