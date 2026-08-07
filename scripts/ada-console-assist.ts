@@ -51,8 +51,10 @@ import { getAgent } from '../src/agents/registry.js';
 import { buildClientOverlay } from '../src/client-agents/prompt-builder.js';
 import { getSupabase } from '../src/integrations/supabase.js';
 import { envTokenFor } from '../src/integrations/meta-token.js';
-import { logWrite } from '../src/agents/action-log.js';
+import { logWrite, logToolCall } from '../src/agents/action-log.js';
 import { remember as rememberLearning } from '../src/agents/tools/memory-tools.js';
+import { getLearnings } from '../src/memory/learnings.js';
+import { learningClientCodeCandidates } from '../src/agents/client-context.js';
 
 const PORT = Number(process.env.ADA_ASSIST_PORT ?? 8092);
 const HOST = '0.0.0.0';
@@ -461,9 +463,146 @@ function round(n: number): number { return Math.round(n * 10000) / 10000; }
 
 interface ChatAction { key: string; label: string; detail: string; asset_code?: string; client_code?: string; drive_url?: string; expected_asset_id?: string; ad_account_id?: string; batch_id?: string }
 
+// ---------------------------------------------------------------------------
+// Loop 4 — decisions carry forward. A rejection with a reason ("no, we never
+// scale that fast") is the single most valuable thing a human says to Ada, and
+// until now it died with the session: the same proposal came back next week.
+// Every chat turn for a known client now loads that client's most recent
+// learnings NEWEST-FIRST and renders them as settled decisions, and the ids of
+// exactly what was in view are written to the audit log — so "did the rejection
+// change the next proposal?" is a query, not a vibe.
+//
+// Deliberately recency-ordered: getClientQuickContext's "Key Learnings" are
+// SCORE-ordered, which can never surface a correction made an hour ago.
+// ---------------------------------------------------------------------------
+interface DecisionLearning { id: string; created_at: string; content: string }
+
+const DECISION_LEARNINGS_LIMIT = 8;
+const DECISION_LEARNING_MAX_CHARS = 240;
+
+/**
+ * Pure renderer (unit-testable — tests/decision-learnings-block.test.ts).
+ * Returns '' for an empty list so the caller can drop the block entirely.
+ */
+export function renderDecisionLearningsBlock(
+  learnings: DecisionLearning[],
+  /** Subject + verb of the heading — 'DANIEL/NINA HAVE' internally, 'THIS
+   *  CUSTOMER HAS' on the portal (that surface never names our team). */
+  whoHave = 'DANIEL/NINA HAVE',
+): string {
+  const seen = new Set<string>();
+  const lines: string[] = [];
+  for (const l of learnings) {
+    const content = (l?.content ?? '').replace(/\s+/g, ' ').trim();
+    if (!content) continue;
+    const key = content.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const day = /^\d{4}-\d{2}-\d{2}/.test(l.created_at ?? '') ? l.created_at.slice(0, 10) : '(undated)';
+    const text = content.length > DECISION_LEARNING_MAX_CHARS
+      ? `${content.slice(0, DECISION_LEARNING_MAX_CHARS - 1)}…`
+      : content;
+    lines.push(`- ${day} · ${text}`);
+    if (lines.length >= DECISION_LEARNINGS_LIMIT) break;
+  }
+  if (!lines.length) return '';
+  return (
+    `### DECISIONS ${whoHave} ALREADY MADE (apply these before proposing)\n` +
+    `Saved decisions for this client, newest first. These are settled calls, not old opinions — draft every ` +
+    `recommendation so it ALREADY obeys them, and say which one you're applying when it shapes what you propose. ` +
+    `Never re-propose something rejected here unless the conditions named in the reason have changed; if you ` +
+    `believe they have, name the changed condition first.\n` +
+    lines.join('\n')
+  );
+}
+
+/**
+ * The most recent client-scoped learnings for a code, newest first.
+ * FAIL-OPEN: a learnings hiccup logs and returns [] — chat never breaks over
+ * missing context. Reads both stores the remember path writes to: agency-side
+ * rows (agent_id='ada' + client_code, freeform mixed-convention, hence
+ * learningClientCodeCandidates) and the client agent's own rows
+ * (ada_client_<CODE>, what the portal's scoped chat saves).
+ */
+async function fetchDecisionLearnings(clientCode: string): Promise<DecisionLearning[]> {
+  const code = clientCode.trim();
+  if (!code) return [];
+  // The client agent id is `ada_client_<code>` with the code's casing as the
+  // caller had it (the portal uppercases; a Slack-side config may not), so ask
+  // for both spellings rather than silently missing a whole store.
+  const agentIds = [...new Set([`ada_client_${code}`, `ada_client_${code.toUpperCase()}`])];
+  try {
+    const [agencyRows, ...clientRowSets] = await Promise.all([
+      getLearnings('ada', undefined, DECISION_LEARNINGS_LIMIT, learningClientCodeCandidates(code)),
+      ...agentIds.map((id) => getLearnings(id, undefined, DECISION_LEARNINGS_LIMIT)),
+    ]);
+    return [...agencyRows, ...clientRowSets.flat()]
+      .map((l) => ({ id: l.id, created_at: l.created_at, content: l.content }))
+      .sort((a, b) => (b.created_at ?? '').localeCompare(a.created_at ?? ''))
+      .slice(0, DECISION_LEARNINGS_LIMIT);
+  } catch (e) {
+    console.warn(`[ada-console-assist] decision-learnings fetch failed for ${code} (block omitted):`, (e as Error).message);
+    return [];
+  }
+}
+
+/**
+ * Audit which decision-learnings were in the prompt when this turn was drafted
+ * — the evidence half of Loop 4. Fire-and-forget into piper_actions via the
+ * standard action-log helper. NOTE: /chat had no per-turn log at all, so this
+ * is a new (synthetic) tool_call row rather than a field added to an existing
+ * one; it is written ONLY when learnings were actually in view, so a turn
+ * without context adds no rows.
+ */
+function logDecisionLearningsInContext(input: {
+  agentId: string;
+  channelId: string;
+  userId: string;
+  sessionId: string;
+  clientCode: string;
+  question: string;
+  learnings: DecisionLearning[];
+  proposalType: string | null;
+}): void {
+  if (!input.learnings.length) return;
+  try {
+    logToolCall({
+      toolName: 'decision_learnings_in_context',
+      context: {
+        agentId: input.agentId,
+        channelId: input.channelId,
+        userId: input.userId,
+        threadTs: input.sessionId,
+      },
+      params: {
+        client_code: input.clientCode,
+        session_id: input.sessionId,
+        question: input.question.slice(0, 300),
+        proposal_type: input.proposalType,
+        learning_ids: input.learnings.map((l) => l.id),
+        learnings: input.learnings.map((l) => ({
+          id: l.id,
+          created_at: l.created_at,
+          preview: l.content.replace(/\s+/g, ' ').trim().slice(0, 40),
+        })),
+      },
+      result: `${input.learnings.length} decision-learning(s) in prompt for ${input.clientCode}`,
+      status: 'success',
+      durationMs: 0,
+    });
+  } catch (e) {
+    console.warn('[ada-console-assist] decision-learnings audit log failed (non-fatal):', (e as Error).message);
+  }
+}
+
 /** Build the chat framing message. Deliberately NOT error-shaped — a data
  *  question gets a data answer, never a "nothing to fix" button. */
-function buildChatPrompt(req: AssistRequest, ledgerEvents: LedgerEvent[] = [], recentLedger: RecentLedgerEvent[] = []): string {
+function buildChatPrompt(
+  req: AssistRequest,
+  ledgerEvents: LedgerEvent[] = [],
+  recentLedger: RecentLedgerEvent[] = [],
+  decisionLearnings: DecisionLearning[] = [],
+): string {
   const ctx = req.context ?? {};
   const parts: string[] = [];
 
@@ -498,7 +637,8 @@ function buildChatPrompt(req: AssistRequest, ledgerEvents: LedgerEvent[] = [], r
 
   parts.push(
     `### When the operator corrects or teaches you, SAVE it (remember) — then CONFIRM the save\n` +
-    `Chat corrections do NOT persist on their own — they vanish when this session ends. So when the operator corrects you, states a preference for how to analyze/report, or teaches you a durable fact about a client or the account, CALL **remember** to store it as a learning (pass client_code when it's client-specific; omit it for a general analysis principle). The remember tool returns the saved record. ONLY after that call succeeds, end your reply with an explicit, PAST-TENSE confirmation that quotes back what you saved — e.g. \`✅ Saved to memory — "<the exact generalized learning>" (TL)\` — so the operator can see it's been written, not merely promised. Do NOT say a vague "I'll remember that", and NEVER claim you saved something if the remember call didn't actually run or it errored — say so plainly and retry instead. That confirmed save is the ONLY way it carries into future sessions. Save the GENERALIZED rule, not the one-off phrasing; skip ephemeral chit-chat and anything already in your Key Learnings.`,
+    `Chat corrections do NOT persist on their own — they vanish when this session ends. So when the operator corrects you, states a preference for how to analyze/report, or teaches you a durable fact about a client or the account, CALL **remember** to store it as a learning (pass client_code when it's client-specific; omit it for a general analysis principle). The remember tool returns the saved record. ONLY after that call succeeds, end your reply with an explicit, PAST-TENSE confirmation that quotes back what you saved — e.g. \`✅ Saved to memory — "<the exact generalized learning>" (TL)\` — so the operator can see it's been written, not merely promised. Do NOT say a vague "I'll remember that", and NEVER claim you saved something if the remember call didn't actually run or it errored — say so plainly and retry instead. That confirmed save is the ONLY way it carries into future sessions. Save the GENERALIZED rule, not the one-off phrasing; skip ephemeral chit-chat and anything already in your Key Learnings.\n` +
+    `**A rejection WITH A REASON is the most valuable thing you can save.** When the operator turns down, overrides or corrects something you suggested and tells you WHY ("no, we never scale a set more than 20% a day", "CBO only on this account"), call **remember** immediately with client_code set, and capture the reason in THEIR words — quote the sentence rather than paraphrasing it into house style, because the wording is the rule. Then treat it as standing: never re-propose the rejected thing for that client unless the conditions named in the reason have actually changed, and when you think they have, say which condition changed before you propose it again.`,
   );
 
   parts.push(
@@ -519,6 +659,11 @@ function buildChatPrompt(req: AssistRequest, ledgerEvents: LedgerEvent[] = [], r
   const chatLedger = renderLedgerSection(ledgerEvents);
   if (chatLedger) parts.push(chatLedger);
   parts.push(renderLedgerAwareness(recentLedger));
+
+  // Loop 4: last — closest to the question, so a settled decision is the last
+  // thing read before answering.
+  const decisionsBlock = renderDecisionLearningsBlock(decisionLearnings);
+  if (decisionsBlock) parts.push(decisionsBlock);
 
   parts.push(`### The operator's message\n${(req.question ?? '').trim() || '(no message)'}`);
 
@@ -599,7 +744,11 @@ const ROOT_CAUSE_METHOD =
  * Tool-level scoping (forced input.client_code) is the real data wall; this only
  * governs voice/behaviour. The client_media_buyer profile is read-only.
  */
-function buildScopedChatPrompt(req: AssistRequest, clientCode: string): string {
+function buildScopedChatPrompt(
+  req: AssistRequest,
+  clientCode: string,
+  decisionLearnings: DecisionLearning[] = [],
+): string {
   let clientContext: string | undefined;
   try {
     // Mirrors runner.ts: agents/ada/clients/<CODE>.md, case-sensitive on Linux
@@ -627,7 +776,8 @@ function buildScopedChatPrompt(req: AssistRequest, clientCode: string): string {
   parts.push(ROOT_CAUSE_METHOD);
   parts.push(
     `### When the customer teaches you something, SAVE it (remember) — then confirm\n` +
-    `Chat does not persist on its own: anything the customer corrects or explains vanishes when this session ends unless you store it. When they tell you a durable fact about their business (who their customers are, which campaign is theirs vs their media buyer's, what a lead is worth to them, a sale or launch date, how they want numbers framed), CALL **remember** to save it as a learning. Your saves are automatically scoped to this customer's account — never worry about other accounts, and never mention that scoping machinery. After the remember call succeeds, end your reply confirming in plain past tense what you saved (quote the generalized fact back). Never say "I'll remember that" without actually calling the tool, and never claim a save that errored. Two exceptions: (1) their performance GOAL cannot be changed from chat — point them at the Your business page, where changing it re-runs the checks; (2) skip chit-chat and one-off phrasing — save durable facts only.`,
+    `Chat does not persist on its own: anything the customer corrects or explains vanishes when this session ends unless you store it. When they tell you a durable fact about their business (who their customers are, which campaign is theirs vs their media buyer's, what a lead is worth to them, a sale or launch date, how they want numbers framed), CALL **remember** to save it as a learning. Your saves are automatically scoped to this customer's account — never worry about other accounts, and never mention that scoping machinery. After the remember call succeeds, end your reply confirming in plain past tense what you saved (quote the generalized fact back). Never say "I'll remember that" without actually calling the tool, and never claim a save that errored. Two exceptions: (1) their performance GOAL cannot be changed from chat — point them at the Your business page, where changing it re-runs the checks; (2) skip chit-chat and one-off phrasing — save durable facts only.\n` +
+    `**Save every rejection that comes with a reason — it is the most valuable thing they tell you.** When they turn down, override or correct something you proposed and say WHY ("we never touch that campaign, it's our media buyer's", "don't scale that fast"), call **remember** right away and capture the reason in THEIR words — quote the sentence rather than tidying it into your own phrasing, because the wording IS the rule. From then on it is settled: never propose the rejected thing again unless the conditions named in their reason have actually changed, and if you think they have, name the changed condition before proposing it.`,
   );
   parts.push(
     `### Proposing account changes (card 57 — the approve-first rail)\n` +
@@ -645,6 +795,11 @@ function buildScopedChatPrompt(req: AssistRequest, clientCode: string): string {
     `- If asked to touch a different account or a campaign outside your allowed list, refuse plainly — no proposal.\n` +
     `- If the ask is ambiguous (no campaign, no budget), ask the clarifying question instead of proposing.`,
   );
+  // Loop 4: directly after the proposal rail and directly before their message —
+  // the settled decisions are the last thing read before drafting a proposal.
+  // "THIS CUSTOMER" (never Daniel/Nina): this surface shares no team framing.
+  const decisionsBlock = renderDecisionLearningsBlock(decisionLearnings, 'THIS CUSTOMER HAS');
+  if (decisionsBlock) parts.push(decisionsBlock);
   parts.push(`### The message\n${(req.question ?? '').trim() || '(no message)'}`);
   return parts.join('\n\n');
 }
@@ -845,6 +1000,14 @@ async function handleChatStream(
   const heartbeat = setInterval(() => { if (!closed) { try { res.write(': ping\n\n'); } catch { /* noop */ } } }, 15_000);
   const safe = (event: string, data: unknown) => { if (!closed) { try { sseEvent(res, event, data); } catch { /* noop */ } } };
 
+  // Loop 4: the client's settled decisions, newest first. Scoped runs always
+  // have a code; internal runs only when the console has a client open. Fetched
+  // AFTER the stream head so the heartbeat is already flowing, and fail-open —
+  // an empty list just means no block.
+  const decisionClientCode = (scope?.clientCode ?? req.context?.client_code ?? '').trim();
+  const decisionLearnings = decisionClientCode ? await fetchDecisionLearnings(decisionClientCode) : [];
+  let proposalType: string | null = null;
+
   let fullText = '';
   let costUsd = 0;
   let toolsUsed: string[] = [];
@@ -858,8 +1021,8 @@ async function handleChatStream(
         source: scope ? 'api-console-chat-scoped' : 'api-console-chat',
         agentId: 'ada',
         userMessage: scope
-          ? buildScopedChatPrompt(req, scope.clientCode)
-          : buildChatPrompt(req, ledgerEvents, recentLedger),
+          ? buildScopedChatPrompt(req, scope.clientCode, decisionLearnings)
+          : buildChatPrompt(req, ledgerEvents, recentLedger, decisionLearnings),
         // Scoped: attribute the run (and its memory/quick-context) to the real
         // client user from the verified claim; internal: the shared console user.
         userId: scope ? scope.userId : 'launch-console',
@@ -948,7 +1111,7 @@ async function handleChatStream(
     // console has real write tools and needs no approve-first detour.
     if (scope) {
       const proposal = parseChatProposal(fullText);
-      if (proposal) safe('proposal', { proposal });
+      if (proposal) { proposalType = proposal.type; safe('proposal', { proposal }); }
     }
     const creatives = parseChatCreatives(fullText);
     if (creatives.length) safe('creatives', { creatives });
@@ -971,6 +1134,19 @@ async function handleChatStream(
     safe('error', { error: errMsg });
     safe('done', { session_id: sessionId, cost_usd: round(costUsd), used_skills: [], ok: false, subtype: subtype === 'unknown' ? 'exception' : subtype, error: errMsg });
   } finally {
+    // Loop 4 evidence: which decisions were in view when this turn was drafted.
+    // In `finally` so an errored turn is recorded too; no-ops when the block was
+    // empty. Fire-and-forget — never blocks the response.
+    logDecisionLearningsInContext({
+      agentId: scope ? `ada_client_${scope.clientCode}` : 'ada',
+      channelId,
+      userId: scope ? scope.userId : 'launch-console',
+      sessionId,
+      clientCode: decisionClientCode,
+      question: (req.question ?? '').trim(),
+      learnings: decisionLearnings,
+      proposalType,
+    });
     clearInterval(heartbeat);
     if (!closed) { try { res.end(); } catch { /* noop */ } }
   }
@@ -1873,6 +2049,12 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, HOST, () => {
-  console.log(`[ada-console-assist] listening on http://${HOST}:${PORT} (model=${MODEL}, assist[budget=${MAX_BUDGET_USD},turns=${MAX_TURNS}], chat[budget=${CHAT_MAX_BUDGET_USD},turns=${CHAT_MAX_TURNS}], auth=${ASSIST_SECRET ? 'on' : 'MISSING'})`);
-});
+// Import-safe: under vitest this module is imported for its pure helpers
+// (tests/decision-learnings-block.test.ts) and must NOT bind the port or hold
+// the event loop open. VITEST is set by the test runner only — the systemd
+// service is unaffected.
+if (!process.env.VITEST) {
+  server.listen(PORT, HOST, () => {
+    console.log(`[ada-console-assist] listening on http://${HOST}:${PORT} (model=${MODEL}, assist[budget=${MAX_BUDGET_USD},turns=${MAX_TURNS}], chat[budget=${CHAT_MAX_BUDGET_USD},turns=${CHAT_MAX_TURNS}], auth=${ASSIST_SECRET ? 'on' : 'MISSING'})`);
+  });
+}

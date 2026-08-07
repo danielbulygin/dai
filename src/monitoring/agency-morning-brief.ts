@@ -36,6 +36,11 @@ import {
   selfCheckLine,
   type JudgeVerdict,
 } from './daniel-judge.js';
+import {
+  evaluateLaunches,
+  type LaunchVerdict,
+  type WatchInput,
+} from './launch-verdicts.js';
 
 // v1 pilots (Daniel, 2026-08-06). Top-level codes; children join via parent_code.
 export const PILOT_CLIENTS = ['BFM', 'PL'];
@@ -134,6 +139,7 @@ export interface AccountBrief {
   lines: string[];
   movers: Mover[];
   newAds: Array<{ adId: string; adName: string; spend: number; results: number }>;
+  watchVerdicts: LaunchVerdict[];
   day?: AccountDay;
   trailing?: AccountDay[];
 }
@@ -767,6 +773,53 @@ async function writeInsights(briefs: AccountBrief[]): Promise<number> {
   return rows.length;
 }
 
+/** Open launch watches for a client (Loop 2's verdict half reads these). */
+async function fetchActiveWatches(clientCode: string): Promise<WatchInput[]> {
+  const { data } = await getDaiSupabase()
+    .from('ada_insights')
+    .select('id, entity_id, entity_name, evidence')
+    .eq('client_code', clientCode)
+    .eq('kind', 'launch-watch')
+    .eq('status', 'active');
+  return ((data ?? []) as Array<{
+    id: string;
+    entity_id: string | null;
+    entity_name: string | null;
+    evidence: { first_spend_date?: string } | null;
+  }>)
+    .filter((r) => r.entity_id && r.evidence?.first_spend_date)
+    .map((r) => ({
+      insightId: r.id,
+      adId: r.entity_id!,
+      adName: r.entity_name ?? r.entity_id!,
+      firstSpendDate: r.evidence!.first_spend_date!,
+    }));
+}
+
+/** Verdicts append to their watch's trajectory; final verdicts close it. */
+async function updateWatchRows(verdicts: LaunchVerdict[], asOf: string): Promise<void> {
+  const dai = getDaiSupabase();
+  for (const v of verdicts) {
+    const { data } = await dai
+      .from('ada_insights')
+      .select('trajectory')
+      .eq('id', v.insightId)
+      .maybeSingle();
+    const trajectory = Array.isArray(data?.trajectory) ? (data!.trajectory as unknown[]) : [];
+    trajectory.push({ date: asOf, verdict: v.kind, line: v.line });
+    const { error } = await dai
+      .from('ada_insights')
+      .update({
+        trajectory,
+        last_checked_at: new Date().toISOString(),
+        status: v.isFinal ? 'resolved' : 'active',
+        ...(v.isFinal ? { resolved_at: new Date().toISOString() } : {}),
+      })
+      .eq('id', v.insightId);
+    if (error) logger.error({ err: error.message, id: v.insightId }, 'watch update failed');
+  }
+}
+
 /**
  * Movers already on the ledger from earlier days → persistence phrasing.
  * Two distinct cases (Daniel's question, 2026-08-07): the SAME signal firing
@@ -804,12 +857,24 @@ async function markPersistence(briefs: AccountBrief[]): Promise<void> {
         .push({ claim: r.claim, kind: r.evidence?.kind, date: r.evidence?.date });
     }
     for (const m of b.movers) {
-      const prior = priorByAd.get(m.adId);
-      if (!prior?.length) continue;
-      // Claims start with the ad name — strip it, the reader is on that line.
+      // Only rows about EARLIER data days count — a stored claim about the
+      // same reporting day (same-day re-run, or an account whose day hasn't
+      // rolled) is this signal, not a prior one.
+      const prior = (priorByAd.get(m.adId) ?? []).filter(
+        (p) => p.date && p.date < b.yesterday,
+      );
+      if (!prior.length) continue;
+      // Claims start with the ad name and may carry their own why/persistence
+      // suffixes — strip all of that; the reader is already on this ad's line.
       const latest = prior[0]!;
-      const prev = truncate(latest.claim.replace(/^"[^"]*" — /, ''), 90);
-      const when = latest.date ? dayLabel(latest.date) : 'the prior brief';
+      const prev = truncate(
+        latest.claim
+          .replace(/^"[^"]*" — /, '')
+          .split(' | why:')[0]!
+          .split(' — _')[0]!,
+        90,
+      );
+      const when = dayLabel(latest.date!);
       m.line += prior.some((p) => p.kind === m.kind)
         ? ` — _same signal on ${when} too: ${prev}_`
         : ` — _this ad was also flagged for ${when}: ${prev}_`;
@@ -843,6 +908,7 @@ async function briefAccount(row: ClientRow, now: Date): Promise<AccountBrief> {
     lines: [],
     movers: [],
     newAds: [],
+    watchVerdicts: [],
   };
 
   if (status === 'dormant') {
@@ -887,6 +953,31 @@ async function briefAccount(row: ClientRow, now: Date): Promise<AccountBrief> {
       : day.spend;
     brief.movers = detectMovers(ads, yesterday, day.spend, avgDaily, currency);
     brief.newAds = await detectNewAds(row.id, ads, yesterday);
+
+    // Loop 2's verdict half: evaluate the open launch watches, evidence-based.
+    const watches = await fetchActiveWatches(row.code);
+    if (watches.length) {
+      const priorSpend = prior.reduce((s, d) => s + d.spend, 0);
+      const priorPurch = prior.reduce((s, d) => s + d.purchases, 0);
+      brief.watchVerdicts = evaluateLaunches({
+        watches,
+        ads,
+        yesterday,
+        accountSpendYesterday: day.spend,
+        trailingAvgDailySpend: avgDaily,
+        accountTrailingCpa: priorPurch >= 3 ? priorSpend / priorPurch : null,
+        expectedCpa: row.goal_bands?.happy ?? config?.targets?.cpa ?? null,
+        expectedCpaLabel:
+          row.goal_bands?.happy !== undefined && row.goal_bands?.happy !== null
+            ? 'your happy band'
+            : 'your target',
+        currency,
+        // Ad set spend floors are not in the warehouse — unknown, and the
+        // module phrases delivery lines neutrally because of it.
+        flooredAdsetIds: undefined,
+        dayLabel,
+      });
+    }
 
     // The why-clause: each mover carries its diagnosis (Loop 3, slice 1).
     if (brief.movers.length) {
@@ -960,9 +1051,17 @@ function renderClientSection(
         .slice(0, 5)
         .map(
           (n) =>
-            `• "${truncate(n.adName, 48)}" — first spend, ${money(n.spend, b.clientRow.currency ?? 'EUR')} · ${n.results} purchases (watching: verdict at 72h)`,
+            `• "${truncate(n.adName, 48)}" — first spend, ${money(n.spend, b.clientRow.currency ?? 'EUR')} · ${n.results} purchases (watch opened — verdicts as evidence arrives)`,
         );
       out.push([`New (${b.newAds.length}):`, ...items].join('\n'));
+    }
+    if (b.watchVerdicts.length) {
+      out.push(
+        [
+          'Watch:',
+          ...b.watchVerdicts.map((v) => `• ${v.line}\n    ↳ next: ${v.next}`),
+        ].join('\n'),
+      );
     }
   }
   return out.join('\n');
@@ -1037,6 +1136,9 @@ export async function runAgencyMorningBrief(
   let insightsWritten = 0;
   if (writeToLedger) {
     insightsWritten = await writeInsights(allBriefs);
+    for (const b of allBriefs) {
+      if (b.watchVerdicts.length) await updateWatchRows(b.watchVerdicts, b.yesterday);
+    }
     if (judge) {
       await getDaiSupabase().from('ada_insights').insert({
         client_code: 'AGENCY',
