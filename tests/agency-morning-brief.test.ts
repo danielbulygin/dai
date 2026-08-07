@@ -17,6 +17,11 @@ import {
   detectMovers,
   gateYesterday,
 } from '../src/monitoring/agency-morning-brief.js';
+import {
+  composeWhy,
+  type AdDayWhy,
+  type WhyContext,
+} from '../src/monitoring/why-clause.js';
 
 const NY = 'America/New_York';
 
@@ -149,5 +154,121 @@ describe('detectMovers — materiality → surprise → persistence', () => {
     const movers = detectMovers(ads, Y, 1200, 1200, 'USD');
     expect(movers).toHaveLength(3);
     expect(movers[0]!.adId).toBe('a');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The why-clause — one test per diagnosis signature (spec:
+// tinkers docs/factory/day-2026-08-07/why-clause-design.md)
+// ---------------------------------------------------------------------------
+
+describe('composeWhy — cause signatures', () => {
+  const Y = '2026-08-06';
+  const TRAILING = ['2026-08-02', '2026-08-03', '2026-08-04', '2026-08-05'];
+
+  interface DaySpec {
+    spend: number;
+    imp: number;
+    clicks: number;
+    hook: number;
+    purch: number;
+  }
+
+  function mkRows(adId: string, trailing: DaySpec, yday: DaySpec): AdDayWhy[] {
+    const row = (date: string, s: DaySpec): AdDayWhy => ({
+      date,
+      ad_id: adId,
+      ad_name: adId,
+      adset_id: 's1',
+      campaign_id: 'c1',
+      spend: s.spend,
+      impressions: s.imp,
+      link_clicks: s.clicks,
+      hook_rate: s.hook,
+      frequency: 1.5,
+      content_views: 0,
+      purchases: s.purch,
+    });
+    return [...TRAILING.map((d) => row(d, trailing)), row(Y, yday)];
+  }
+
+  function ctx(
+    adRows: AdDayWhy[],
+    over: Partial<WhyContext> = {},
+  ): WhyContext {
+    return {
+      moverKind: 'cpa_shift',
+      direction: 'bad',
+      adRows,
+      peerRows: adRows,
+      yesterday: Y,
+      changes: [],
+      mixShifts: [],
+      dayLabel: (d) => d,
+      ...over,
+    };
+  }
+
+  const steady: DaySpec = { spend: 1200, imp: 40000, clicks: 500, hook: 0.25, purch: 40 };
+
+  it('bad traffic: conversion fell while delivery got cheaper and broader', () => {
+    const why = composeWhy(
+      ctx(mkRows('a1', steady, { spend: 1200, imp: 80000, clicks: 700, hook: 0.24, purch: 25 })),
+    );
+    expect(why.causeClass).toBe('bad_traffic');
+    expect(why.text).toContain('worse');
+  });
+
+  it('creative response: hook fell, cost side flat', () => {
+    const why = composeWhy(
+      ctx(mkRows('a1', steady, { spend: 1200, imp: 40000, clicks: 360, hook: 0.15, purch: 29 })),
+    );
+    expect(why.causeClass).toBe('creative_response');
+  });
+
+  it('auction inflation: every rate flat, CPM up', () => {
+    const why = composeWhy(
+      ctx(mkRows('a1', steady, { spend: 1700, imp: 40000, clicks: 500, hook: 0.25, purch: 40 })),
+    );
+    expect(why.causeClass).toBe('auction_inflation');
+    expect(why.next).toContain('hold');
+  });
+
+  it('flat everything: says unclear, never invents', () => {
+    const why = composeWhy(
+      ctx(mkRows('a1', steady, { spend: 1250, imp: 41000, clicks: 505, hook: 0.25, purch: 38 })),
+    );
+    expect(why.causeClass).toBe('unclear');
+    expect(why.text).toContain('cause unclear');
+  });
+
+  it('measurement suspect: conversions collapsed on this ad AND the rest of the account', () => {
+    const mine = mkRows('a1', steady, { spend: 1200, imp: 40000, clicks: 520, hook: 0.25, purch: 0 });
+    const peer = mkRows('b2', steady, { spend: 1200, imp: 40000, clicks: 500, hook: 0.25, purch: 10 });
+    const why = composeWhy(
+      ctx(mine, { moverKind: 'zero_results_on_spend', peerRows: [...mine, ...peer] }),
+    );
+    expect(why.causeClass).toBe('measurement_suspect');
+    expect(why.next).toContain('Events Manager');
+  });
+
+  it('wins get interrogated too: improvement names its mechanism', () => {
+    const why = composeWhy(
+      ctx(mkRows('a1', steady, { spend: 1200, imp: 40000, clicks: 700, hook: 0.38, purch: 60 }), {
+        direction: 'good',
+      }),
+    );
+    expect(why.causeClass).toBe('improved');
+    expect(why.text).toContain('hook');
+  });
+
+  it('delivery shift: names the sibling the spend came from', () => {
+    const mine = mkRows('a1', steady, { spend: 2400, imp: 80000, clicks: 1000, hook: 0.25, purch: 80 });
+    const sibling = mkRows('b2', { spend: 1200, imp: 40000, clicks: 500, hook: 0.2, purch: 30 }, { spend: 100, imp: 3500, clicks: 40, hook: 0.2, purch: 3 });
+    const why = composeWhy(
+      ctx(mine, { moverKind: 'spend_share_shift', peerRows: [...mine, ...sibling] }),
+    );
+    expect(why.causeClass).toBe('delivery_shift');
+    expect(why.text).toContain('b2');
   });
 });
