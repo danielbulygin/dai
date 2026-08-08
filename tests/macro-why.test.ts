@@ -595,7 +595,7 @@ describe('composeMacroWhy', () => {
     expect(why.text).toContain('UK | Broad | Juice');
     expect(why.text).toContain('2.60');
     expect(why.text).toMatch(/overlap/);
-    expect(why.next).toMatch(/consolidat/);
+    expect(why.next).toMatch(/merging them or adding exclusions/);
     expect(why.text).not.toMatch(NO_DAY_WORDS);
   });
 
