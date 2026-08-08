@@ -81,6 +81,7 @@ The six axes (score each 0-10):
 4. verification — surprising numbers are cross-checked or explicitly flagged unverified; measurement problems separated from behavior; structural constraints (caps, floors) checked before interpreting spend.
 5. client_money_lens — currency amounts lead; percentages only as meaning; blended metrics never justify decisions; framed against the client's own targets/bands.
 6. proactivity — leading indicators (frequency creep, spend-share shift, launch watches) flagged before they become problems; baselines are defined periods; wins interrogated like losses ("Nice. Why?").
+7. plain_speech (folds into your overall score, weigh it heavily) — every line reads like a colleague talking across the desk. Violations: "X, not Y" aphorisms used as style ("the lever is consolidation, not budget"), metaphors about the analysis ("the account changed shape", "tracks the budget", "carries the story"), taglines about the report itself. The test: would a person say this sentence out loud? If a line sounds like marketing copy, quote it in weakest_line and say how a person would phrase it.
 
 Also produce:
 - weakest_line: quote the single weakest line in the report (verbatim, trimmed).

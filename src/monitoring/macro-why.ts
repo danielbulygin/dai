@@ -1032,7 +1032,7 @@ function shapeSentence(d: RateDecomposition, metric: RateMetric, currency: strin
     top && top.curRate !== null
       ? ` (biggest: ${nameOf(top)} on ${sharePct(top.curShare)} of delivery at ${rateValue(metric, top.curRate, currency)} ${noun}, against the account's ${rateValue(metric, d.baseRate, currency)} in the baseline window)`
       : '';
-  return `${sharePct(d.entrantShare)} of delivery now sits in ${LABEL_PLURAL[label]} that had none in the baseline window${entrantBit}, so this is an account that changed shape and mix cannot be told from within cleanly.`;
+  return `${sharePct(d.entrantShare)} of delivery now sits in ${LABEL_PLURAL[label]} that had none in the baseline window${entrantBit}, so most of today's delivery has nothing in the baseline period to compare against.`;
 }
 
 function survivorSentence(d: RateDecomposition, metric: RateMetric, currency: string, label: ComponentLabel, nameOf: NameFn): string | null {
@@ -1164,7 +1164,7 @@ function budgetSentence(spend: { cur: number | null; base: number | null } | und
   const rel = spend.cur / spend.base - 1;
   if (Math.abs(rel) <= STRAIN_SPEND_HELD) return null;
   const checked = strain?.checked ?? 0;
-  return `This tracks the budget, not the audience: spend went ${moneyCompact(spend.base, currency)}/day → ${moneyCompact(spend.cur, currency)}/day (${pctSigned(rel)}), and of the ${checked} component${checked === 1 ? '' : 's'} readable in both windows none lost more than ${pctMag(STRAIN_REACH_DROP)} of its reach per unit spent while holding its budget.`;
+  return `Reach went up because spend went up: ${moneyCompact(spend.base, currency)}/day → ${moneyCompact(spend.cur, currency)}/day (${pctSigned(rel)}). Of the ${checked} component${checked === 1 ? '' : 's'} that ran in both periods, none is reaching meaningfully fewer people per ${currency} spent.`;
 }
 
 function refreshSentence(read: CreativeRefreshRead, currency: string): string | null {
@@ -1364,17 +1364,17 @@ function suggestMove(
     return `widen or split "${truncateName(carriers!.carriers[0]!.name)}" before adding budget — more spend into that pool buys frequency, not people`;
   }
   if (overlap) {
-    return `the lever is consolidation, not budget — ${carriers!.entitiesCurrent} ad sets competing for one audience is what is driving the repeat exposure, so merge or exclude before adding more`;
+    return `${carriers!.entitiesCurrent} ad sets are showing ads to roughly the same people — merging them or adding exclusions would bring frequency down; more budget or new creatives would not`;
   }
   if (strain?.strained.length) {
     const s = strain.strained[0]!;
     return `${nameOf(s)} is the constraint: widen its targeting or refresh its creative and hold the ${moneyCompact(s.curSpend, currency)} rather than raising it`;
   }
   if (target.vital === 'reach' && spendMoved && spend?.cur !== null && spend?.base !== null) {
-    return `read this against the budget, not the baseline level — at ${moneyCompact(spend!.cur!, currency)}/day against ${moneyCompact(spend!.base!, currency)}/day the footprint is bought, so judge it on cost per result`;
+    return `nothing to act on — at ${moneyCompact(spend!.cur!, currency)}/day vs ${moneyCompact(spend!.base!, currency)}/day, higher reach is what the extra budget buys; cost per result is the number to watch`;
   }
   if (rate?.readable && rate.shapeChanged) {
-    return `judge this against the new shape, not the old baseline — set a target for ${rate.topEntrant ? nameOf(rate.topEntrant) : `the new ${LABEL_PLURAL[label]}`} before reading the account average again`;
+    return `the account average is not comparable to the baseline period anymore — set a target for ${rate.topEntrant ? nameOf(rate.topEntrant) : `the new ${LABEL_PLURAL[label]}`} and judge each part on its own`;
   }
   if (rate?.readable && rate.topMix && (rate.mixPct ?? 0) >= 0.5) {
     return `the lever is the ${nameOf(rate.topMix)} mix, not the total budget — decide whether that shift is wanted before topping anything up`;
