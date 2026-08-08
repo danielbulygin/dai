@@ -19,6 +19,12 @@
  *
  * "Yesterday" is the ACCOUNT's local day (clients.timezone), never the server
  * day. Currency is per account (clients.currency), never hardcoded.
+ *
+ * The reporting WINDOW (2026-08-08, Daniel): the cron is Mon–Fri, so a single
+ * "yesterday" silently drops every Friday and Saturday account-day — a
+ * Saturday launch was never announced and never watched. Monday's brief
+ * therefore covers Fri+Sat+Sun as ONE weekend rollup; every other morning is
+ * the single day it always was. See `reportingWindow`.
  */
 
 import { getSupabase } from '../integrations/supabase.js';
@@ -41,6 +47,7 @@ import {
   type LaunchVerdict,
   type WatchInput,
 } from './launch-verdicts.js';
+import { buildMacroPulse } from './macro-vitals.js';
 import {
   applyWalkOutcomes,
   walkAdInsights,
@@ -141,14 +148,33 @@ export interface Mover {
 export interface AccountBrief {
   clientRow: ClientRow;
   status: 'verified' | 'unverified' | 'dormant';
+  /** The reporting day everything as-of hangs on: the LAST verified day in the
+   *  window. On a single-day brief that is the account's local yesterday. */
   yesterday: string; // account-local date string
+  /** Account-local days this brief reports as fact, oldest first. A single-day
+   *  brief carries exactly [yesterday]; Monday's rollup carries Fri/Sat/Sun. */
+  window: string[];
+  /** Window days that failed the honesty gate — named in the lines, never
+   *  quoted as numbers. */
+  unverifiedDays: string[];
   lines: string[];
   movers: Mover[];
-  newAds: Array<{ adId: string; adName: string; spend: number; results: number }>;
+  newAds: Array<{
+    adId: string;
+    adName: string;
+    spend: number;
+    results: number;
+    /** The ad's true first spending day — anywhere inside the window. */
+    firstSpendDate: string;
+  }>;
   watchVerdicts: LaunchVerdict[];
   /** Prior days' ad-level claims, re-checked against this reporting day. */
   followUps: WalkedInsight[];
+  /** Monday-only macro vitals block (creep detection) — empty on normal days. */
+  macroLines: string[];
   day?: AccountDay;
+  /** The verified window days' rows, oldest first (single-day: [day]). */
+  windowDays?: AccountDay[];
   trailing?: AccountDay[];
 }
 
@@ -179,9 +205,53 @@ export function accountYesterday(timeZone: string, now: Date = new Date()): stri
   return localDateStr(new Date(now.getTime() - 24 * 3600 * 1000), timeZone);
 }
 
+/** Calendar shift on a YYYY-MM-DD string. UTC-noon anchors dodge every DST
+ *  cliff — these are calendar dates, not instants. */
+function shiftDate(dateStr: string, deltaDays: number): string {
+  const d = new Date(`${dateStr}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + deltaDays);
+  return d.toISOString().slice(0, 10);
+}
+
+function weekdayOf(dateStr: string): number {
+  return new Date(`${dateStr}T12:00:00Z`).getUTCDay();
+}
+
 function isWeekendDate(dateStr: string): boolean {
-  const day = new Date(`${dateStr}T12:00:00Z`).getUTCDay();
+  const day = weekdayOf(dateStr);
   return day === 0 || day === 6;
+}
+
+/**
+ * The days this morning's brief is responsible for, oldest first.
+ *
+ * The cron runs Mon–Fri 08:10 Berlin. With a single "yesterday" that leaves
+ * Friday and Saturday account-days permanently unreported: a Saturday launch
+ * was never announced, never watched, and weekend movers simply vanished.
+ * So the rule (Daniel, 2026-08-08): when the ACCOUNT's local today is Monday,
+ * the brief covers the three prior account-local days — Fri, Sat, Sun — as one
+ * weekend rollup. Every other morning is the single day it always was.
+ *
+ * The weekday is the ACCOUNT's, not the server's, and that has a consequence
+ * worth stating out loud: **each account gets its weekend rollup on ITS OWN
+ * first weekday morning.** At the 08:10 Berlin cron (06:10 UTC in summer) a
+ * New York account is already at 02:10 Monday, so BFM rolls up on the same
+ * Berlin-Monday as a London account. An account far enough west that its clock
+ * still reads Sunday at that instant (US Pacific, 23:10 Sun) is NOT on a Monday
+ * yet — it reports its single Saturday, and gets its Fri/Sat/Sun rollup on the
+ * next Berlin morning, when its own calendar has reached Monday. Known v1
+ * residue: for such an account Saturday is then covered twice and its Thursday
+ * and Friday are still unreported. The pilots (BFM = New York, PL = London)
+ * are both east of that line.
+ */
+export function reportingWindow(timeZone: string, now: Date = new Date()): string[] {
+  const today = localDateStr(now, timeZone);
+  if (weekdayOf(today) !== 1) {
+    // Unchanged single-day path — accountYesterday stays the one definition of
+    // "yesterday" so the normal morning is bit-for-bit what it always was.
+    return [accountYesterday(timeZone, now)];
+  }
+  return [shiftDate(today, -3), shiftDate(today, -2), shiftDate(today, -1)];
 }
 
 /** '2026-08-05' → 'Wed Aug 5'. Any line touching more than one day names the
@@ -195,6 +265,22 @@ function dayLabel(dateStr: string): string {
   }).format(new Date(`${dateStr}T12:00:00Z`));
 }
 
+/** '2026-08-07' → 'Fri'. Only ever used INSIDE a line whose head already
+ *  spelled out the full range, so the weekday alone stays unambiguous. */
+function weekdayLabel(dateStr: string): string {
+  return new Intl.DateTimeFormat('en-US', {
+    weekday: 'short',
+    timeZone: 'UTC',
+  }).format(new Date(`${dateStr}T12:00:00Z`));
+}
+
+/** 'Sat, Aug 8' · 'Sat, Aug 8 and Sun, Aug 9' · 'Fri…, Sat… and Sun…'. */
+function namedDays(dates: string[]): string {
+  const labels = dates.map(dayLabel);
+  if (labels.length <= 1) return labels[0] ?? '';
+  return `${labels.slice(0, -1).join(', ')} and ${labels[labels.length - 1]}`;
+}
+
 function money(value: number, currency: string, decimals = 0): string {
   try {
     return new Intl.NumberFormat('en-US', {
@@ -206,6 +292,15 @@ function money(value: number, currency: string, decimals = 0): string {
   } catch {
     return `${value.toFixed(decimals)} ${currency}`;
   }
+}
+
+/** '$8.1k' — only for the per-day tail of a rollup, where three full figures
+ *  would drown the totals that lead the line. Currency still leads. */
+function compactMoney(value: number, currency: string): string {
+  const abs = Math.abs(value);
+  if (abs >= 1_000_000) return `${money(value / 1_000_000, currency, 1)}m`;
+  if (abs >= 1_000) return `${money(value / 1_000, currency, 1)}k`;
+  return money(value, currency, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -380,6 +475,10 @@ export async function fetchConfigTargets(code: string): Promise<ConfigTargets | 
  * account-local day closed (the fetch's local date is later than yesterday).
  * No row anywhere near now + no recent spend → dormant, which is a fact
  * ("no delivery"), not a gap.
+ *
+ * A multi-day window runs this gate ONCE PER DAY: Friday and Saturday can be
+ * verified while Sunday's sync is still incomplete, and the honest brief then
+ * reports two days and names the third.
  */
 export function gateYesterday(
   days: AccountDay[],
@@ -397,6 +496,55 @@ export function gateYesterday(
   if (days.length === 0) return 'unverified';
   const anySpend = days.some((d) => d.spend > 0);
   return anySpend ? 'unverified' : 'dormant';
+}
+
+export interface WindowGate {
+  /** The account's status for the window as a whole. */
+  status: 'verified' | 'unverified' | 'dormant';
+  /** Window days that passed the gate, oldest first — the reportable facts. */
+  verified: string[];
+  /** Window days that did not, oldest first — named in the lines, never quoted. */
+  unverified: string[];
+  /** The day every as-of reader anchors on: the last verified day, or the last
+   *  day of the window when nothing verified. */
+  reportingDay: string;
+}
+
+/**
+ * The honesty gate across a whole reporting window.
+ *
+ * One verified day is enough to report facts — a rollup that can stand behind
+ * Friday and Saturday says so and NAMES Sunday as unverified rather than
+ * silently averaging a day it never saw. Nothing verified falls back to the
+ * paths that already existed: dormant when every day reads as no-delivery,
+ * could-not-verify otherwise. A single-day window is exactly `gateYesterday`.
+ */
+export function gateWindow(
+  days: AccountDay[],
+  window: string[],
+  timeZone: string,
+): WindowGate {
+  const gates = window.map((d) => ({ date: d, gate: gateYesterday(days, d, timeZone) }));
+  const verified = gates.filter((g) => g.gate === 'verified').map((g) => g.date);
+  const unverified = gates.filter((g) => g.gate !== 'verified').map((g) => g.date);
+  const status: WindowGate['status'] =
+    verified.length > 0
+      ? 'verified'
+      : gates.every((g) => g.gate === 'dormant')
+        ? 'dormant'
+        : 'unverified';
+  return {
+    status,
+    verified,
+    unverified,
+    reportingDay: verified[verified.length - 1] ?? window[window.length - 1]!,
+  };
+}
+
+/** The named gap inside a partly verified rollup — null when there is none. */
+export function unverifiedDaysLine(dates: string[]): string | null {
+  if (!dates.length) return null;
+  return `⚠️ ${namedDays(dates)} could not be verified — data sync incomplete.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -476,23 +624,144 @@ function composeYesterdayLine(
   return parts.join(' · ');
 }
 
+/** One verified day inside a rollup: '$8.1k/$41.20', or the honest shape of a
+ *  day too thin to price. A zero-spend day is a FACT and stays in the tail. */
+function perDayTail(d: AccountDay, currency: string): string {
+  const wd = weekdayLabel(d.date);
+  if (d.spend <= 0) return `${wd} no delivery`;
+  if (d.purchases >= 3) {
+    return `${wd} ${compactMoney(d.spend, currency)}/${money(d.spend / d.purchases, currency, 2)}`;
+  }
+  return `${wd} ${compactMoney(d.spend, currency)}/${d.purchases} purchase${
+    d.purchases === 1 ? '' : 's'
+  }`;
+}
+
+/**
+ * The rollup headline — same grammar as the single-day line (number, then its
+ * meaning; currency first; days named, never "yesterday"), but the totals span
+ * every VERIFIED window day and a compact per-day tail keeps the shape of the
+ * weekend visible so the reader is never handed an average that hides a
+ * collapsed Sunday.
+ */
+export function composeWindowLine(
+  windowDays: AccountDay[],
+  trailing: AccountDay[],
+  currency: string,
+  bands: GoalBands | null,
+  config: ConfigTargets | null,
+): string {
+  const first = windowDays[0]!;
+  const last = windowDays[windowDays.length - 1]!;
+  const spend = windowDays.reduce((s, d) => s + d.spend, 0);
+  const purchases = windowDays.reduce((s, d) => s + d.purchases, 0);
+
+  const span = `${dayLabel(first.date)} – ${dayLabel(last.date)}`;
+  const parts: string[] = [];
+  // "Weekend" earns its word from the dates themselves — the rollup is not
+  // told which shape it is, it reads it.
+  parts.push(
+    `${windowDays.some((d) => isWeekendDate(d.date)) ? `Weekend ${span}` : span}: ${money(
+      spend,
+      currency,
+    )} spent`,
+  );
+  parts.push(`${purchases} purchase${purchases === 1 ? '' : 's'}`);
+
+  if (purchases >= 3 && spend > 0) {
+    const cpa = spend / purchases;
+    parts.push(`${money(cpa, currency, 2)} CPA — ${meaningForCpa(cpa, currency, bands, config)}`);
+  } else if (spend > 0) {
+    parts.push('too few results for a CPA verdict');
+  }
+
+  // ROAS is a rate: pool revenue over pooled spend. Averaging the daily roas
+  // figures would weight a $200 Sunday like a $9k Friday.
+  const revenue = windowDays.reduce(
+    (s, d) => s + (d.purchase_value ?? (d.roas !== null ? d.roas * d.spend : 0)),
+    0,
+  );
+  if (revenue > 0 && spend > 0) parts.push(`ROAS ${(revenue / spend).toFixed(2)}`);
+
+  parts.push(`(${windowDays.map((d) => perDayTail(d, currency)).join(' · ')})`);
+
+  // Context: the account against itself, measured strictly BEFORE the window
+  // so the rollup is never compared against part of itself.
+  const prior = trailing.filter((d) => d.date < first.date && d.spend > 0).slice(-7);
+  if (prior.length >= 3) {
+    const totSpend = prior.reduce((s, d) => s + d.spend, 0);
+    const totPurch = prior.reduce((s, d) => s + d.purchases, 0);
+    const ctx: string[] = [`7d avg spend ${money(totSpend / prior.length, currency)}/day`];
+    if (totPurch >= 3 && purchases >= 3) {
+      ctx.push(`7d CPA ${money(totSpend / totPurch, currency, 2)}`);
+    }
+    parts.push(`(${ctx.join(' · ')})`);
+  }
+  return parts.join(' · ');
+}
+
 // ---------------------------------------------------------------------------
 // Movers — materiality → surprise → persistence (from-scratch, see design doc)
 // ---------------------------------------------------------------------------
 
+/**
+ * One detector, two window shapes. `window` is a single account-local day (the
+ * normal morning) or the verified days of a rollup, oldest first; the ad's
+ * figures are POOLED across those days and compared against its trailing 7
+ * spending days from BEFORE the window, so a weekend is never judged against
+ * part of itself.
+ *
+ * Threshold scaling: rates (CPA, share of account) are window-length
+ * invariant and keep their thresholds untouched. Money is not — the
+ * materiality floor takes the window-TOTAL account spend, and the "usual"
+ * figure a pooled spend is compared against is the per-day average × the
+ * window length. `accountSpendWindow` is likewise the window total.
+ */
 export function detectMovers(
   ads: AdDay[],
-  yesterday: string,
-  accountSpendYesterday: number,
+  window: string | string[],
+  accountSpendWindow: number,
   accountAvgDailySpend: number,
   currency: string,
 ): Mover[] {
-  const yesterdayAds = ads.filter((a) => a.date === yesterday && a.spend > 0);
+  const windowDates = Array.isArray(window) ? window : [window];
+  const windowStart = windowDates[0]!;
+  const windowLen = windowDates.length;
+  const multiDay = windowLen > 1;
+  const inWindow = new Set(windowDates);
+  /** Named inline so a pooled figure never reads as a single day's. */
+  const spanNote = multiDay
+    ? ` over ${weekdayLabel(windowStart)}–${weekdayLabel(windowDates[windowLen - 1]!)}`
+    : '';
+
+  // One pooled row per ad. On a single-day window this is the day's own row,
+  // in the same order the old filter produced (the sort below is stable).
+  const pooled = new Map<
+    string,
+    { ad_id: string; ad_name: string | null; spend: number; purchases: number }
+  >();
+  for (const r of ads) {
+    if (!inWindow.has(r.date)) continue;
+    const cur = pooled.get(r.ad_id);
+    if (cur) {
+      cur.spend += r.spend;
+      cur.purchases += r.purchases;
+      if (r.ad_name) cur.ad_name = r.ad_name; // newest name wins
+    } else {
+      pooled.set(r.ad_id, {
+        ad_id: r.ad_id,
+        ad_name: r.ad_name,
+        spend: r.spend,
+        purchases: r.purchases,
+      });
+    }
+  }
+  const yesterdayAds = [...pooled.values()].filter((a) => a.spend > 0);
   if (yesterdayAds.length === 0) return [];
 
   const materialityFloor = Math.max(
-    0.05 * accountSpendYesterday,
-    0.01 * accountAvgDailySpend,
+    0.05 * accountSpendWindow,
+    0.01 * accountAvgDailySpend * windowLen,
   );
 
   const byAd = new Map<string, AdDay[]>();
@@ -505,7 +774,7 @@ export function detectMovers(
   for (const yRow of yesterdayAds) {
     if (yRow.spend < materialityFloor) continue;
     const history = (byAd.get(yRow.ad_id) ?? []).filter(
-      (r) => r.date < yesterday && r.spend > 0,
+      (r) => r.date < windowStart && r.spend > 0,
     );
     // New ads belong to What's-New (Loop 2), never to movers.
     if (history.length < 3) continue;
@@ -518,12 +787,22 @@ export function detectMovers(
     // must include its zero days, or the money line overstates and the share
     // direction can invert.
     const accountTrailingDays =
-      new Set(ads.filter((r) => r.date < yesterday && r.spend > 0).map((r) => r.date)).size || 1;
+      new Set(ads.filter((r) => r.date < windowStart && r.spend > 0).map((r) => r.date)).size || 1;
     const tAvgSpend = tSpend / Math.min(accountTrailingDays, 7);
     const tAvgPurch = tPurch / trail.length;
     const name = yRow.ad_name ?? yRow.ad_id;
+    // The ledger's `yesterday_spend` is read back the NEXT morning against a
+    // single day's spend (ledger-walker), so it stays a per-day figure; the
+    // pooled total travels under its own key.
+    const eviSpend = multiDay ? round2(yRow.spend / windowLen) : yRow.spend;
+    const windowEvidence = multiDay
+      ? { window: windowDates, window_days: windowLen, window_spend: round2(yRow.spend) }
+      : {};
 
     // Signal 1: money out, nothing back — on an ad that usually converts.
+    // Both sides stay in their own terms (zero across the window vs a usual
+    // per-day rate), so the >=1/day bar needs no window scaling — it only gets
+    // harder to hit, never easier.
     if (yRow.purchases === 0 && tAvgPurch >= 1 && yRow.spend >= materialityFloor) {
       movers.push({
         adId: yRow.ad_id,
@@ -531,10 +810,11 @@ export function detectMovers(
         kind: 'zero_results_on_spend',
         spendAtStake: yRow.spend,
         score: yRow.spend * 2,
-        line: `"${truncate(name, 48)}" — ${money(yRow.spend, currency)} spent, 0 purchases (usually ~${tAvgPurch.toFixed(1)}/day)`,
+        line: `"${truncate(name, 48)}" — ${money(yRow.spend, currency)} spent${spanNote}, 0 purchases (usually ~${tAvgPurch.toFixed(1)}/day)`,
         evidence: {
-          yesterday_spend: yRow.spend,
+          yesterday_spend: eviSpend,
           trailing_avg_purchases: round2(tAvgPurch),
+          ...windowEvidence,
         },
       });
       continue;
@@ -547,6 +827,9 @@ export function detectMovers(
       const rel = (yCpa - tCpa) / tCpa;
       if (Math.abs(rel) > 0.25) {
         // Typical-variation check when enough defined daily CPAs exist.
+        // Trailing DAILY CPAs, against a pooled window CPA that has less
+        // variance than any single day — the check is therefore conservative
+        // on a rollup, which is the direction we want it to err.
         const dailyCpas = trail
           .filter((r) => r.purchases > 0)
           .map((r) => r.spend / r.purchases);
@@ -566,12 +849,13 @@ export function detectMovers(
             kind: 'cpa_shift',
             spendAtStake: yRow.spend,
             score: yRow.spend * Math.abs(rel),
-            line: `"${truncate(name, 48)}" — CPA ${money(yCpa, currency, 2)} vs ${money(tCpa, currency, 2)} usual (${dir} ${Math.round(Math.abs(rel) * 100)}%), on ${money(yRow.spend, currency)}`,
+            line: `"${truncate(name, 48)}" — CPA ${money(yCpa, currency, 2)}${spanNote} vs ${money(tCpa, currency, 2)} usual (${dir} ${Math.round(Math.abs(rel) * 100)}%), on ${money(yRow.spend, currency)}`,
             evidence: {
               yesterday_cpa: round2(yCpa),
               trailing_cpa: round2(tCpa),
               rel_change: round2(rel),
-              yesterday_spend: yRow.spend,
+              yesterday_spend: eviSpend,
+              ...windowEvidence,
             },
           });
           continue;
@@ -580,8 +864,10 @@ export function detectMovers(
     }
 
     // Signal 3: spend-share shift (delivery moved, big ad got bigger/smaller).
-    if (accountSpendYesterday > 0 && accountAvgDailySpend > 0) {
-      const yShare = yRow.spend / accountSpendYesterday;
+    // Both shares are window-length invariant; only the money comparison needs
+    // scaling — a pooled 3-day spend is set against 3 × the usual day.
+    if (accountSpendWindow > 0 && accountAvgDailySpend > 0) {
+      const yShare = yRow.spend / accountSpendWindow;
       const tShare = tAvgSpend / accountAvgDailySpend;
       const shift = yShare - tShare;
       if (Math.abs(shift) > 0.08) {
@@ -593,12 +879,13 @@ export function detectMovers(
           kind: 'spend_share_shift',
           spendAtStake: yRow.spend,
           score: yRow.spend * Math.abs(shift) * 4,
-          line: `"${truncate(name, 48)}" — ${money(yRow.spend, currency)} vs ${money(tAvgSpend, currency)}/day usual (share of account ${Math.round(tShare * 100)}% → ${Math.round(yShare * 100)}%)`,
+          line: `"${truncate(name, 48)}" — ${money(yRow.spend, currency)}${spanNote} vs ${money(tAvgSpend * windowLen, currency)}${multiDay ? ' usual' : '/day usual'} (share of account ${Math.round(tShare * 100)}% → ${Math.round(yShare * 100)}%)`,
           evidence: {
-            yesterday_spend: yRow.spend,
+            yesterday_spend: eviSpend,
             trailing_avg_spend: round2(tAvgSpend),
             yesterday_share: round2(yShare),
             trailing_share: round2(tShare),
+            ...windowEvidence,
           },
         });
       }
@@ -613,18 +900,65 @@ export function detectMovers(
 // What's new (Loop 2's detection seed; keyed on ad_id, and says so)
 // ---------------------------------------------------------------------------
 
+/**
+ * `window` is one account-local day or the verified days of a rollup. An ad
+ * counts as new when its first-ever spending day falls ANYWHERE inside the
+ * window — that is the Saturday-launch fix: before the window existed, an ad
+ * that first spent on Saturday was already "seen before" by Monday and was
+ * therefore never announced and never watched. The reported spend/results are
+ * pooled from its first day to the window's end, and `firstSpendDate` carries
+ * the true day so the line and the watch row can both name it.
+ */
 export async function detectNewAds(
   clientId: string,
   ads: AdDay[],
-  yesterday: string,
-): Promise<Array<{ adId: string; adName: string; spend: number; results: number }>> {
-  const yesterdaySpenders = ads.filter((a) => a.date === yesterday && a.spend > 0);
+  window: string | string[],
+): Promise<
+  Array<{
+    adId: string;
+    adName: string;
+    spend: number;
+    results: number;
+    firstSpendDate: string;
+  }>
+> {
+  const windowDates = Array.isArray(window) ? window : [window];
+  const windowStart = windowDates[0]!;
+  const inWindow = new Set(windowDates);
+  const yesterdaySpenders = ads.filter((a) => inWindow.has(a.date) && a.spend > 0);
   if (yesterdaySpenders.length === 0) return [];
 
   const seenBefore = new Set(
-    ads.filter((a) => a.date < yesterday && a.spend > 0).map((a) => a.ad_id),
+    ads.filter((a) => a.date < windowStart && a.spend > 0).map((a) => a.ad_id),
   );
-  const candidates = yesterdaySpenders.filter((a) => !seenBefore.has(a.ad_id));
+  const candidates: Array<{
+    adId: string;
+    adName: string;
+    spend: number;
+    results: number;
+    firstSpendDate: string;
+  }> = [];
+  const byAd = new Map<string, (typeof candidates)[number]>();
+  for (const a of yesterdaySpenders) {
+    if (seenBefore.has(a.ad_id)) continue;
+    const cur = byAd.get(a.ad_id);
+    if (cur) {
+      cur.spend += a.spend;
+      cur.results += a.purchases;
+      if (a.date < cur.firstSpendDate) cur.firstSpendDate = a.date;
+      if (a.ad_name) cur.adName = a.ad_name;
+    } else {
+      const entry = {
+        adId: a.ad_id,
+        adName: a.ad_name ?? a.ad_id,
+        spend: a.spend,
+        results: a.purchases,
+        firstSpendDate: a.date,
+      };
+      byAd.set(a.ad_id, entry);
+      candidates.push(entry);
+    }
+  }
   if (candidates.length === 0) return [];
 
   // The window only covers HISTORY_DAYS — confirm against full history.
@@ -636,21 +970,14 @@ export async function detectNewAds(
       .from('ad_daily')
       .select('ad_id')
       .eq('client_id', clientId)
-      .eq('ad_id', c.ad_id)
-      .lt('date', yesterday)
+      .eq('ad_id', c.adId)
+      .lt('date', windowStart)
       .gt('spend', 0)
       .limit(1);
-    if (data?.length) olderSpenders.add(c.ad_id);
+    if (data?.length) olderSpenders.add(c.adId);
   }
 
-  return candidates
-    .filter((c) => !olderSpenders.has(c.ad_id))
-    .map((c) => ({
-      adId: c.ad_id,
-      adName: c.ad_name ?? c.ad_id,
-      spend: c.spend,
-      results: c.purchases,
-    }));
+  return candidates.filter((c) => !olderSpenders.has(c.adId));
 }
 
 // ---------------------------------------------------------------------------
@@ -659,7 +986,7 @@ export async function detectNewAds(
 
 async function composeCategoryLines(
   clientId: string,
-  yesterday: string,
+  windowDates: string[],
   currency: string,
   config: ConfigTargets | null,
 ): Promise<string[]> {
@@ -667,12 +994,14 @@ async function composeCategoryLines(
   const targets = config?.category_targets;
   if (!rules?.length || !targets) return [];
 
+  // The category view covers exactly the days the headline covers — the row
+  // cap scales with the window so a rollup can never be silently truncated.
   const { data, error } = await getSupabase()
     .from('campaign_daily')
     .select('campaign_name, spend, purchases')
     .eq('client_id', clientId)
-    .eq('date', yesterday)
-    .limit(500);
+    .in('date', windowDates)
+    .limit(500 * windowDates.length);
   if (error || !data?.length) return [];
 
   const categorize = (name: string): string => {
@@ -730,7 +1059,23 @@ async function writeInsights(briefs: AccountBrief[]): Promise<number> {
       source: 'loop-1-brief',
     };
     if (b.status === 'verified' && b.day) {
-      const cpa = b.day.purchases >= 3 ? b.day.spend / b.day.purchases : null;
+      // The observation covers the whole verified window; evidence.date stays
+      // the LAST day (what every as-of reader anchors on) and evidence.window
+      // says which days the totals actually span. Single-day briefs pool one
+      // row and are byte-for-byte the row they always wrote.
+      const wd = b.windowDays ?? [b.day];
+      const multiDay = wd.length > 1;
+      const spend = wd.reduce((s, d) => s + d.spend, 0);
+      const purchases = wd.reduce((s, d) => s + d.purchases, 0);
+      const purchase_value = wd.some((d) => d.purchase_value !== null)
+        ? wd.reduce((s, d) => s + (d.purchase_value ?? 0), 0)
+        : null;
+      const roas = multiDay
+        ? purchase_value !== null && spend > 0
+          ? round2(purchase_value / spend)
+          : null
+        : wd[0]!.roas;
+      const cpa = purchases >= 3 ? spend / purchases : null;
       rows.push({
         ...base,
         entity_level: 'account',
@@ -740,16 +1085,23 @@ async function writeInsights(briefs: AccountBrief[]): Promise<number> {
         claim: `${b.yesterday}: ${b.lines[0] ?? 'reported'}`,
         evidence: {
           date: b.yesterday,
-          spend: b.day.spend,
-          purchases: b.day.purchases,
-          purchase_value: b.day.purchase_value,
-          roas: b.day.roas,
+          ...(multiDay ? { window: b.window } : {}),
+          spend,
+          purchases,
+          purchase_value,
+          roas,
           cpa,
         },
         recheck: {
           metric: 'account_day',
-          scope: { client_code: b.clientRow.code, date: b.yesterday },
-          note: 'restate check: re-read account_daily for this date and compare',
+          scope: {
+            client_code: b.clientRow.code,
+            date: b.yesterday,
+            ...(multiDay ? { window: b.window } : {}),
+          },
+          note: multiDay
+            ? 'restate check: re-read account_daily for every date in the window and compare'
+            : 'restate check: re-read account_daily for this date and compare',
         },
       });
     }
@@ -800,8 +1152,10 @@ async function writeInsights(briefs: AccountBrief[]): Promise<number> {
         entity_id: n.adId,
         entity_name: n.adName,
         kind: 'launch-watch',
-        claim: `First spend ${b.yesterday}: "${truncate(n.adName, 60)}" (${n.spend.toFixed(2)}, ${n.results} purchases). Verdicts due at 24h/72h/7d.`,
-        evidence: { first_spend_date: b.yesterday, spend: n.spend, results: n.results },
+        // The TRUE first spending day, which inside a weekend rollup is often
+        // not the reporting day — the watch's whole clock hangs off it.
+        claim: `First spend ${n.firstSpendDate}: "${truncate(n.adName, 60)}" (${n.spend.toFixed(2)}, ${n.results} purchases). Verdicts due at 24h/72h/7d.`,
+        evidence: { first_spend_date: n.firstSpendDate, spend: n.spend, results: n.results },
         recheck: {
           metric: 'launch_watch',
           scope: { client_code: b.clientRow.code, ad_id: n.adId },
@@ -933,12 +1287,15 @@ async function markPersistence(briefs: AccountBrief[]): Promise<void> {
         .get(r.entity_id)!
         .push({ claim: r.claim, kind: r.evidence?.kind, date: r.evidence?.date });
     }
+    // Rows about days INSIDE this brief's own window are this signal too, not
+    // a prior one — so the bar is the window's first day, not its last.
+    const windowStart = b.window[0] ?? b.yesterday;
     for (const m of b.movers) {
       // Only rows about EARLIER data days count — a stored claim about the
       // same reporting day (same-day re-run, or an account whose day hasn't
       // rolled) is this signal, not a prior one.
       const prior = (priorByAd.get(m.adId) ?? []).filter(
-        (p) => p.date && p.date < b.yesterday,
+        (p) => p.date && p.date < windowStart,
       );
       if (!prior.length) continue;
       // Claims start with the ad name and may carry their own why/persistence
@@ -970,23 +1327,40 @@ function round2(n: number): number {
   return Math.round(n * 100) / 100;
 }
 
-async function briefAccount(row: ClientRow, now: Date): Promise<AccountBrief> {
+async function briefAccount(
+  row: ClientRow,
+  now: Date,
+  writeToLedger: boolean,
+): Promise<AccountBrief> {
   const tz = row.timezone ?? 'Europe/Berlin';
   const currency = row.currency ?? 'EUR';
-  const yesterday = accountYesterday(tz, now);
+  const window = reportingWindow(tz, now);
   const since = localDateStr(new Date(now.getTime() - HISTORY_DAYS * 86400_000), tz);
 
   const days = await fetchAccountDaily(row.id, since);
-  const status = gateYesterday(days, yesterday, tz);
+
+  // The honesty gate runs PER DAY (see gateWindow). Everything as-of — watch
+  // verdicts, the walker, the why-clause — hangs on the last day we can
+  // actually stand behind.
+  const {
+    status,
+    verified: verifiedDates,
+    unverified: unverifiedDates,
+    reportingDay: yesterday,
+  } = gateWindow(days, window, tz);
+
   const brief: AccountBrief = {
     clientRow: row,
     status,
     yesterday,
+    window: verifiedDates.length ? verifiedDates : window,
+    unverifiedDays: unverifiedDates,
     lines: [],
     movers: [],
     newAds: [],
     watchVerdicts: [],
     followUps: [],
+    macroLines: [],
   };
 
   if (status === 'dormant') {
@@ -1002,7 +1376,9 @@ async function briefAccount(row: ClientRow, now: Date): Promise<AccountBrief> {
       .reverse()
       .find((d) => d.fetched_at && localDateStr(new Date(d.fetched_at), tz) > d.date);
     brief.lines.push(
-      `⚠️ Could not verify yesterday (${yesterday}) — data sync incomplete.` +
+      (window.length === 1
+        ? `⚠️ Could not verify yesterday (${yesterday}) — data sync incomplete.`
+        : `⚠️ Could not verify ${namedDays(window)} — data sync incomplete.`) +
         (lastVerified
           ? ` Freshest verified day is ${lastVerified.date}: ${money(lastVerified.spend, currency)} spent, ${lastVerified.purchases} purchases.`
           : ' No verified day in the window.'),
@@ -1010,33 +1386,49 @@ async function briefAccount(row: ClientRow, now: Date): Promise<AccountBrief> {
     return brief;
   }
 
-  const day = days.find((d) => d.date === yesterday)!;
+  const windowDays = verifiedDates.map((d) => days.find((x) => x.date === d)!);
+  const windowStart = verifiedDates[0]!;
+  const day = windowDays[windowDays.length - 1]!;
   brief.day = day;
+  brief.windowDays = windowDays;
   brief.trailing = days;
 
   const config = await fetchConfigTargets(row.code);
   brief.lines.push(
-    composeYesterdayLine(day, days, currency, row.goal_bands, config),
+    windowDays.length === 1
+      ? composeYesterdayLine(day, days, currency, row.goal_bands, config)
+      : composeWindowLine(windowDays, days, currency, row.goal_bands, config),
   );
+  // The gap is named right where the numbers are, so nobody reads the rollup
+  // as covering days it never saw. Line 0 stays the headline (the ledger
+  // quotes it as the account's claim).
+  const gapLine = unverifiedDaysLine(unverifiedDates);
+  if (gapLine) brief.lines.push(gapLine);
 
   // Category view (PL-style), when the client's config defines one.
-  const catLines = await composeCategoryLines(row.id, yesterday, currency, config);
+  const catLines = await composeCategoryLines(row.id, verifiedDates, currency, config);
   for (const l of catLines) brief.lines.push(`  · ${l}`);
 
-  if (day.spend > 0) {
+  const windowSpend = windowDays.reduce((s, d) => s + d.spend, 0);
+  if (windowSpend > 0) {
     const ads = await fetchAdDaily(row.id, since);
-    const prior = days.filter((d) => d.date < yesterday && d.spend > 0).slice(-7);
+    // One trailing baseline for every consumer below, measured strictly BEFORE
+    // the window — a weekend is never its own comparison.
+    const prior = days.filter((d) => d.date < windowStart && d.spend > 0).slice(-7);
     const avgDaily = prior.length
       ? prior.reduce((s, d) => s + d.spend, 0) / prior.length
-      : day.spend;
-    brief.movers = detectMovers(ads, yesterday, day.spend, avgDaily, currency);
-    brief.newAds = await detectNewAds(row.id, ads, yesterday);
+      : windowSpend / windowDays.length;
+    brief.movers = detectMovers(ads, verifiedDates, windowSpend, avgDaily, currency);
+    brief.newAds = await detectNewAds(row.id, ads, verifiedDates);
 
     // Loop 2's verdict half: evaluate the open launch watches, evidence-based.
     const watches = await fetchActiveWatches(row.code);
     if (watches.length) {
       const priorSpend = prior.reduce((s, d) => s + d.spend, 0);
       const priorPurch = prior.reduce((s, d) => s + d.purchases, 0);
+      // Watches are evaluated AS-OF the last verified window day: ageDays is
+      // computed from first_spend_date, so a watch opened on Friday is simply
+      // three days old by Monday and the >=7 close still lands correctly.
       brief.watchVerdicts = evaluateLaunches({
         watches,
         ads,
@@ -1057,7 +1449,9 @@ async function briefAccount(row: ClientRow, now: Date): Promise<AccountBrief> {
       });
     }
 
-    // Loop 3's ledger walker: yesterday's claims get closed out, not dropped.
+    // Loop 3's ledger walker: earlier claims get closed out, not dropped. It
+    // walks against the last verified window day, and its own "only PRIOR data
+    // days" filter keeps a claim written about a day inside this window out.
     const openObservations = await fetchActiveAdObservations(row.code);
     if (openObservations.length) {
       brief.followUps = walkAdInsights({
@@ -1072,9 +1466,31 @@ async function briefAccount(row: ClientRow, now: Date): Promise<AccountBrief> {
       });
     }
 
+    // Macro pulse — rollup mornings only (each account's first weekday):
+    // level-vs-pinned-baseline, slope, chords. Fail-open: null drops the block.
+    if (window.length > 1) {
+      const pulse = await buildMacroPulse(
+        {
+          id: row.id,
+          code: row.code,
+          ad_account_id: row.ad_account_id,
+          currency,
+          timezone: tz,
+        },
+        { now, writeToLedger },
+      );
+      if (pulse) brief.macroLines = pulse.lines;
+    }
+
     // The why-clause: each mover carries its diagnosis (Loop 3, slice 1).
+    // v1 caveat on a rollup: composeWhy is handed the LAST verified window day,
+    // so the funnel read is Sunday-vs-trailing rather than weekend-vs-trailing,
+    // while the mover LINE it annotates is pooled across the window. The change
+    // ledger is widened to the day before the window so a Friday edit is still
+    // visible. Good enough to name a cause; a pooled funnel read is a later
+    // slice, not a silent approximation — this comment is the receipt.
     if (brief.movers.length) {
-      const dayBefore = new Date(`${yesterday}T00:00:00Z`);
+      const dayBefore = new Date(`${windowStart}T00:00:00Z`);
       dayBefore.setUTCDate(dayBefore.getUTCDate() - 1);
       const [changes, mixShifts] = await Promise.all([
         fetchAccountChanges(row.id, dayBefore.toISOString()),
@@ -1140,11 +1556,14 @@ function renderClientSection(
       );
     }
     if (b.newAds.length) {
+      // Inside a rollup the launch day is news in itself — a Saturday first
+      // spend says "Sat, Aug 8", never a bare "first spend".
+      const nameDay = b.window.length > 1;
       const items = b.newAds
         .slice(0, 5)
         .map(
           (n) =>
-            `• "${truncate(n.adName, 48)}" — first spend, ${money(n.spend, b.clientRow.currency ?? 'EUR')} · ${n.results} purchases (watch opened — verdicts as evidence arrives)`,
+            `• "${truncate(n.adName, 48)}" — first spend${nameDay ? ` ${dayLabel(n.firstSpendDate)}` : ''}, ${money(n.spend, b.clientRow.currency ?? 'EUR')} · ${n.results} purchases (watch opened — verdicts as evidence arrives)`,
         );
       out.push([`New (${b.newAds.length}):`, ...items].join('\n'));
     }
@@ -1159,6 +1578,9 @@ function renderClientSection(
     const followUpLines = b.followUps.filter((f) => f.line);
     if (followUpLines.length) {
       out.push(['Follow-ups:', ...followUpLines.map((f) => `• ${f.line}`)].join('\n'));
+    }
+    if (b.macroLines.length) {
+      out.push(b.macroLines.join('\n'));
     }
   }
   return out.join('\n');
@@ -1207,19 +1629,23 @@ export async function runAgencyMorningBrief(
     const briefs: AccountBrief[] = [];
     for (const row of group) {
       try {
-        briefs.push(await briefAccount(row, now));
+        briefs.push(await briefAccount(row, now, writeToLedger));
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         logger.error({ err: msg, code: row.code }, 'account brief failed');
+        const failedWindow = reportingWindow(row.timezone ?? 'Europe/Berlin', now);
         briefs.push({
           clientRow: row,
           status: 'unverified',
-          yesterday: accountYesterday(row.timezone ?? 'Europe/Berlin', now),
+          yesterday: failedWindow[failedWindow.length - 1]!,
+          window: failedWindow,
+          unverifiedDays: failedWindow,
           lines: [`⚠️ could not build this account's brief (${msg.slice(0, 100)}) — numbers withheld rather than guessed.`],
           movers: [],
           newAds: [],
           watchVerdicts: [],
           followUps: [],
+          macroLines: [],
         });
       }
     }
