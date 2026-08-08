@@ -56,7 +56,7 @@ import {
 } from './ledger-walker.js';
 
 // v1 pilots (Daniel, 2026-08-06). Top-level codes; children join via parent_code.
-export const PILOT_CLIENTS = ['BFM', 'PL'];
+export const PILOT_CLIENTS = ['BFM', 'PL', 'BRIAN'];
 
 // #ada — Ada's bot is already a member (same default as ready-to-upload-check).
 const DEFAULT_CHANNEL = 'C0AHX94CBF0';
@@ -1668,7 +1668,7 @@ export async function runAgencyMorningBrief(
   let text = [
     `☀️ *Agency morning brief* — ${dateLine}`,
     ...sections,
-    '_Numbers are each account\'s own local day, verified against the warehouse sync before quoting. Pilot: Brain.fm + Press London._',
+    '_Numbers are each account\'s own local day, verified against the warehouse sync before quoting. Covering: Brain.fm, Press London, SimplySub._',
   ].join('\n\n');
 
   // The simulated-Dan judge: grade before posting; a weak brief still posts,
