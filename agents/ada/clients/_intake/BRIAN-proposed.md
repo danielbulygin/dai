@@ -1,3 +1,5 @@
+MERGED into BRIAN.md 2026-08-09 (bands + brand docs). Kept for provenance.
+
 # BRIAN — proposed onboarding config (EXTRACTION — human merge required)
 
 Generated 2026-08-06T02:37Z by scripts/onboarding-intake.ts from:
