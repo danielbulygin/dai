@@ -35,6 +35,11 @@
  * closing it") instead of re-alarming. Rows are never deleted; a ledger failure
  * never costs the reader the block (fail-open).
  *
+ * THE WHY: a voiced line gets its decomposition attached underneath (see
+ * macro-why.ts) — mix vs within by campaign or product category, the ad sets
+ * carrying frequency, the creative roster's age. That step runs ONLY when
+ * something is voiced, and fails open: the block always reaches the reader.
+ *
  * Everything from `weeklyAverages` down to `renderMacroPulse` is pure — rows in,
  * sentences out. All I/O lives in `fetchVitalsHistory`, `syncDriftInsights` and
  * `buildMacroPulse` (the entry point the brief wires, Mondays only).
@@ -43,6 +48,7 @@
 import { getSupabase } from '../integrations/supabase.js';
 import { getDaiSupabase } from '../integrations/dai-supabase.js';
 import { logger } from '../utils/logger.js';
+import { attachMacroWhysSafely, type MacroWhy } from './macro-why.js';
 
 // ---------------------------------------------------------------------------
 // Constants — the design doc's numbers, in one place
@@ -195,6 +201,9 @@ export interface PulseItem {
   line: string;
   /** The number the ledger's trajectory records for this item. */
   level: number | null;
+  /** The decomposition under the line — WHY it moved (see macro-why.ts).
+   *  Absent when nothing could be decomposed; the block renders without it. */
+  why?: MacroWhy;
 }
 
 export interface RenderedPulse {
@@ -873,10 +882,23 @@ function steadySummary(reads: MacroReads, vitals: VitalRead[], currency: string)
     .join(' · ');
 }
 
-/** header + bullets, or the single collapsed line when nothing is happening. */
+/**
+ * header + bullets, or the single collapsed line when nothing is happening.
+ *
+ * A bullet that carries a decomposition gets it indented underneath, in the
+ * brief's own movers grammar: `↳ why:` then `↳ next:`. Same visual language on
+ * every surface means the reader learns one shape, not three.
+ */
 export function pulseLines(rendered: RenderedPulse): string[] {
   if (!rendered.items.length) return rendered.steady ? [rendered.steady.collapsed] : [];
-  const out = [rendered.header, ...rendered.items.map((i) => `• ${i.line}`)];
+  const out = [rendered.header];
+  for (const item of rendered.items) {
+    out.push(`• ${item.line}`);
+    if (item.why) {
+      out.push(`    ↳ why: ${item.why.text}`);
+      out.push(`    ↳ next: ${item.why.next}`);
+    }
+  }
   if (rendered.steady) out.push(`• ${rendered.steady.line}`);
   return out;
 }
@@ -1105,7 +1127,15 @@ export async function syncDriftInsights(
           ? chordTrajectoryVoice(chord, existing)
           : trajectoryVoice(read, reads, rendered.currency, existing, item.key);
         const trajectory = Array.isArray(existing.trajectory) ? [...existing.trajectory] : [];
-        trajectory.push({ date: reads.asOf, value: item.level, verdict: 'confirmed' });
+        // The trajectory carries the explanation, not just the number: reading
+        // back six weeks of "still climbing" is only useful with the why that
+        // held on each of those Mondays.
+        trajectory.push({
+          date: reads.asOf,
+          value: item.level,
+          verdict: 'confirmed',
+          ...(item.why ? { why: item.why.text } : {}),
+        });
         const { error: updateError } = await dai
           .from('ada_insights')
           .update({ trajectory, last_checked_at: now, status: 'active' })
@@ -1134,6 +1164,11 @@ export async function syncDriftInsights(
           slope_pct_per_week: read?.slopePctPerWeek ?? null,
           weeks_running: read?.consecutiveWeeks ?? null,
           ...(chord ? { chord: chord.id, members: chord.members } : {}),
+          // The decomposition travels with the claim: next Monday's trajectory
+          // line can then be compared against WHY it moved, not just how far.
+          ...(item.why
+            ? { why: { text: item.why.text, next: item.why.next, ...item.why.evidence } }
+            : {}),
         },
         recheck: {
           metric: 'macro_drift',
@@ -1274,6 +1309,21 @@ async function composeMacroPulse(
   if (!rendered.lines.length) {
     logger.info({ code: client.code }, 'macro pulse skipped — no readable vitals in the window');
     return null;
+  }
+
+  // The why-loop: only when something is actually voiced. A steady account
+  // never pays for the ad-level read, which is the whole triggered-analysis
+  // principle — full decomposition when a vital is off, silence otherwise.
+  // It decomposes the SAME two windows the reads were measured on.
+  if (rendered.items.length) {
+    const attached = await attachMacroWhysSafely({
+      client: { id: client.id, code: client.code },
+      reads,
+      chords,
+      rendered,
+      currency,
+    });
+    if (attached) rendered.lines = pulseLines(rendered);
   }
 
   const lines = writeToLedger
