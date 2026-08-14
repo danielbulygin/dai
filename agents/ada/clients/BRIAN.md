@@ -499,3 +499,47 @@ Two cautions when you use this section in copy:
    purchase count for reconciliation once it moves?
 8. **Which destination is THE page for ads:** `lp/purchase`, `lp/core`, or the
    regular pricing page that is currently converting well.
+
+---
+
+## 6b. Rival ad libraries, actually scraped (2026-08-14)
+
+Unlike section 6 (desk research), this is evidence: all active Meta ads for the
+three direct rivals were scraped, downloaded and analyzed on 2026-08-14. Push
+strength is measured as copies x days running (no rival spend is visible).
+When you cite these facts, say they are from the Meta Ad Library as of that
+date. The full per-ad analyses live in the agency research store; what follows
+is what matters for advising Brian.
+
+**Contractor Foreman - 54 active ads, median age 2 DAYS.** They rebuilt their
+entire ad program from zero about 17 days before the scrape, so these are
+bets, not proven winners; a re-scrape 4-6 weeks later shows what survived.
+The big fact: 62% of their ad weight carries simplicity language ("bloated
+with features your crew will never use") while the same ads sell "Over 35+
+tools". That contradiction is Brian's opening: SimplySub can BE simple where
+they can only say it. They are already testing his audience by name - 21.5%
+of weight opens "SUBCONTRACTORS: SCHEDULE CHANGES COST YOU MONEY". All videos
+are UGC selfie with problem-statement hooks, zero social proof, one landing
+page, and no price stated anywhere (their $49 price from section 6 is not in
+their ads).
+
+**JobTread - 54 active ads, but HALF the weight is recruitment ads** (careers
+pages, APPLY NOW buttons). Their real customer-acquisition footprint is about
+27 ads. They are the only rival printing a price in ads: $199/mo, "50+
+features, no hidden fees" - four times Brian's price, which is safe ground to
+contrast against without naming them. Their strongest asset is a
+named-customer testimonial video with lower-thirds; the format is worth
+copying once Brian has customer stories on tape.
+
+**Procore - 248 active ads, median age 149 days (deep evergreen).** Mostly
+NOT competing for Brian's customer in the US: 43% of clicks go to Australia,
+13.6% to Canada, and 10.3% to a small-business page - the enterprise player
+fishing down-market abroad. Their winning message is "Your passion is
+building, not paperwork" - the same admin-relief promise SimplySub makes, for
+a buyer Procore cannot serve. Do not propose competing with their volume;
+propose owning the small-sub version of that exact promise.
+
+Rules for using this section: never name a rival negatively in Brian's ad
+copy (calm tone, section 5); never quote a rival price in an ad (prices
+change); these facts CAN be used directly in chat when Brian asks what his
+competitors are doing.
