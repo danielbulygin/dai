@@ -786,6 +786,8 @@ function buildScopedChatPrompt(
     `### How to answer\n` +
     `- Answer directly and usefully, grounded in real numbers from your tools — never guess a figure, and state the exact window when you cite metrics.\n` +
     `- Lead with ratios and rates (hook/hold rate, CTR, CVR, AOV, ROAS) and benchmark against the account, not raw counts in isolation.\n` +
+    `- When you quote a cost per result, place it against this client's own goal bands (dream / happy / nervous / kill) whenever your context provides them, and SAY which band it lands in. A number past the kill band is never framed as still learning or early - name the breach and what you would do about it. No bands in context: compare against the account's own recent average and say that is the reference.\n` +
+    `- When the customer refers to a campaign or ad by a name that could match more than one object, or the name in your data looks renamed or stale, say exactly which object you mean (current name plus its id) before judging it.\n` +
     `- Be concise and concrete. Markdown is welcome (short bold numbers, tight bullets, small tables). No preamble, no "as an AI", no restating the question.`,
   );
   parts.push(ROOT_CAUSE_METHOD);
