@@ -76,6 +76,55 @@ PROVISIONAL until Dan ratifies the quality bar.
 and drops a judged run file in `tests/eval/runs/`. Read-only; never restarts a
 service. Units checked in at `deploy/systemd/`.
 
+## Observability (customer-facing Ada)
+
+Every tool failure, API error and write-verification miss in a scoped run produces
+a structured event. The point is Matrinova's failure class: Ada narrated a
+campaign-create that never happened and nobody saw the error.
+
+**Where events land** (`src/observability/error-events.ts`):
+1. `journalctl -u ada-console-assist` — always, at error level.
+2. JSONL at `ADA_ERROR_LOG_PATH` (default `data/ada-errors.jsonl`, gitignored).
+3. Slack, ONLY for runs that belong to a customer (`client_code` set), throttled to
+   one ping per (client, tool, error class, kind) per `ADA_ERROR_PING_COOLDOWN_MS`.
+
+Read the stream with `pnpm errors` (`scripts/ada-errors.ts`):
+
+```bash
+pnpm errors --since 24h                        # recent events
+pnpm errors --summary --since 7d               # what is breaking, ranked
+pnpm errors --client MTN --kind silent_write_failure
+```
+
+**The kinds**: `tool_failure`, `silent_write_failure` (a write failed but the model
+was NOT told — the Matrinova shape), `run_failed` (non-success SDK subtype),
+`handler_exception` (incl. a stream that died mid-answer), `api_error`,
+`verification_miss` (a write's Meta read-back does not confirm the intent),
+`refusal` (the Governor said no — recorded, never paged).
+
+Every message passes `safeMessage` (`src/observability/redact.ts`): Meta/Slack/
+Anthropic/LangSmith/JWT credentials and scope claims are stripped, then the text is
+capped. Ordinary ids stay readable on purpose — a redacted id is an undiagnosable
+error. Emission is fire-and-forget and never throws: observability must not be able
+to take Ada down.
+
+**LangSmith tracing** (`src/observability/langsmith.ts`) is a hand-rolled client over
+the ingest REST API — deliberately NOT the `langsmith` SDK, because the fast deploy
+path skips `pnpm install` and a new runtime dep would restart into module-not-found.
+It is off unless BOTH `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY` are set; unset
+means zero network calls and zero behaviour change. Each run is one root span tagged
+`client:<CODE>` and `run:<run_id>`, with a child span per tool call.
+
+The `run_id` that correlates log line, error event and trace also rides the SSE
+`meta` and `done` frames, so a customer complaint resolves to one exact run.
+
+**Known gap — see `src/agents/sdk/observe-after.ts`:** `OBSERVE_AFTER_WRITE_TOOLS`
+promotes soft failures to the model for only four Meta write tools. Every other
+write (Notion tasks, Slack posts, learnings) can still fail while the model is told
+it succeeded, which is what lets Ada narrate a write that did not happen. The error
+stream now SEES those (`silent_write_failure`), but the model is still not told —
+closing that is a behaviour change and needs the eval loop.
+
 ## Deploy
 
 `dai.service` on the droplet (139.59.144.194): `cd /root/dai && git pull --ff-only && pnpm build && systemctl restart dai`.
