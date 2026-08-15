@@ -18,7 +18,7 @@ import { getToolsForProfile, executeTool } from '../tool-registry.js';
 import type { ToolContext } from '../tool-registry.js';
 import type { ToolProfile } from '../profiles/index.js';
 import { jsonSchemaToZodRawShape } from './schema.js';
-import { surfaceWriteFailure } from './observe-after.js';
+import { detectSoftError, surfaceWriteFailure } from './observe-after.js';
 
 export const ADA_MCP_SERVER_NAME = 'ada-tools';
 
@@ -58,6 +58,22 @@ export interface BuildBridgeOptions {
   onToolFailure?: (toolName: string, resultText: string) => Promise<string | undefined>;
   /** Outcome tracker (Ada 2.0 run-state: confidence escalation, probe tracking). */
   onToolOutcome?: (toolName: string, failed: boolean) => void;
+  /**
+   * Observability span (error stream + LangSmith trace). Called BEFORE the tool
+   * runs; the returned closer is called exactly once with what actually
+   * happened. Opening a span per CALL rather than keying on the tool name is
+   * what stops parallel calls to the same tool from reporting each other's
+   * outcome.
+   *
+   * `status` separates the three real endings: 'ok', 'failed' (the tool hit a
+   * wall) and 'refused' (the Governor stopped it — correct behaviour, never an
+   * alert). `softError` carries an `{"error": …}` the tool RETURNED while still
+   * reporting success to the model: the shape a silent write failure has.
+   */
+  observe?: (
+    toolName: string,
+    args: Record<string, unknown>,
+  ) => (outcome: { status: 'ok' | 'failed' | 'refused'; text: string; softError?: string }) => void;
   serverName?: string;
 }
 
@@ -82,20 +98,40 @@ export function buildAdaToolBridge(
       jsonSchemaToZodRawShape(def.input_schema),
       async (args: Record<string, unknown>) => {
         opts.onToolExec?.(def.name);
+        const closeSpan = opts.observe?.(def.name, (args ?? {}) as Record<string, unknown>);
         // The Governor (Ada 2.0): a write scored 'blocked' or 'options' never
         // executes — the model gets the verdict + guidance as an error result.
         const gate = opts.govern?.(def.name);
         if (gate?.refusal) {
+          closeSpan?.({ status: 'refused', text: gate.refusal });
           return { content: [{ type: 'text' as const, text: gate.refusal }], isError: true };
         }
-        const { result, isError } = await executeTool(
-          def.name,
-          (args ?? {}) as Record<string, unknown>,
-          opts.getContext(),
-        );
+        let result: string;
+        let isError: boolean;
+        try {
+          ({ result, isError } = await executeTool(
+            def.name,
+            (args ?? {}) as Record<string, unknown>,
+            opts.getContext(),
+          ));
+        } catch (err) {
+          // executeTool catches its own tool errors, so reaching here means the
+          // DISPATCHER broke — the least visible failure there is.
+          closeSpan?.({ status: 'failed', text: (err as Error).message });
+          throw err;
+        }
         // Observe-after: a failed WRITE must reach the model as an error, not a
         // narratable success (the structural fix for streams-success-on-failure).
         const failed = surfaceWriteFailure(def.name, result, isError);
+        // The span sees the SWALLOWED error too: detectSoftError fires for every
+        // tool, while surfaceWriteFailure only promotes the four observe-after
+        // writes. That gap is exactly where a failed write still reaches the
+        // model as a success, so the error stream must not inherit it.
+        closeSpan?.({
+          status: failed ? 'failed' : 'ok',
+          text: result,
+          softError: detectSoftError(result),
+        });
         // Failure organ: on a failure, look the error up in ada_dead_ends and
         // hand the model the documented fix inline (look yourself up first).
         let text = result;

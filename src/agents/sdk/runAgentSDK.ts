@@ -20,6 +20,7 @@
  * cache breakpoints are all SDK-managed; write-gating is a declarative
  * PreToolUse hook instead of post-hoc fabricated-write guards.
  */
+import { randomUUID } from 'node:crypto';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { getAgent } from '../registry.js';
 import { getConstitution } from '../constitution.js';
@@ -34,7 +35,9 @@ import { extractBatchIds, getBatchStates, buildLaunchStateSection } from '../lau
 import { buildAgentDirectorySection } from '../agent-directory.js';
 import { logger } from '../../utils/logger.js';
 import { buildAdaToolBridge } from './tool-bridge.js';
-import { makePreToolUseHook, makeCanUseTool, defaultPolicy, bareToolName, type GuardPolicy, type GuardDecision } from './guard.js';
+import { makePreToolUseHook, makeCanUseTool, defaultPolicy, bareToolName, isWriteTool, type GuardPolicy, type GuardDecision } from './guard.js';
+import { emitErrorEvent, type ErrorSurface } from '../../observability/error-events.js';
+import { startTrace } from '../../observability/langsmith.js';
 import {
   newRunState, governWrite, noteToolOutcome, lookupDeadEnd, renderDeadEndNote, failureText,
   type DeadEndMatchEvent,
@@ -75,6 +78,15 @@ export interface SdkRunExtras {
   onGovernorVerdict?: (v: GovernorVerdict) => void;
   /** Ada 2.0: fired when a failed write matches a known ada_dead_ends row. */
   onDeadEndMatch?: (m: DeadEndMatchEvent) => void;
+  /**
+   * Correlation id for this run — the SAME id in the log line, every error event
+   * and the LangSmith trace, so "what happened in that conversation?" is one
+   * grep. Callers that expose it to the client (the SSE `meta`/`done` frames)
+   * pass their own; otherwise one is minted here.
+   */
+  runId?: string;
+  /** Which customer-facing surface this run came in on. Defaults from clientScope. */
+  surface?: ErrorSurface;
 }
 
 const DEFAULT_ADA_SKILLS = [
@@ -173,6 +185,25 @@ export async function runAgentSDK(options: RunOptions, extras: SdkRunExtras = {}
 
   const session = await resolveSdkSession(effectiveAgentId, options.channelId, options.userId, options.threadTs);
 
+  // Observability identity for this run. `clientCode` is read from the SERVER-derived
+  // scope, never from the model or the request body — an event that misattributes a
+  // failure to the wrong customer is worse than no event.
+  const runId = extras.runId ?? randomUUID();
+  const surface: ErrorSurface = extras.surface ?? (options.clientScope ? 'chat-scoped' : 'chat');
+  const clientCode = options.clientScope?.clientCode ?? null;
+  const runRef = { runId, surface, clientCode, sessionId: session.id, userId: options.userId };
+
+  const trace = startTrace({
+    name: `ada:${surface}`,
+    runId,
+    clientCode,
+    surface,
+    sessionId: session.id,
+    userId: options.userId,
+    inputs: { message: options.userMessage },
+    metadata: { profile, agent_id: effectiveAgentId, model: extras.model ?? agent.config.model },
+  });
+
   const systemPrompt = await buildSystemPrompt(options);
 
   const toolContext: ToolContext = {
@@ -222,6 +253,32 @@ export async function runAgentSDK(options: RunOptions, extras: SdkRunExtras = {}
       // Failures are recorded in onToolFailure (with the match); only successes here.
       if (!failed) noteToolOutcome(runState, name, false);
     },
+    observe: (name, args) => {
+      const span = trace.child(name, 'tool', { args });
+      return ({ status, text, softError }) => {
+        span.end(status === 'ok' ? { outputs: { result: text } } : { error: text });
+        if (status === 'refused') {
+          emitErrorEvent({ ...runRef, kind: 'refusal', toolName: name, error: text, errorClass: 'governor_refusal' });
+          return;
+        }
+        if (status === 'failed') {
+          emitErrorEvent({ ...runRef, kind: 'tool_failure', toolName: name, error: text });
+          return;
+        }
+        // Reported success to the model, but the result carries an error inside:
+        // the write did not happen and the model does not know. This is the one
+        // event that says "Ada is about to narrate something untrue".
+        if (softError) {
+          emitErrorEvent({
+            ...runRef,
+            kind: isWriteTool(name) ? 'silent_write_failure' : 'tool_failure',
+            toolName: name,
+            error: softError,
+            detail: { surfaced_to_model: false, is_write: isWriteTool(name) },
+          });
+        }
+      };
+    },
   });
 
   const model = extras.model ?? agent.config.model;
@@ -259,54 +316,69 @@ export async function runAgentSDK(options: RunOptions, extras: SdkRunExtras = {}
   let claudeSessionId: string | undefined;
   const toolsUsed: string[] = [];
 
-  for await (const msg of q) {
-    // Token-level streaming (chat): handle raw partial events; the full `assistant`
-    // message that follows each turn is skipped to avoid double-emitting.
-    if (extras.streamPartial && msg.type === 'stream_event') {
-      const ev = (msg as { event?: { type?: string; content_block?: { type?: string; name?: string }; delta?: { type?: string; text?: string; thinking?: string } } }).event;
-      if (ev?.type === 'content_block_start') {
-        const cb = ev.content_block;
-        if (cb?.type === 'tool_use') {
-          lastTurnHadToolUse = true;
-          if (cb.name) { toolsUsed.push(cb.name); options.onToolUse?.(cb.name); }
-        } else if (cb?.type === 'text' && lastTurnHadToolUse) {
-          options.onTurnReset?.(); lastTurnHadToolUse = false;
+  try {
+    for await (const msg of q) {
+      // Token-level streaming (chat): handle raw partial events; the full `assistant`
+      // message that follows each turn is skipped to avoid double-emitting.
+      if (extras.streamPartial && msg.type === 'stream_event') {
+        const ev = (msg as { event?: { type?: string; content_block?: { type?: string; name?: string }; delta?: { type?: string; text?: string; thinking?: string } } }).event;
+        if (ev?.type === 'content_block_start') {
+          const cb = ev.content_block;
+          if (cb?.type === 'tool_use') {
+            lastTurnHadToolUse = true;
+            if (cb.name) { toolsUsed.push(cb.name); options.onToolUse?.(cb.name); }
+          } else if (cb?.type === 'text' && lastTurnHadToolUse) {
+            options.onTurnReset?.(); lastTurnHadToolUse = false;
+          }
+        } else if (ev?.type === 'content_block_delta') {
+          const d = ev.delta;
+          if (d?.type === 'text_delta' && d.text) { responseText += d.text; options.onText?.(d.text); }
+          else if (d?.type === 'thinking_delta' && d.thinking) { options.onThinking?.(d.thinking); }
         }
-      } else if (ev?.type === 'content_block_delta') {
-        const d = ev.delta;
-        if (d?.type === 'text_delta' && d.text) { responseText += d.text; options.onText?.(d.text); }
-        else if (d?.type === 'thinking_delta' && d.thinking) { options.onThinking?.(d.thinking); }
+        continue;
       }
-      continue;
+      if (msg.type === 'assistant') {
+        if (extras.streamPartial) continue; // already streamed via stream_event
+        // A new assistant turn after a tool turn → reset streamed text (Slack parity).
+        if (lastTurnHadToolUse) { options.onTurnReset?.(); lastTurnHadToolUse = false; }
+        const content = (msg as { message?: { content?: unknown[] } }).message?.content ?? [];
+        for (const b of content) {
+          const blk = b as { type?: string; text?: string; thinking?: string; name?: string };
+          if (blk.type === 'text' && blk.text) { responseText += blk.text; options.onText?.(blk.text); }
+          if (blk.type === 'thinking' && blk.thinking) { options.onThinking?.(blk.thinking); }
+          if (blk.type === 'tool_use') { lastTurnHadToolUse = true; if (blk.name) { toolsUsed.push(blk.name); logger.info({ tool: blk.name, sessionId: session.id }, `tool_use: ${blk.name}`); options.onToolUse?.(blk.name); } }
+        }
+      } else if (msg.type === 'result') {
+        const r = msg as Record<string, unknown>;
+        claudeSessionId = r.session_id as string;
+        turns = (r.num_turns as number) ?? 0;
+        const u = (r.usage as Record<string, number>) ?? {};
+        usage = {
+          input: u.input_tokens ?? 0,
+          output: u.output_tokens ?? 0,
+          cacheRead: u.cache_read_input_tokens ?? 0,
+          cacheCreation: u.cache_creation_input_tokens ?? 0,
+        };
+        if (typeof r.result === 'string' && r.result && !responseText) responseText = r.result as string;
+        extras.onResult?.({ costUsd: (r.total_cost_usd as number) ?? 0, subtype: (r.subtype as string) ?? 'unknown', toolsUsed });
+        if (r.subtype !== 'success') {
+          logger.warn({ subtype: r.subtype, sessionId: session.id }, 'runAgentSDK non-success result');
+          emitErrorEvent({
+            ...runRef,
+            kind: 'run_failed',
+            error: `runner subtype=${r.subtype}`,
+            errorClass: `subtype_${r.subtype}`,
+            detail: { turns, cost_usd: r.total_cost_usd ?? null, tools_used: toolsUsed },
+          });
+        }
+      }
     }
-    if (msg.type === 'assistant') {
-      if (extras.streamPartial) continue; // already streamed via stream_event
-      // A new assistant turn after a tool turn → reset streamed text (Slack parity).
-      if (lastTurnHadToolUse) { options.onTurnReset?.(); lastTurnHadToolUse = false; }
-      const content = (msg as { message?: { content?: unknown[] } }).message?.content ?? [];
-      for (const b of content) {
-        const blk = b as { type?: string; text?: string; thinking?: string; name?: string };
-        if (blk.type === 'text' && blk.text) { responseText += blk.text; options.onText?.(blk.text); }
-        if (blk.type === 'thinking' && blk.thinking) { options.onThinking?.(blk.thinking); }
-        if (blk.type === 'tool_use') { lastTurnHadToolUse = true; if (blk.name) { toolsUsed.push(blk.name); logger.info({ tool: blk.name, sessionId: session.id }, `tool_use: ${blk.name}`); options.onToolUse?.(blk.name); } }
-      }
-    } else if (msg.type === 'result') {
-      const r = msg as Record<string, unknown>;
-      claudeSessionId = r.session_id as string;
-      turns = (r.num_turns as number) ?? 0;
-      const u = (r.usage as Record<string, number>) ?? {};
-      usage = {
-        input: u.input_tokens ?? 0,
-        output: u.output_tokens ?? 0,
-        cacheRead: u.cache_read_input_tokens ?? 0,
-        cacheCreation: u.cache_creation_input_tokens ?? 0,
-      };
-      if (typeof r.result === 'string' && r.result && !responseText) responseText = r.result as string;
-      extras.onResult?.({ costUsd: (r.total_cost_usd as number) ?? 0, subtype: (r.subtype as string) ?? 'unknown', toolsUsed });
-      if (r.subtype !== 'success') {
-        logger.warn({ subtype: r.subtype, sessionId: session.id }, 'runAgentSDK non-success result');
-      }
-    }
+  } catch (err) {
+    // The stream died mid-run: a torn answer the customer sees as Ada going
+    // quiet. Nothing downstream reports it, so this is its only record.
+    emitErrorEvent({ ...runRef, kind: 'handler_exception', error: err, detail: { tools_used: toolsUsed } });
+    trace.end({ error: err });
+    throw err;
   }
 
   // Persist the SDK session id (the bridge) + bookkeeping.
@@ -317,12 +389,18 @@ export async function runAgentSDK(options: RunOptions, extras: SdkRunExtras = {}
     await updateSession(session.id, { total_turns: session.total_turns + turns });
     await addMessage({ session_id: session.id, role: 'user', content: options.userMessage });
     await addMessage({ session_id: session.id, role: 'assistant', content: responseText });
-  } catch (err) { logger.warn({ err }, 'runAgentSDK persistence failed (continuing)'); }
+  } catch (err) {
+    logger.warn({ err }, 'runAgentSDK persistence failed (continuing)');
+    // A lost session row means the next turn silently starts a new conversation.
+    emitErrorEvent({ ...runRef, kind: 'handler_exception', error: err, errorClass: 'persistence' });
+  }
 
   logger.info(
     { sessionId: session.id, claudeSessionId, turns, inputTokens: usage.input, outputTokens: usage.output, source: options.source ?? 'untagged' },
     'runAgentSDK completed',
   );
+
+  trace.end({ outputs: { answer: responseText, turns, tools_used: toolsUsed } });
 
   return { sessionId: session.id, response: responseText, turns, usage };
 }

@@ -204,6 +204,16 @@ export function isReadTool(bare: string): boolean {
   return READ_TOOLS.has(bare) || BUILTIN_READS.has(bare);
 }
 
+/**
+ * True for a tool that CHANGES something outside dai. The guard's own allow-list
+ * is the honest definition of Ada's write surface, so observability grades
+ * severity off the same set the safety layer does rather than keeping a second
+ * copy that can drift out of sync with it.
+ */
+export function isWriteTool(bare: string): boolean {
+  return PRODUCTION_WRITES.has(bare) || NOTION_TASK_WRITES.has(bare) || isDeleteTool(bare);
+}
+
 function readClientCode(input: unknown): string | undefined {
   if (input && typeof input === 'object') {
     const cc = (input as Record<string, unknown>).client_code;
