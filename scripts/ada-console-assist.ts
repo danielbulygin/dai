@@ -52,6 +52,7 @@ import { buildClientOverlay } from '../src/client-agents/prompt-builder.js';
 import { getSupabase } from '../src/integrations/supabase.js';
 import { envTokenFor } from '../src/integrations/meta-token.js';
 import { logWrite } from '../src/agents/action-log.js';
+import { emitErrorEvent } from '../src/observability/error-events.js';
 
 const PORT = Number(process.env.ADA_ASSIST_PORT ?? 8092);
 const HOST = '0.0.0.0';
@@ -381,6 +382,7 @@ async function handleAssist(req: AssistRequest): Promise<AssistResponse> {
   // the dai session by (channelId, threadTs, agentId), so we thread session_id
   // through threadTs to keep a stable conversation key for resume.
   const threadTs = req.session_id || `assist-${randomUUID()}`;
+  const runId = randomUUID();
 
   let costUsd = 0;
   let subtype = 'unknown';
@@ -397,6 +399,8 @@ async function handleAssist(req: AssistRequest): Promise<AssistResponse> {
     },
     {
       // defaultPolicy() = deny ALL writes — advisory only. We pass no overrides.
+      runId,
+      surface: 'assist',
       maxBudgetUsd: MAX_BUDGET_USD,
       maxTurns: MAX_TURNS,
       onResult: (r) => { costUsd = r.costUsd; subtype = r.subtype; toolsUsed = r.toolsUsed; },
@@ -817,6 +821,10 @@ async function handleChatStream(
   // The client's own opaque conversation id — echoed back verbatim in meta/done so
   // it keeps sending the SAME id to continue the thread (prefixing stays internal).
   const sessionId = req.session_id || `chat-${randomUUID()}`;
+  // One id for this REQUEST (a session spans many). It rides the SSE frames so a
+  // customer complaint — "Ada said she made the campaign" — resolves to the exact
+  // run's error events and LangSmith trace instead of a timestamp search.
+  const runId = randomUUID();
   // Internal SDK resume key = (channelId, threadTs, agentId). For client-scoped
   // requests the agentId already differs per client (ada_client_<CODE>), so
   // cross-CLIENT resume is impossible. WITHIN a client, sessions are shared by
@@ -836,7 +844,7 @@ async function handleChatStream(
       ]);
 
   sseHead(res);
-  sseEvent(res, 'meta', { session_id: sessionId });
+  sseEvent(res, 'meta', { session_id: sessionId, run_id: runId });
 
   let closed = false;
   res.on('close', () => { closed = true; });
@@ -918,6 +926,8 @@ async function handleChatStream(
             }),
         thinking: true,
         streamPartial: true,
+        runId,
+        surface: scope ? 'chat-scoped' : 'chat',
         maxBudgetUsd: CHAT_MAX_BUDGET_USD,
         maxTurns: CHAT_MAX_TURNS,
         onResult: (r) => { costUsd = r.costUsd; toolsUsed = r.toolsUsed; subtype = r.subtype; },
@@ -959,15 +969,24 @@ async function handleChatStream(
     // success in the client (the streams-success-on-failure fix, service layer).
     const ok = subtype === 'success';
     safe('done', {
-      session_id: sessionId, cost_usd: round(costUsd),
+      session_id: sessionId, run_id: runId, cost_usd: round(costUsd),
       used_skills: inferUsedSkills(fullText, toolsUsed),
       ok, subtype, ...(ok ? {} : { error: `runner subtype=${subtype}` }),
     });
   } catch (e) {
     console.error('[ada-console-assist] /chat error:', e);
     const errMsg = (e as Error).message || 'chat failed';
+    emitErrorEvent({
+      kind: 'handler_exception',
+      surface: scope ? 'chat-scoped' : 'chat',
+      runId,
+      clientCode: scope?.clientCode ?? req.context?.client_code ?? null,
+      sessionId,
+      userId: scope?.userId ?? 'launch-console',
+      error: e,
+    });
     safe('error', { error: errMsg });
-    safe('done', { session_id: sessionId, cost_usd: round(costUsd), used_skills: [], ok: false, subtype: subtype === 'unknown' ? 'exception' : subtype, error: errMsg });
+    safe('done', { session_id: sessionId, run_id: runId, cost_usd: round(costUsd), used_skills: [], ok: false, subtype: subtype === 'unknown' ? 'exception' : subtype, error: errMsg });
   } finally {
     clearInterval(heartbeat);
     if (!closed) { try { res.end(); } catch { /* noop */ } }
@@ -1032,8 +1051,9 @@ function parseDiagnosis(text: string): DiagnosisBlock | null {
 
 async function handleDiagnoseStream(req: AssistRequest, res: http.ServerResponse): Promise<void> {
   const threadTs = `diagnose-${randomUUID()}`;
+  const runId = randomUUID();
   sseHead(res);
-  sseEvent(res, 'meta', { session_id: threadTs });
+  sseEvent(res, 'meta', { session_id: threadTs, run_id: runId });
   let closed = false;
   res.on('close', () => { closed = true; });
   const heartbeat = setInterval(() => { if (!closed) { try { res.write(': ping\n\n'); } catch { /* noop */ } } }, 15_000);
@@ -1058,6 +1078,8 @@ async function handleDiagnoseStream(req: AssistRequest, res: http.ServerResponse
       },
       {
         // No policy override → defaultPolicy() denies ALL writes. The debugger only reads.
+        runId,
+        surface: 'diagnose',
         thinking: true,
         streamPartial: true,
         maxBudgetUsd: Number(process.env.ADA_DIAGNOSE_MAX_BUDGET ?? 3.0),
@@ -1068,6 +1090,14 @@ async function handleDiagnoseStream(req: AssistRequest, res: http.ServerResponse
   } catch (e) {
     errMsg = (e as Error).message || 'diagnose failed';
     console.error('[ada-console-assist] /diagnose error:', e);
+    emitErrorEvent({
+      kind: 'handler_exception',
+      surface: 'diagnose',
+      runId,
+      clientCode: req.context?.client_code ?? null,
+      sessionId: threadTs,
+      error: e,
+    });
   } finally {
     // ALWAYS try to surface a diagnosis from whatever text was produced — a late
     // budget/turn cap hit AFTER the diagnosis streamed must not discard a good result.
@@ -1075,7 +1105,7 @@ async function handleDiagnoseStream(req: AssistRequest, res: http.ServerResponse
     if (diag) safe('diagnosis', diag);
     // Only surface the error if we have NOTHING useful (no text + no diagnosis).
     if (errMsg && !diag && !fullText.trim()) safe('error', { error: errMsg });
-    safe('done', { session_id: threadTs, cost_usd: round(costUsd) });
+    safe('done', { session_id: threadTs, run_id: runId, cost_usd: round(costUsd) });
     clearInterval(heartbeat);
     if (!closed) { try { res.end(); } catch { /* noop */ } }
   }
@@ -1187,7 +1217,48 @@ async function graphCall(
   return json;
 }
 
-async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<string, unknown>> {
+/**
+ * Compare a write's READ-BACK against what the write asked for, and emit an
+ * event when they disagree. The rail already re-reads every object it touches
+ * (the meta-write methodology), but nothing ever CHECKED the read-back — a
+ * create that silently landed ACTIVE, or a budget that did not move, returned
+ * `ok: true` with the true object attached and nobody looked. This does not
+ * change what the rail returns; it makes the mismatch visible.
+ */
+function verifyWrite(input: {
+  runId: string;
+  clientCode: string;
+  userId: string | null;
+  action: string;
+  targetId: string;
+  after: Record<string, unknown> | null;
+  expect: Record<string, string | undefined>;
+}): void {
+  const mismatches: string[] = [];
+  if (!input.after || !input.after.id) {
+    mismatches.push('read-back returned no object');
+  } else {
+    for (const [field, want] of Object.entries(input.expect)) {
+      if (want === undefined) continue;
+      const got = input.after[field];
+      if (String(got ?? '') !== want) mismatches.push(`${field}: wanted ${want}, Meta says ${String(got ?? 'missing')}`);
+    }
+  }
+  if (!mismatches.length) return;
+  emitErrorEvent({
+    kind: 'verification_miss',
+    surface: 'execute-action',
+    runId: input.runId,
+    clientCode: input.clientCode,
+    userId: input.userId,
+    toolName: `execute_action:${input.action}`,
+    error: `write read-back does not confirm the intent — ${mismatches.join('; ')}`,
+    errorClass: 'verification_miss',
+    detail: { target_id: input.targetId, mismatches },
+  });
+}
+
+async function handleExecuteAction(body: ExecuteActionRequest, runId: string): Promise<Record<string, unknown>> {
   const clientCode = (body.client_code ?? '').toUpperCase().trim();
   const intent = body.intent ?? {};
   const type = intent.type ?? '';
@@ -1303,6 +1374,11 @@ async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<s
     } catch (e) {
       console.error('[execute-action] fence grow failed:', e);
     }
+    verifyWrite({
+      runId, clientCode, userId: body.user_id ?? null, action: 'create_campaign',
+      targetId: String(created.id), after,
+      expect: { id: String(created.id), status: 'PAUSED', objective },
+    });
     logWrite({
       context, toolName: 'execute_action:create_campaign', targetSystem: 'meta',
       targetId: String(created.id), before: null, after,
@@ -1350,6 +1426,11 @@ async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<s
         });
       }
     }
+    verifyWrite({
+      runId, clientCode, userId: body.user_id ?? null, action: 'duplicate_ad_set',
+      targetId: newId || sourceId, after: newId ? after : null,
+      expect: { status: 'PAUSED', campaign_id: dest },
+    });
     logWrite({
       context, toolName: 'execute_action:duplicate_ad_set', targetSystem: 'meta',
       targetId: newId || sourceId, before: source, after,
@@ -1421,6 +1502,11 @@ async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<s
     const after = await graphCall(String(created.id), token, {
       fields: 'id,name,status,effective_status,daily_budget,campaign_id,optimization_goal,billing_event,targeting',
     });
+    verifyWrite({
+      runId, clientCode, userId: body.user_id ?? null, action: 'create_ad_set',
+      targetId: String(created.id), after,
+      expect: { id: String(created.id), status: 'PAUSED', campaign_id: campaignId },
+    });
     logWrite({
       context, toolName: 'execute_action:create_ad_set', targetSystem: 'meta',
       targetId: String(created.id), before: null, after,
@@ -1437,6 +1523,11 @@ async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<s
     }
     await graphCall(String(intent.target_id), token, { status: 'PAUSED' }, 'POST');
     const after = await graphCall(String(intent.target_id), token, { fields: 'id,name,status,effective_status,campaign_id' });
+    verifyWrite({
+      runId, clientCode, userId: body.user_id ?? null, action: type,
+      targetId: String(intent.target_id), after,
+      expect: { status: 'PAUSED' },
+    });
     logWrite({
       context, toolName: `execute_action:${type}`, targetSystem: 'meta',
       targetId: String(intent.target_id), before, after,
@@ -1456,6 +1547,11 @@ async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<s
   await graphCall(String(intent.target_id), token, { daily_budget: String(Math.round(budgetUsd * 100)), execution_options: JSON.stringify(['validate_only']) }, 'POST');
   await graphCall(String(intent.target_id), token, { daily_budget: String(Math.round(budgetUsd * 100)) }, 'POST');
   const after = await graphCall(String(intent.target_id), token, { fields: 'id,name,status,effective_status,daily_budget,campaign_id' });
+  verifyWrite({
+    runId, clientCode, userId: body.user_id ?? null, action: 'update_budget',
+    targetId: String(intent.target_id), after,
+    expect: { daily_budget: String(Math.round(budgetUsd * 100)) },
+  });
   logWrite({
     context, toolName: 'execute_action:update_budget', targetSystem: 'meta',
     targetId: String(intent.target_id), before, after,
@@ -1494,6 +1590,14 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, 200, result);
       } catch (e) {
         console.error('[ada-console-assist] /assist error:', e);
+        emitErrorEvent({
+          kind: 'handler_exception',
+          surface: 'assist',
+          runId: randomUUID(),
+          clientCode: parsed.context?.client_code ?? null,
+          sessionId: parsed.session_id ?? null,
+          error: e,
+        });
         sendJson(res, 500, { ok: false, error: `assist failed: ${(e as Error).message}` });
       }
       return;
@@ -1548,12 +1652,26 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, 400, { ok: false, error: `bad request: ${(e as Error).message}` });
         return;
       }
+      const execRunId = randomUUID();
       try {
-        const result = await handleExecuteAction(parsed);
+        const result = await handleExecuteAction(parsed, execRunId);
         sendJson(res, 200, result);
       } catch (e) {
         console.error('[ada-console-assist] /execute-action error:', e);
-        sendJson(res, 200, { ok: false, error: `execution failed: ${(e as Error).message}` });
+        // The customer approved a write and it threw somewhere between Meta and
+        // us. Without this event the only record is a 200 body they may never
+        // read back to anyone.
+        emitErrorEvent({
+          kind: 'api_error',
+          surface: 'execute-action',
+          runId: execRunId,
+          clientCode: parsed.client_code ?? null,
+          userId: parsed.user_id ?? null,
+          toolName: `execute_action:${parsed.intent?.type ?? 'unknown'}`,
+          error: e,
+          detail: { target_id: parsed.intent?.target_id ?? null, campaign_id: parsed.intent?.campaign_id ?? null },
+        });
+        sendJson(res, 200, { ok: false, error: `execution failed: ${(e as Error).message}`, run_id: execRunId });
       }
       return;
     }
