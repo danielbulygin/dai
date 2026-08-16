@@ -12,7 +12,9 @@
  * back the moment spend passes ~2x the expected cost per result, a real CPA
  * verdict only at >=3 results (the small-numbers rule). The day 1/3/7
  * checkpoints survive only as a floor: if nothing fired, those mornings still
- * carry an honest status instead of silence.
+ * carry an honest status instead of silence. The floor fires on CROSSING, not
+ * equality — the brief runs weekday mornings only, so a checkpoint the
+ * weekend skipped fires on the next covered morning instead of never.
  *
  * Two honesty rules are load-bearing here:
  *   - A floored ad set's spend is not a vote. If a minimum-spend floor is
@@ -75,6 +77,11 @@ export interface EvaluateArgs {
   watches: WatchInput[];
   ads: LaunchAdDay[]; // ALL the account's ad rows in the window, ascending by date
   yesterday: string; // the account-local reporting day (YYYY-MM-DD)
+  /** The last account-local day covered by any earlier brief. On a normal
+   *  weekday cadence this is simply the day before `yesterday`; across a
+   *  weekend rollup it is the prior Thursday. Absent or null means assume
+   *  the daily cadence. */
+  previousReportingDay?: string | null;
   accountSpendYesterday: number;
   trailingAvgDailySpend: number; // account level
   accountTrailingCpa: number | null; // pooled trailing 7d CPA, null if <3 purchases
@@ -388,9 +395,17 @@ function evaluateWatch(
 
   // 7. The calendar floor. Nothing fired, so the checkpoint mornings carry an
   //    honest status rather than silence — and day 7 closes the watch.
-  // >= 7, not === 7: a day-7 that lands on a weekend (no weekday brief) must
-  // still close the watch on the next covered morning (review fix 2026-08-08).
-  if (ageDays === 1 || ageDays === 3 || ageDays >= 7) {
+  //    A checkpoint fires on CROSSING, not equality: the brief only runs on
+  //    weekday mornings, so a day 1 or day 3 that lands inside a weekend
+  //    rollup must speak on the next covered morning instead of never. With
+  //    no previousReportingDay the caller runs daily and crossing reduces to
+  //    the exact day. Day 7 stays >= 7 — it closes the watch, weekend or not.
+  const prevAge =
+    args.previousReportingDay != null
+      ? dayDiff(watch.firstSpendDate, args.previousReportingDay) + 1
+      : ageDays - 1;
+  const crossed = (n: number): boolean => ageDays >= n && prevAge < n;
+  if (crossed(1) || crossed(3) || ageDays >= 7) {
     const next =
       ageDays >= 7
         ? 'closing the watch — a week in without enough evidence to judge; it rides the daily movers check from here'
@@ -400,6 +415,10 @@ function evaluateWatch(
       `"${name}" — day ${ageDays}: ${spendStr(cumSpend, currency)} in, ${plural(cumPurchases, 'purchase')} — too early to judge`,
       next,
       ageDays >= 7,
+      {
+        checkpoint_crossed: ageDays >= 7 ? 7 : crossed(3) ? 3 : 1,
+        previous_reporting_day: args.previousReportingDay ?? null,
+      },
     );
   }
 
