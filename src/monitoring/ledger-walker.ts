@@ -8,10 +8,14 @@
  *
  * So every morning, for each ACTIVE ad-level `daily-observation` from a PRIOR
  * data day, this module re-runs that one insight's own signal against the new
- * reporting day and answers exactly one question: does the claim still hold?
+ * reporting window — one day on weekdays, the verified weekend on Monday — and
+ * answers exactly one question: does the claim still hold?
  *   confirmed → the signal is still there (row stays `active`)
  *   resolved  → the signal is gone (row closes, `resolved_at` set)
- *   stale     → there is no longer enough delivery to judge it (row goes `stale`)
+ *   stale     → there is no longer enough delivery to judge it (row goes
+ *               `stale` on a single-day walk; a rollup's un-judgeable outcome
+ *               parks the row `active` instead — a thin weekend is not
+ *               evidence a story ended)
  * The outcome is appended to the row's `trajectory` and reported to the reader
  * as a short "Follow-ups:" line. NEVER a delete — "what we used to believe and
  * why we stopped" is the never-repeat-mistakes memory.
@@ -63,6 +67,8 @@ export interface WalkedInsight {
   adName: string;
   signalKind: string; // from evidence.kind
   outcome: 'confirmed' | 'resolved' | 'stale';
+  /** A rollup's `stale` keeps the ledger row active — set only on rollups. */
+  keepActive?: boolean;
   line: string | null; // user-facing follow-up line, null = not worth a line
   value: number | null; // the re-checked metric value, null when n/a
   evidence: Record<string, unknown>;
@@ -73,7 +79,13 @@ export interface WalkArgs {
   /** ALL of the account's ad rows in the window, any order. */
   ads: WalkAdDay[];
   yesterday: string; // the account-local reporting day (YYYY-MM-DD)
+  /** The verified reporting-window days, ascending, `yesterday` last. Absent
+   *  or single means the normal single-day walk; Monday's caller passes the
+   *  weekend rollup's verified days so a story is judged on the whole window. */
+  windowDates?: string[];
   accountSpendYesterday: number;
+  /** Pooled account spend over `windowDates`; defaults to accountSpendYesterday. */
+  accountSpendWindow?: number;
   trailingAvgDailySpend: number; // account level
   currency: string;
   /** Ads already covered by today's Movers section — no duplicate lines. */
@@ -183,6 +195,7 @@ interface Recheck {
  */
 export function walkAdInsights(args: WalkArgs): WalkedInsight[] {
   const { insights, ads, yesterday, currency, todaysMoverAdIds, dayLabel } = args;
+  const isRollup = (args.windowDates?.length ?? 0) > 1;
 
   // Per-ad series, ascending — the caller's ordering is not a contract.
   const byAd = new Map<string, WalkAdDay[]>();
@@ -264,6 +277,10 @@ export function walkAdInsights(args: WalkArgs): WalkedInsight[] {
         adName: c.insight.entity_name ?? adId,
         signalKind: c.signalKind,
         outcome: c.recheck.outcome,
+        // A thin weekend is not evidence a story ended: a rollup's un-judgeable
+        // thread survives to be re-judged on the next single day (the age
+        // ceiling still bounds how long it can wait).
+        ...(c.recheck.outcome === 'stale' && isRollup ? { keepActive: true } : {}),
         line: null, // awarded below, if a slot survives the cap
         value: c.recheck.value,
         evidence: c.recheck.evidence,
@@ -299,11 +316,22 @@ function recheckOne(
 ): Recheck | null {
   const { yesterday, currency, dayLabel } = args;
 
+  const windowDates = args.windowDates?.length ? args.windowDates : [yesterday];
+  const windowStart = windowDates[0]!;
+  const isRollup = windowDates.length > 1;
+  const inWindow = new Set(windowDates);
+
   const todayRow = rows.find((r) => r.date === yesterday) ?? null;
   const daySpend = todayRow?.spend ?? 0;
   const dayPurchases = todayRow?.purchases ?? 0;
 
-  const trail = rows.filter((r) => r.date < yesterday && r.spend > 0).slice(-7);
+  const windowRows = rows.filter((r) => inWindow.has(r.date));
+  const windowSpend = windowRows.reduce((s, r) => s + r.spend, 0);
+  const windowPurchases = windowRows.reduce((s, r) => s + r.purchases, 0);
+  const avgWindowSpend = windowSpend / windowDates.length;
+
+  // The trail ends where the WINDOW starts — a weekend is never its own comparison.
+  const trail = rows.filter((r) => r.date < windowStart && r.spend > 0).slice(-7);
   const trailSpend = trail.reduce((s, r) => s + r.spend, 0);
   const trailPurchases = trail.reduce((s, r) => s + r.purchases, 0);
   const trailAvgSpend = trail.length ? trailSpend / trail.length : 0;
@@ -311,6 +339,9 @@ function recheckOne(
   const name = truncate(insight.entity_name ?? insight.entity_id, 48);
   const when = dayLabel(originDate);
   const dayOfStory = dayDiff(originDate, yesterday) + 1;
+  /** Names the pooled window in a line; empty on a single-day walk so those
+   *  sentences stay word-for-word what they always were. */
+  const overWindow = isRollup ? ` over ${dayLabel(windowStart)}–${dayLabel(yesterday)}` : '';
 
   const base: Record<string, unknown> = {
     recheck_of: signalKind,
@@ -319,6 +350,13 @@ function recheckOne(
     day_of_story: dayOfStory,
     day_spend: round2(daySpend),
     day_purchases: dayPurchases,
+    ...(isRollup
+      ? {
+          window_dates: windowDates,
+          window_spend: round2(windowSpend),
+          window_purchases: windowPurchases,
+        }
+      : {}),
     trailing_avg_spend: round2(trailAvgSpend),
     trailing_days: trail.length,
   };
@@ -326,27 +364,28 @@ function recheckOne(
   if (signalKind === 'cpa_shift') {
     const head = `"${name}" — the CPA shift flagged ${when}`;
     if (
-      daySpend <= 0 ||
-      dayPurchases < MIN_PURCHASES_FOR_CPA ||
+      windowSpend <= 0 ||
+      windowPurchases < MIN_PURCHASES_FOR_CPA ||
       trailPurchases < MIN_PURCHASES_FOR_CPA
     ) {
       return {
         outcome: 'stale',
         value: null,
-        line: `${head}: no longer enough delivery to judge (${money(daySpend, currency)} spent, ${plural(dayPurchases, 'purchase')})`,
+        line: `${head}: no longer enough delivery to judge${overWindow} (${money(windowSpend, currency)} spent, ${plural(windowPurchases, 'purchase')})`,
         evidence: { ...base, trailing_purchases: trailPurchases, judgeable: false },
       };
     }
-    const dayCpa = daySpend / dayPurchases;
+    const windowCpa = windowSpend / windowPurchases;
     const trailCpa = trailSpend / trailPurchases;
-    const rel = (dayCpa - trailCpa) / trailCpa;
+    const rel = (windowCpa - trailCpa) / trailCpa;
     const originalRel = numOrNull(insight.evidence.rel_change);
     // Direction matters: an ad that swung from expensive to cheap has NOT
     // confirmed the expensive claim, however big the new move is.
     const sameDirection = originalRel === null || (rel >= 0) === (originalRel >= 0);
     const ev = {
       ...base,
-      day_cpa: round2(dayCpa),
+      day_cpa: dayPurchases > 0 ? round2(daySpend / dayPurchases) : null,
+      ...(isRollup ? { window_cpa: round2(windowCpa) } : {}),
       trailing_cpa: round2(trailCpa),
       rel_change: round2(rel),
       original_rel_change: originalRel,
@@ -356,15 +395,15 @@ function recheckOne(
       const word = rel > 0 ? 'still elevated' : 'still cheaper';
       return {
         outcome: 'confirmed',
-        value: round2(dayCpa),
-        line: `${head}: ${word} at ${cpaStr(dayCpa, currency)} vs ${cpaStr(trailCpa, currency)} usual — day ${dayOfStory} of the story`,
+        value: round2(windowCpa),
+        line: `${head}: ${word} at ${cpaStr(windowCpa, currency)} vs ${cpaStr(trailCpa, currency)} usual${overWindow} — day ${dayOfStory} of the story`,
         evidence: ev,
       };
     }
     return {
       outcome: 'resolved',
-      value: round2(dayCpa),
-      line: `${head}: back in range at ${cpaStr(dayCpa, currency)} vs ${cpaStr(trailCpa, currency)} usual`,
+      value: round2(windowCpa),
+      line: `${head}: back in range at ${cpaStr(windowCpa, currency)} vs ${cpaStr(trailCpa, currency)} usual${overWindow}`,
       evidence: ev,
     };
   }
@@ -373,30 +412,40 @@ function recheckOne(
     const head = `"${name}" — the zero-purchase day flagged ${when}`;
     const originSpend = numOrNull(insight.evidence.yesterday_spend) ?? 0;
     const ev = { ...base, origin_spend: round2(originSpend) };
+    // Persistence is judged per DAY (window average), so a pooled weekend does
+    // not triple-count itself past the origin day's spend.
     if (
-      daySpend > 0 &&
-      daySpend >= SPEND_PERSISTENCE_FRACTION * originSpend &&
-      dayPurchases === 0
+      windowSpend > 0 &&
+      avgWindowSpend >= SPEND_PERSISTENCE_FRACTION * originSpend &&
+      windowPurchases === 0
     ) {
       return {
         outcome: 'confirmed',
         value: 0,
-        line: `${head}: still nothing back on ${money(daySpend, currency)} — day ${dayOfStory} of the story`,
+        line: `${head}: still nothing back on ${money(windowSpend, currency)}${overWindow} — day ${dayOfStory} of the story`,
         evidence: ev,
       };
     }
-    if (dayPurchases >= 1) {
+    if (windowPurchases >= 1) {
+      const purchaseDays = windowRows.filter((r) => r.purchases > 0);
+      const landed =
+        isRollup && purchaseDays.length === 1
+          ? ` (landed ${dayLabel(purchaseDays[0]!.date)})`
+          : '';
       return {
         outcome: 'resolved',
-        value: dayPurchases,
-        line: `${head}: converting again, ${plural(dayPurchases, 'purchase')} on ${money(daySpend, currency)}`,
+        value: windowPurchases,
+        line: `${head}: converting again, ${plural(windowPurchases, 'purchase')} on ${money(windowSpend, currency)}${overWindow}${landed}`,
         evidence: ev,
       };
     }
+    const collapsedTo = isRollup
+      ? `${money(avgWindowSpend, currency)}/day${overWindow}`
+      : money(windowSpend, currency);
     return {
       outcome: 'stale',
       value: null,
-      line: `${head}: spend collapsed to ${money(daySpend, currency)} from ${money(originSpend, currency)} — nothing left to judge`,
+      line: `${head}: spend collapsed to ${collapsedTo} from ${money(originSpend, currency)} — nothing left to judge`,
       evidence: ev,
     };
   }
@@ -407,7 +456,7 @@ function recheckOne(
     // an unknown prior spend is omitted, never rendered as a zero.
     const originSpend = numOrNull(insight.evidence.yesterday_spend);
     // An ad at zero has not "returned to its usual share" — it stopped. Say so.
-    if (daySpend <= 0) {
+    if (windowSpend <= 0) {
       const was = originSpend !== null && originSpend > 0
         ? ` (was ${money(originSpend, currency)})`
         : '';
@@ -418,17 +467,18 @@ function recheckOne(
         evidence: { ...base, origin_spend: originSpend !== null ? round2(originSpend) : null },
       };
     }
-    if (args.accountSpendYesterday <= 0 || args.trailingAvgDailySpend <= 0 || !trail.length) {
+    const accountSpendWindow = args.accountSpendWindow ?? args.accountSpendYesterday;
+    if (accountSpendWindow <= 0 || args.trailingAvgDailySpend <= 0 || !trail.length) {
       return {
         outcome: 'stale',
         value: null,
-        line: `${head}: not enough account history to judge its share (${money(daySpend, currency)} spent)`,
+        line: `${head}: not enough account history to judge its share (${money(windowSpend, currency)} spent)`,
         evidence: { ...base, origin_spend: originSpend !== null ? round2(originSpend) : null },
       };
     }
-    const dayShare = daySpend / args.accountSpendYesterday;
+    const windowShare = windowSpend / accountSpendWindow;
     const trailShare = trailAvgSpend / args.trailingAvgDailySpend;
-    const shift = dayShare - trailShare;
+    const shift = windowShare - trailShare;
     const originYShare = numOrNull(insight.evidence.yesterday_share);
     const originTShare = numOrNull(insight.evidence.trailing_share);
     const originShift =
@@ -437,24 +487,31 @@ function recheckOne(
     const ev = {
       ...base,
       origin_spend: originSpend !== null ? round2(originSpend) : null,
-      day_share: round2(dayShare),
+      day_share:
+        args.accountSpendYesterday > 0 ? round2(daySpend / args.accountSpendYesterday) : null,
+      ...(isRollup
+        ? { window_share: round2(windowShare), account_spend_window: round2(accountSpendWindow) }
+        : {}),
       trailing_share: round2(trailShare),
       share_shift: round2(shift),
       original_share_shift: originShift === null ? null : round2(originShift),
       same_direction: sameDirection,
     };
+    const spendPhrase = isRollup
+      ? `${money(avgWindowSpend, currency)}/day${overWindow}`
+      : money(windowSpend, currency);
     if (Math.abs(shift) > SHARE_SHIFT_THRESHOLD && sameDirection) {
       return {
         outcome: 'confirmed',
-        value: round2(dayShare),
-        line: `${head}: still shifted, ${money(daySpend, currency)} vs ${money(trailAvgSpend, currency)}/day usual (${shareStr(trailShare)} → ${shareStr(dayShare)} of the account) — day ${dayOfStory} of the story`,
+        value: round2(windowShare),
+        line: `${head}: still shifted, ${spendPhrase} vs ${money(trailAvgSpend, currency)}/day usual (${shareStr(trailShare)} → ${shareStr(windowShare)} of the account) — day ${dayOfStory} of the story`,
         evidence: ev,
       };
     }
     return {
       outcome: 'resolved',
-      value: round2(dayShare),
-      line: `${head}: back to its usual share, ${money(daySpend, currency)} vs ${money(trailAvgSpend, currency)}/day usual`,
+      value: round2(windowShare),
+      line: `${head}: back to its usual share, ${spendPhrase} vs ${money(trailAvgSpend, currency)}/day usual`,
       evidence: ev,
     };
   }
@@ -497,7 +554,10 @@ export async function applyWalkOutcomes(
       .update({
         trajectory,
         last_checked_at: now,
-        status: w.outcome === 'confirmed' ? 'active' : w.outcome,
+        // keepActive parks a rollup's `stale` thread instead of closing it —
+        // a thin weekend is not evidence a story ended. The trajectory still
+        // records the stale verdict.
+        status: w.outcome === 'confirmed' || w.keepActive ? 'active' : w.outcome,
         ...(w.outcome === 'resolved' ? { resolved_at: now } : {}),
       })
       .eq('id', w.insightId);

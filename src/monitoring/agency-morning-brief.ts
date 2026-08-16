@@ -62,6 +62,9 @@ export const PILOT_CLIENTS = ['BFM', 'PL', 'BRIAN'];
 const DEFAULT_CHANNEL = 'C0AHX94CBF0';
 
 const HISTORY_DAYS = 15;
+/** An uncovered day is retried this long, then the brief admits the gap once
+ *  and stops — a launch that old is history the movers check owns by now. */
+const UNCOVERED_GIVE_UP_DAYS = 7;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -165,6 +168,15 @@ export interface AccountBrief {
     spend: number;
     results: number;
     /** The ad's true first spending day — anywhere inside the window. */
+    firstSpendDate: string;
+  }>;
+  /** Launches from a formerly unverified day that has since passed the gate —
+   *  announced late rather than never (the uncovered-day catch-up). */
+  caughtUpAds?: Array<{
+    adId: string;
+    adName: string;
+    spend: number;
+    results: number;
     firstSpendDate: string;
   }>;
   watchVerdicts: LaunchVerdict[];
@@ -908,11 +920,20 @@ export function detectMovers(
  * therefore never announced and never watched. The reported spend/results are
  * pooled from its first day to the window's end, and `firstSpendDate` carries
  * the true day so the line and the watch row can both name it.
+ *
+ * `seenBeforeBoundary` exists for the partly verified rollup: when Friday
+ * failed the gate, the verified window starts Saturday, but "seen before"
+ * must still mean "before FRIDAY" — otherwise a Friday launch that kept
+ * spending into the weekend is silently disqualified by its own unverified
+ * first day. Spend on an unverified day is never QUOTED (pooling stays on
+ * verified days); it only stops counting as prior history, and it may NAME
+ * the true first-spend day.
  */
 export async function detectNewAds(
   clientId: string,
   ads: AdDay[],
   window: string | string[],
+  seenBeforeBoundary?: string,
 ): Promise<
   Array<{
     adId: string;
@@ -924,12 +945,13 @@ export async function detectNewAds(
 > {
   const windowDates = Array.isArray(window) ? window : [window];
   const windowStart = windowDates[0]!;
+  const boundary = seenBeforeBoundary ?? windowStart;
   const inWindow = new Set(windowDates);
   const yesterdaySpenders = ads.filter((a) => inWindow.has(a.date) && a.spend > 0);
   if (yesterdaySpenders.length === 0) return [];
 
   const seenBefore = new Set(
-    ads.filter((a) => a.date < windowStart && a.spend > 0).map((a) => a.ad_id),
+    ads.filter((a) => a.date < boundary && a.spend > 0).map((a) => a.ad_id),
   );
   const candidates: Array<{
     adId: string;
@@ -961,6 +983,24 @@ export async function detectNewAds(
   }
   if (candidates.length === 0) return [];
 
+  // An unverified day between the boundary and the window may still hold the
+  // TRUE first spend (a Friday launch under a failed Friday gate). Its number
+  // is not quotable, but the day is nameable — the watch clock hangs off it.
+  if (boundary < windowStart) {
+    for (const c of candidates) {
+      for (const a of ads) {
+        if (
+          a.ad_id === c.adId &&
+          a.spend > 0 &&
+          a.date >= boundary &&
+          a.date < c.firstSpendDate
+        ) {
+          c.firstSpendDate = a.date;
+        }
+      }
+    }
+  }
+
   // The window only covers HISTORY_DAYS — confirm against full history.
   // One cheap existence probe per candidate (bounded: candidates are few),
   // immune to the 1000-row response cap a bulk query would silently hit.
@@ -971,7 +1011,7 @@ export async function detectNewAds(
       .select('ad_id')
       .eq('client_id', clientId)
       .eq('ad_id', c.adId)
-      .lt('date', windowStart)
+      .lt('date', boundary)
       .gt('spend', 0)
       .limit(1);
     if (data?.length) olderSpenders.add(c.adId);
@@ -1130,21 +1170,24 @@ async function writeInsights(briefs: AccountBrief[]): Promise<number> {
     }
     // The intraday pulse may already have opened a watch for these ads the
     // afternoon they first spent — one watch per ad, whichever path was first.
+    // Caught-up launches ride the same rail: their day verified late, but the
+    // watch row is the same watch row.
+    const launches = [...b.newAds, ...(b.caughtUpAds ?? [])];
     let alreadyWatched = new Set<string>();
-    if (b.newAds.length) {
+    if (launches.length) {
       const { data: watchRows } = await getDaiSupabase()
         .from('ada_insights')
         .select('entity_id')
         .eq('client_code', b.clientRow.code)
         .eq('kind', 'launch-watch')
-        .in('entity_id', b.newAds.map((n) => n.adId));
+        .in('entity_id', launches.map((n) => n.adId));
       alreadyWatched = new Set(
         ((watchRows ?? []) as Array<{ entity_id: string | null }>)
           .map((r) => r.entity_id)
           .filter((id): id is string => !!id),
       );
     }
-    for (const n of b.newAds) {
+    for (const n of launches) {
       if (alreadyWatched.has(n.adId)) continue;
       rows.push({
         ...base,
@@ -1162,6 +1205,38 @@ async function writeInsights(briefs: AccountBrief[]): Promise<number> {
           checkpoints: [1, 3, 7],
         },
       });
+    }
+    // A day that failed the gate gets a marker so later mornings retry it —
+    // without one, an unverified Friday is simply never looked at again.
+    // Dormant is a fact (no delivery), not a gap, and gets no marker.
+    if (b.status !== 'dormant' && b.unverifiedDays.length) {
+      const { data: existing } = await getDaiSupabase()
+        .from('ada_insights')
+        .select('evidence')
+        .eq('client_code', b.clientRow.code)
+        .eq('kind', 'uncovered-day');
+      const known = new Set(
+        ((existing ?? []) as Array<{ evidence: { date?: string } | null }>)
+          .map((r) => r.evidence?.date)
+          .filter((d): d is string => !!d),
+      );
+      for (const d of b.unverifiedDays) {
+        if (known.has(d)) continue;
+        rows.push({
+          ...base,
+          entity_level: 'account',
+          entity_id: b.clientRow.ad_account_id,
+          entity_name: b.clientRow.name,
+          kind: 'uncovered-day',
+          claim: `${d} failed verification at the ${b.yesterday} brief — retrying until it verifies or a week passes.`,
+          evidence: { date: d, noticed_on: b.yesterday },
+          recheck: {
+            metric: 'uncovered_day',
+            scope: { client_code: b.clientRow.code, date: d },
+            note: 'gate this date on later mornings; announce its launches when it verifies',
+          },
+        });
+      }
     }
   }
   if (!rows.length) return 0;
@@ -1195,6 +1270,58 @@ async function fetchActiveWatches(clientCode: string): Promise<WatchInput[]> {
       adName: r.entity_name ?? r.entity_id!,
       firstSpendDate: r.evidence!.first_spend_date!,
     }));
+}
+
+/** Window days that failed a past honesty gate (kind 'uncovered-day') —
+ *  retried each morning until they verify or a week passes. */
+async function fetchActiveUncoveredDays(
+  clientCode: string,
+): Promise<Array<{ id: string; date: string }>> {
+  const { data } = await getDaiSupabase()
+    .from('ada_insights')
+    .select('id, evidence')
+    .eq('client_code', clientCode)
+    .eq('kind', 'uncovered-day')
+    .eq('status', 'active')
+    .limit(20);
+  return ((data ?? []) as Array<{ id: string; evidence: { date?: string } | null }>)
+    .filter((r) => r.evidence?.date)
+    .map((r) => ({ id: r.id, date: r.evidence!.date! }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+async function settleUncoveredDay(id: string, status: 'resolved' | 'stale'): Promise<void> {
+  const now = new Date().toISOString();
+  const { error } = await getDaiSupabase()
+    .from('ada_insights')
+    .update({
+      status,
+      last_checked_at: now,
+      ...(status === 'resolved' ? { resolved_at: now } : {}),
+    })
+    .eq('id', id);
+  if (error) logger.error({ err: error.message, id }, 'uncovered-day settle failed');
+}
+
+/** Drop launches that already carry a watch — a catch-up must never re-announce
+ *  an ad the rollup already surfaced from its verified weekend days. */
+async function filterUnwatched<T extends { adId: string }>(
+  clientCode: string,
+  launches: T[],
+): Promise<T[]> {
+  if (!launches.length) return launches;
+  const { data } = await getDaiSupabase()
+    .from('ada_insights')
+    .select('entity_id')
+    .eq('client_code', clientCode)
+    .eq('kind', 'launch-watch')
+    .in('entity_id', launches.map((l) => l.adId));
+  const watched = new Set(
+    ((data ?? []) as Array<{ entity_id: string | null }>)
+      .map((r) => r.entity_id)
+      .filter((id): id is string => !!id),
+  );
+  return launches.filter((l) => !watched.has(l.adId));
 }
 
 /** Live ad-level claims from earlier mornings — the re-check walker's queue. */
@@ -1358,6 +1485,7 @@ async function briefAccount(
     lines: [],
     movers: [],
     newAds: [],
+    caughtUpAds: [],
     watchVerdicts: [],
     followUps: [],
     macroLines: [],
@@ -1410,8 +1538,10 @@ async function briefAccount(
   for (const l of catLines) brief.lines.push(`  · ${l}`);
 
   const windowSpend = windowDays.reduce((s, d) => s + d.spend, 0);
+  let adsFetched: AdDay[] | null = null;
   if (windowSpend > 0) {
     const ads = await fetchAdDaily(row.id, since);
+    adsFetched = ads;
     // One trailing baseline for every consumer below, measured strictly BEFORE
     // the window — a weekend is never its own comparison.
     const prior = days.filter((d) => d.date < windowStart && d.spend > 0).slice(-7);
@@ -1419,7 +1549,9 @@ async function briefAccount(
       ? prior.reduce((s, d) => s + d.spend, 0) / prior.length
       : windowSpend / windowDays.length;
     brief.movers = detectMovers(ads, verifiedDates, windowSpend, avgDaily, currency);
-    brief.newAds = await detectNewAds(row.id, ads, verifiedDates);
+    // "Seen before" is anchored on the FULL window's first day, not the first
+    // VERIFIED one — an unverified Friday must not disqualify its own launch.
+    brief.newAds = await detectNewAds(row.id, ads, verifiedDates, window[0]!);
 
     // Loop 2's verdict half: evaluate the open launch watches, evidence-based.
     const watches = await fetchActiveWatches(row.code);
@@ -1429,10 +1561,14 @@ async function briefAccount(
       // Watches are evaluated AS-OF the last verified window day: ageDays is
       // computed from first_spend_date, so a watch opened on Friday is simply
       // three days old by Monday and the >=7 close still lands correctly.
+      // previousReportingDay is the last day ANY earlier brief covered — the
+      // day before this window — so a day-1/3 checkpoint the weekend skipped
+      // fires on Monday instead of never (the crossing rule).
       brief.watchVerdicts = evaluateLaunches({
         watches,
         ads,
         yesterday,
+        previousReportingDay: shiftDate(window[0]!, -1),
         accountSpendYesterday: day.spend,
         trailingAvgDailySpend: avgDaily,
         accountTrailingCpa: priorPurch >= 3 ? priorSpend / priorPurch : null,
@@ -1450,15 +1586,18 @@ async function briefAccount(
     }
 
     // Loop 3's ledger walker: earlier claims get closed out, not dropped. It
-    // walks against the last verified window day, and its own "only PRIOR data
-    // days" filter keeps a claim written about a day inside this window out.
+    // judges against the whole verified window (Sunday alone is too thin a
+    // jury for a weekend-spanning story), and its own "only PRIOR data days"
+    // filter keeps a claim written about a day inside this window out.
     const openObservations = await fetchActiveAdObservations(row.code);
     if (openObservations.length) {
       brief.followUps = walkAdInsights({
         insights: openObservations,
         ads,
         yesterday,
+        windowDates: verifiedDates,
         accountSpendYesterday: day.spend,
+        accountSpendWindow: windowSpend,
         trailingAvgDailySpend: avgDaily,
         currency,
         todaysMoverAdIds: new Set(brief.movers.map((m) => m.adId)),
@@ -1526,6 +1665,38 @@ async function briefAccount(
       }
     }
   }
+
+  // The uncovered-day catch-up: a window day that once failed the gate is
+  // retried here every verified morning. Verified late → its launches are
+  // announced and watched, just late; never verified within a week → the gap
+  // is admitted once, out loud, and the retrying stops. Isolation mirrors the
+  // run loop's: a catch-up failure must never cost the morning's brief.
+  try {
+    const uncovered = await fetchActiveUncoveredDays(row.code);
+    for (const u of uncovered) {
+      if (u.date >= window[0]!) continue; // this morning's own gate owns it
+      if (gateYesterday(days, u.date, tz) !== 'verified') {
+        if (u.date <= shiftDate(yesterday, -UNCOVERED_GIVE_UP_DAYS)) {
+          brief.lines.push(
+            `⚠️ ${dayLabel(u.date)} was never verified within a week — a launch that day may have gone unseen.`,
+          );
+          if (writeToLedger) await settleUncoveredDay(u.id, 'stale');
+        }
+        continue;
+      }
+      adsFetched ??= await fetchAdDaily(row.id, since);
+      const launches = await detectNewAds(row.id, adsFetched, u.date);
+      const unwatched = await filterUnwatched(row.code, launches);
+      brief.caughtUpAds!.push(...unwatched);
+      if (writeToLedger) await settleUncoveredDay(u.id, 'resolved');
+    }
+  } catch (err) {
+    logger.error(
+      { err: err instanceof Error ? err.message : String(err), code: row.code },
+      'uncovered-day catch-up failed — brief unaffected',
+    );
+  }
+
   return brief;
 }
 
@@ -1566,6 +1737,16 @@ function renderClientSection(
             `• "${truncate(n.adName, 48)}" — first spend${nameDay ? ` ${dayLabel(n.firstSpendDate)}` : ''}, ${money(n.spend, b.clientRow.currency ?? 'EUR')} · ${n.results} purchases (watch opened — verdicts as evidence arrives)`,
         );
       out.push([`New (${b.newAds.length}):`, ...items].join('\n'));
+    }
+    if (b.caughtUpAds?.length) {
+      // Verified late, told late — but told, with the true day named.
+      const items = b.caughtUpAds
+        .slice(0, 5)
+        .map(
+          (n) =>
+            `• "${truncate(n.adName, 48)}" — first spend ${dayLabel(n.firstSpendDate)} (verified late), ${money(n.spend, b.clientRow.currency ?? 'EUR')} · ${n.results} purchases (watch opened — verdicts as evidence arrives)`,
+        );
+      out.push([`Catch-up (${b.caughtUpAds.length}):`, ...items].join('\n'));
     }
     if (b.watchVerdicts.length) {
       out.push(
