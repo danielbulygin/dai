@@ -3,6 +3,7 @@ import { env } from '../../env.js';
 import { logger } from '../../utils/logger.js';
 import { getSupabase } from '../../integrations/supabase.js';
 import { runColdAudit } from '../../audit/cold-audit.js';
+import { isTinkersSeamConfigured, redactSecrets, runBridgedColdAudit } from '../../audit/tinkers-bridge.js';
 
 export const auditTriggerRouter = new Hono();
 
@@ -18,6 +19,13 @@ export const auditTriggerRouter = new Hono();
  * X-API-Key middleware, mirroring the cron/Notion-webhook pattern.
  * Idempotency: a lead whose audit_token is already set (or with an audit
  * currently running) is NOT re-audited — goal re-saves must not double-spend.
+ *
+ * The Tinkers MONOREPO (separate database) sends the same call with
+ * `{ userId: <organizationId>, auditId, source: 'tinkers' }`. That body takes
+ * the bridge path (tinkers-bridge.ts): context comes from Tinkers over the HMAC
+ * seam, and so does idempotency — none of the ada_leads/magic_audits reads
+ * below can resolve a monorepo org. Everything else about the shape (same
+ * secret, 202-then-async) is identical.
  */
 auditTriggerRouter.post('/audit/trigger', async (c) => {
   if (!env.AUDIT_TRIGGER_SECRET) return c.json({ error: 'AUDIT_TRIGGER_SECRET not configured' }, 503);
@@ -26,13 +34,41 @@ auditTriggerRouter.post('/audit/trigger', async (c) => {
   }
 
   let userId: string | undefined;
+  let tinkersAuditId: string | undefined;
   try {
-    const body = (await c.req.json()) as { userId?: string };
+    const body = (await c.req.json()) as { userId?: string; auditId?: string; source?: string };
     userId = typeof body.userId === 'string' && body.userId.trim() ? body.userId.trim() : undefined;
+    if (body.source === 'tinkers' && typeof body.auditId === 'string' && body.auditId.trim()) {
+      tinkersAuditId = body.auditId.trim();
+    }
   } catch {
     /* fall through to 400 */
   }
   if (!userId) return c.json({ error: 'userId (uuid) required' }, 400);
+
+  // Bridge path — a monorepo organization id, not a legacy lead's user id.
+  if (tinkersAuditId) {
+    if (!isTinkersSeamConfigured()) {
+      return c.json({ error: 'TINKERS_BASE_URL / TINKERS_AUDIT_SEAM_SECRET not configured' }, 503);
+    }
+    const organizationId = userId;
+    void runBridgedColdAudit({ organizationId })
+      .then((r) =>
+        r.status === 'complete'
+          ? logger.info({ organizationId, auditId: r.auditId, costUsd: r.costUsd }, 'bridged cold audit complete')
+          : logger.info({ organizationId, reason: r.reason }, 'bridged cold audit skipped'),
+      )
+      // Redacted, not raw: a Graph failure on this path can quote the request
+      // URL, and that URL carries the customer's access token.
+      .catch((err) =>
+        logger.error(
+          { err: redactSecrets(err instanceof Error ? err.message : 'unknown error'), organizationId, auditId: tinkersAuditId },
+          'bridged cold audit failed',
+        ),
+      );
+
+    return c.json({ status: 'accepted' }, 202);
+  }
 
   // Idempotency: don't restart an audit the lead already has.
   try {

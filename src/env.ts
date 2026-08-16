@@ -42,6 +42,12 @@ const envSchema = z.object({
   CRON_SECRET: z.string().optional(),
   /** Shared secret for Tinkers → /api/audit/trigger (X-Ada-Secret header). Must match the Tinkers Vercel env. */
   AUDIT_TRIGGER_SECRET: z.string().optional(),
+  /** Base URL of the Tinkers monorepo app (e.g. https://gettinkers.com) — the
+   * bridged cold-audit seam's target. Unset = the bridge path answers 503. */
+  TINKERS_BASE_URL: z.string().optional(),
+  /** Shared secret for the bridged audit seam: we sign every request to Tinkers
+   * with it (x-tinkers-signature-256). Must match the Tinkers Vercel env. */
+  TINKERS_AUDIT_SEAM_SECRET: z.string().optional(),
   NOTION_AOT_TASKS_DB_ID: z.string().default('27e1398c921f81ee851dfacaf37eeee8'),
   NOTION_AOT_ADSETS_DB_ID: z.string().default('27e1398c921f81f28154d2a538afb769'),
   CHROMIUM_PATH: z.string().optional(),

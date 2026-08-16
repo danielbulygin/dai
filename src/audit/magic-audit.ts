@@ -66,6 +66,12 @@ export interface AuditOptions {
   /** Cold-path injection (self-serve stranger, no warehouse rows). Built by
    * runColdAudit (cold-audit.ts) — never construct by hand elsewhere. */
   cold?: ColdInjection;
+  /** Mirror of every row patch, for a caller whose report lives outside our
+   * database (the Tinkers bridge, tinkers-bridge.ts). Progressive patches are
+   * fire-and-forget and fail-soft — a throw or a slow promise here can never
+   * change how the audit runs. Called once more at the end with the accumulated
+   * row state and `final: true`; that last call IS awaited. */
+  onRowUpdate?: (patch: Record<string, unknown>, meta: { final: boolean }) => void | Promise<void>;
 }
 
 /**
@@ -1656,12 +1662,27 @@ export async function runMagicAudit(
   const auditId = row.id as string;
   logger.info({ auditId, token, clientCode: code, capUsd: meter.capUsd }, 'Magic audit started');
 
+  // Everything we have written to the row so far, so the final mirror below can
+  // carry the whole report without threading section state through the run.
+  const rowState: Record<string, unknown> = { sections, recognition };
+  const mirrorRow = (patch: Record<string, unknown>, final: boolean): void => {
+    if (!options.onRowUpdate) return;
+    try {
+      void Promise.resolve(options.onRowUpdate(patch, { final })).catch((err) =>
+        logger.warn({ err, auditId, final }, 'onRowUpdate mirror failed (audit continues)'),
+      );
+    } catch (err) {
+      logger.warn({ err, auditId, final }, 'onRowUpdate mirror threw (audit continues)');
+    }
+  };
   const updateRow = async (patch: Record<string, unknown>): Promise<void> => {
+    Object.assign(rowState, patch);
     const { error: e } = await supabase
       .from('magic_audits')
       .update({ ...patch, updated_at: new Date().toISOString() })
       .eq('id', auditId);
     if (e) logger.error({ error: e, auditId }, 'magic_audits update failed');
+    mirrorRow(patch, false);
   };
   const saveSection = async (section: AuditSection): Promise<void> => {
     sections[section.key] = section;
@@ -2286,6 +2307,15 @@ export async function runMagicAudit(
   }
 
   await updateRow({ status: anyError ? 'error' : 'complete', cost_usd: round2(meter.spentUsd) });
+  // The final mirror is awaited (unlike the progressive ones): a bridged caller
+  // reports completion here, and it must land before the run resolves.
+  if (options.onRowUpdate) {
+    try {
+      await options.onRowUpdate({ ...rowState }, { final: true });
+    } catch (err) {
+      logger.warn({ err, auditId }, 'final onRowUpdate mirror failed (audit already saved)');
+    }
+  }
   logger.info(
     { auditId, anyError, costUsd: round2(meter.spentUsd), breakdown: meter.breakdown },
     'Magic audit finished',
