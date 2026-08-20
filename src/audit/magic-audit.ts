@@ -26,7 +26,7 @@ import { buildAccountModel, mergeAccountModel, type AccountModel, type AccountMo
 import { coldBreakeven, buildColdKnowledge, type ColdRows } from './cold-source.js';
 import { runColdCreativeAnalysis, type OwnLibraryScrape } from './cold-creative.js';
 import type { StoreMediaCandidate } from './cold-creative-source.js';
-import { scrubSectionProse, scrubInsightProse } from './prose.js';
+import { scrubSectionProse, scrubInsightProse, dedashDeep } from './prose.js';
 
 /**
  * Magic Audit orchestrator (master-plan B1, expanded 2026-06-11: creative /
@@ -1823,7 +1823,10 @@ export async function runMagicAudit(
   const scrubbedForWriteBack = async (section: AuditSection): Promise<AuditSection> => {
     try {
       const first = scrubSectionProse(section);
-      if (first.banned.length === 0) return first.section;
+      // The deep pass catches the strings the model writes into nested fields
+      // (biggest_leak.read, winners[].why, gaps[], key_stat): the rendered page
+      // is grepped for em-dashes, so a clean summary is not enough.
+      if (first.banned.length === 0) return dedashDeep(first.section);
       logger.warn({ section: section.key, banned: first.banned }, 'audit prose carries filler — one rewrite retry');
       let candidate = first.section;
       if (!meter.exhausted()) {
@@ -1855,7 +1858,7 @@ export async function runMagicAudit(
       if (second.banned.length > 0) {
         logger.warn({ section: section.key, banned: second.banned }, 'audit prose filler stripped after the rewrite retry');
       }
-      return second.section;
+      return dedashDeep(second.section);
     } catch (err) {
       logger.warn({ err, section: section.key }, 'prose scrub failed (section written unchanged)');
       return section;

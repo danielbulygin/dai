@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  dedash, findBannedPhrases, stripBannedSentences, scrubSectionProse, scrubInsightProse,
+  dedash, dedashDeep, findBannedPhrases, stripBannedSentences, scrubSectionProse, scrubInsightProse,
 } from '../src/audit/prose.js';
 
 /**
@@ -115,5 +115,105 @@ describe('scrubInsightProse', () => {
     expect(i.headline).toBe('Tuesday costs 2.5x per lead. Every week');
     expect(i.detail).not.toMatch(/[—]/);
     expect(i.severity).toBe('risk');
+  });
+});
+
+describe('dedashDeep', () => {
+  /** A synthesis section the way the model actually returns one. */
+  const section = {
+    key: 'funnel_read',
+    summary: 'Cost per lead is 18.59 across 482 leads.',
+    data: {
+      funnel_kind: 'lead_gen',
+      stages: [
+        { stage: 'Link clicks', value: 9000, rate_from_prev: 1 },
+        { stage: 'Leads', value: 482, rate_from_prev: 5.4 },
+      ],
+      biggest_leak: {
+        stage: 'Leads',
+        read: 'Only 5.4% of clicks become a lead — the form is asking for too much before it earns the ask.',
+      },
+      opportunities: [
+        'Cut the form to 3 fields — the drop is between the click and the lead, not before it.',
+        'Nothing structural to change on the click side (1.0% link CTR).',
+      ],
+      winners: [
+        { ad_name: 'Form-hook – A/B', spend: 5577, key_stat: 'Meta CPL 18.59', why: 'Plain promise, no jargon.' },
+        {
+          ad_name: 'Form-hook-B',
+          spend: 2000,
+          key_stat: 'hook rate 38% — the highest in the account',
+          why: 'Opens on the price — the objection first, which the others bury.',
+          thumbnail_url: 'https://cdn.example.com/a—b.jpg',
+        },
+      ],
+      angle_patterns: [{ pattern: 'Price-first', evidence: 'Both top ads name the monthly figure — 12 USD — in the first line.' }],
+      gaps: ['No testimonial angle — nothing in market carries a customer voice.'],
+    },
+  };
+
+  const scrubbed = dedashDeep(section);
+  const flat = JSON.stringify(scrubbed);
+
+  it('leaves no em-dash in anything a reader sees, at any depth', () => {
+    // The fixture's ad_name and thumbnail_url carry dashes ON PURPOSE (both are
+    // join keys, exempt below). Every other string in the section is prose.
+    const proseOnly = flat.replace(/"(?:ad_name|thumbnail_url)":"[^"]*"/g, '');
+    expect(proseOnly).not.toMatch(/—/);
+    expect(proseOnly).not.toMatch(/\s–\s/);
+  });
+
+  it('scrubs biggest_leak.read and the nested winner why', () => {
+    expect(scrubbed.data.biggest_leak.read).toBe(
+      'Only 5.4% of clicks become a lead. The form is asking for too much before it earns the ask.',
+    );
+    expect(scrubbed.data.winners[1]!.why).toBe('Opens on the price. The objection first, which the others bury.');
+    expect(scrubbed.data.winners[1]!.key_stat).toBe('hook rate 38%. The highest in the account');
+  });
+
+  it('scrubs strings inside arrays of strings and arrays of objects', () => {
+    expect(scrubbed.data.opportunities[0]).toBe(
+      'Cut the form to 3 fields. The drop is between the click and the lead, not before it.',
+    );
+    expect(scrubbed.data.gaps[0]).toBe('No testimonial angle. Nothing in market carries a customer voice.');
+    expect(scrubbed.data.angle_patterns[0]!.evidence).toBe(
+      'Both top ads name the monthly figure, 12 USD, in the first line.',
+    );
+  });
+
+  it('never rewrites an ad name — the page joins rows to sections BY name', () => {
+    expect(scrubbed.data.winners[0]!.ad_name).toBe('Form-hook – A/B');
+  });
+
+  it('never rewrites a stage name, a URL, or a machine key', () => {
+    expect(scrubbed.data.stages[1]!.stage).toBe('Leads');
+    expect(scrubbed.data.winners[1]!.thumbnail_url).toBe('https://cdn.example.com/a—b.jpg');
+    expect(scrubbed.key).toBe('funnel_read');
+  });
+
+  it('does not mutate the input, keeps non-string values, and is idempotent', () => {
+    expect(section.data.biggest_leak.read).toContain('—');
+    expect(scrubbed.data.stages[0]!.value).toBe(9000);
+    expect(scrubbed.data.funnel_kind).toBe('lead_gen');
+    expect(dedashDeep(scrubbed)).toEqual(scrubbed);
+  });
+
+  it('passes through nulls, numbers and non-plain objects untouched', () => {
+    const map = new Map([['a — b', 1]]);
+    const out = dedashDeep({ n: 3, nil: null, un: undefined, flag: true, map });
+    expect(out).toEqual({ n: 3, nil: null, un: undefined, flag: true, map });
+    expect(out.map).toBe(map);
+  });
+
+  it('reaches the nested fields of a lead insight too', () => {
+    const i = scrubInsightProse({
+      headline: 'Tuesday costs 2.5x per lead — every week',
+      detail: 'Tuesdays book 2 leads on the same 100 spend.',
+      section: 'timing_patterns',
+      evidence: { note: 'Measured across 13 Tuesdays — the whole 90-day window.' },
+    } as { headline: string; detail: string; section: string; evidence: { note: string } });
+    expect(i.headline).toBe('Tuesday costs 2.5x per lead. Every week');
+    expect(i.evidence.note).toBe('Measured across 13 Tuesdays. The whole 90-day window.');
+    expect(i.section).toBe('timing_patterns');
   });
 });

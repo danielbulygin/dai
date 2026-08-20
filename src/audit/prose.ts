@@ -51,6 +51,63 @@ export function dedash(text: string): string {
     .trim();
 }
 
+/**
+ * Keys whose STRING values are identifiers, not prose: the rendering side joins
+ * rows to sections by ad name and by stage name, so rewriting the punctuation
+ * inside one silently breaks the join. URLs are excluded for the same reason.
+ */
+const IDENTIFIER_KEYS = new Set([
+  'ad_id', 'ad_name', 'adset_id', 'adset_name', 'campaign_id', 'campaign_name',
+  'stage', 'date', 'key', 'id', 'section', 'section_key',
+]);
+
+const isUrlish = (text: string): boolean => /^https?:\/\//i.test(text.trim());
+
+/** Only plain JSON objects are walked — a Map or a class instance passes through whole. */
+const isPlainObject = (value: unknown): value is Record<string, unknown> => {
+  if (typeof value !== 'object' || value === null) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+};
+
+const DEEP_DEPTH_CAP = 12;
+
+function walk(value: unknown, keyName: string | undefined, depth: number): unknown {
+  if (depth > DEEP_DEPTH_CAP) return value;
+  if (typeof value === 'string') {
+    if (keyName && IDENTIFIER_KEYS.has(keyName)) return value;
+    if (isUrlish(value)) return value;
+    return dedash(value);
+  }
+  // An array's items inherit their parent key, so `gaps: string[]` is prose and
+  // an array under an identifier key stays untouched.
+  if (Array.isArray(value)) return value.map((item) => walk(item, keyName, depth + 1));
+  if (isPlainObject(value)) {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) out[k] = walk(v, k, depth + 1);
+    return out;
+  }
+  return value;
+}
+
+/**
+ * The em-dash pass over EVERY string at any depth of a section: the model writes
+ * dashes into `biggest_leak.read`, `opportunities[]`, `winners[].why`,
+ * `angle_patterns[]`, `gaps[]` and `key_stat` as readily as into the summary,
+ * and the rendered page is grepped for em-dashes as a hard gate. Identifiers and
+ * URLs are left alone (IDENTIFIER_KEYS). Pure, non-mutating, idempotent; banned
+ * phrases are NOT touched here, since stripping a sentence out of structured
+ * data would leave a field asserting half a thing.
+ */
+export function dedashDeep<T>(value: T): T {
+  try {
+    return walk(value, undefined, 0) as T;
+  } catch {
+    // A scrub may never cost us a section.
+    return value;
+  }
+}
+
 /** Which banned phrases the text still contains (labels, in the listed order). */
 export function findBannedPhrases(text: string): string[] {
   if (!text) return [];
@@ -107,13 +164,11 @@ export function scrubSectionProse<T extends ScrubbableSection>(
 }
 
 /**
- * The em-dash pass for a lead insight. Filler is NOT stripped here: an insight
- * is three sentences long, so removing one would leave a headline pointing at
+ * The em-dash pass for a lead insight, headline and detail plus anything nested
+ * a ranking call decides to return. Filler is NOT stripped here: an insight is
+ * three sentences long, so removing one would leave a headline pointing at
  * nothing. The section-level scrub is where a banned phrase gets caught.
  */
 export function scrubInsightProse<T extends { headline?: string; detail?: string }>(insight: T): T {
-  const out: T = { ...insight };
-  if (typeof insight.headline === 'string') out.headline = dedash(insight.headline);
-  if (typeof insight.detail === 'string') out.detail = dedash(insight.detail);
-  return out;
+  return dedashDeep(insight);
 }
