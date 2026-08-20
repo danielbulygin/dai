@@ -117,6 +117,8 @@ const COLD_SKIP_SECTIONS = ['dataset_health', 'account_structure', 'concept_roas
  *  than letting them error: their pulls would come back empty AND
  *  metaTokenFor('') falls back to the AGENCY token, and probing a stranger's
  *  account with our own credential is the one call this path must never make. */
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const TOKENLESS_SKIP_SECTIONS = [
   'placement_breakdown', 'audience_breakdown', 'saturation', 'optimization_events',
   'learning_limited', 'targeting_split', 'account_activity', 'competitor_teardown',
@@ -1679,7 +1681,11 @@ export async function runMagicAudit(
   // applied to prod 2026-07-03.
   const { data: row, error } = await supabase
     .from('magic_audits')
-    .insert({ token, client_code: cold ? null : code, client_name: client.name, sections, recognition, tenant_id: client.id })
+    // tenant_id is a uuid column. Tinkers org ids are uuid-shaped EXCEPT the
+    // imported ones (imp_org_ prefix, live incident 2026-08-21) — and on the
+    // bridged path this row is scratch anyway (the Tinkers row is the record),
+    // so a non-uuid tenant stores null rather than failing the whole audit.
+    .insert({ token, client_code: cold ? null : code, client_name: client.name, sections, recognition, tenant_id: UUID_SHAPE.test(client.id) ? client.id : null })
     .select('id')
     .single();
   if (error || !row) throw new Error(`audit row insert failed: ${error?.message}`);
