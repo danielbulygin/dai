@@ -268,7 +268,15 @@ export interface UnresolvedAd {
   reason: string;
 }
 
-/** The deterministic facts payload the Opus synthesis reads. */
+/**
+ * The deterministic facts payload the Opus synthesis reads.
+ *
+ * The account's own economics decide which number each ad carries. Sending
+ * `roas: 0` on a lead-gen account collided with the synthesis rule that every
+ * metric must state its source, so the section wrote apologies about ROAS 0 on
+ * an account that has never sold anything online. On a lead-gen account each ad
+ * carries its cost per lead instead, and the roas field is absent, not zero.
+ */
 export function buildColdCreativeFacts(args: {
   accountName: string;
   currency: string;
@@ -278,10 +286,14 @@ export function buildColdCreativeFacts(args: {
   unresolved: UnresolvedAd[];
 }): Record<string, unknown> {
   const readByAd = new Map(args.reads.map((r) => [r.ad_id, r]));
+  const leadGen =
+    args.summary.ads.every((a) => a.roas === 0 && a.purchases === 0) &&
+    args.summary.ads.some((a) => a.leads > 0);
   return {
     account: args.accountName,
     currency: args.currency,
     window: 'last 30 days',
+    kpi: leadGen ? 'cost per lead (this account records leads, not purchases)' : 'Meta ROAS',
     total_spend: Math.round(args.summary.total_spend),
     ads_with_spend: args.summary.ads_with_spend,
     top12_spend_share_pct: args.summary.top12_spend_share_pct,
@@ -292,8 +304,9 @@ export function buildColdCreativeFacts(args: {
       return {
         ad_name: a.ad_name,
         spend: a.spend,
-        roas: a.roas,
-        purchases: a.purchases,
+        ...(leadGen
+          ? { cpl: a.leads > 0 ? round2(a.spend / a.leads) : null }
+          : { roas: a.roas, purchases: a.purchases }),
         leads: a.leads,
         hook_rate_pct: a.hook_rate != null ? round2(a.hook_rate * 100) : null,
         is_video: a.is_video,

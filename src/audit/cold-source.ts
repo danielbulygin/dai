@@ -17,6 +17,7 @@ import type { PackAdRow, PackAccountRow } from './report-pack.js';
  *  - purchase_value = action_values[omni_purchase | purchase]
  *  - leads       = actions[lead]
  *  - link_clicks = actions[link_click]
+ *  - landing_page_views = actions[landing_page_view]  (lead-gen funnel stage)
  *  - hook_rate   = video_view / impressions   (FRACTION, 4dp — as ad_daily stores it)
  *  - hold_rate   = video_thruplay / impressions (FRACTION, 4dp)
  * `results` is left 0 (ad_daily.results is null for most accounts; every consumer
@@ -85,6 +86,9 @@ export interface ColdAccountFullRow {
   leads: number;
   complete_registrations: number;
   results: number;
+  /** Meta's `landing_page_view` action. The warehouse account_daily has no such
+   *  column, so this stage only ever has a value on the cold/bridged path. */
+  landing_page_views: number;
 }
 
 export interface ColdRows {
@@ -148,6 +152,7 @@ interface Norm {
   add_to_carts: number;
   checkouts_initiated: number;
   complete_registrations: number;
+  landing_page_views: number;
   hook_rate: number | null;
   hold_rate: number | null;
 }
@@ -176,6 +181,7 @@ function normalize(raw: RawAdDay): Norm | null {
     add_to_carts: actionVal(raw.actions, ['add_to_cart', 'omni_add_to_cart']),
     checkouts_initiated: actionVal(raw.actions, ['initiate_checkout', 'omni_initiated_checkout']),
     complete_registrations: actionVal(raw.actions, ['complete_registration']),
+    landing_page_views: actionVal(raw.actions, ['landing_page_view']),
     hook_rate: videoViews > 0 && impressions > 0 ? round4(videoViews / impressions) : null,
     hold_rate: thruplays > 0 && impressions > 0 ? round4(thruplays / impressions) : null,
   };
@@ -228,7 +234,7 @@ export function buildColdRows(input: BuildColdRowsInput): ColdRows {
     const a = accByDate.get(n.date) ?? {
       date: n.date, spend: 0, impressions: 0, clicks: 0, link_clicks: 0, content_views: 0,
       add_to_carts: 0, checkouts_initiated: 0, purchases: 0, purchase_value: 0, leads: 0,
-      complete_registrations: 0, results: 0,
+      complete_registrations: 0, results: 0, landing_page_views: 0,
     };
     a.spend += n.spend;
     a.impressions += n.impressions;
@@ -241,6 +247,7 @@ export function buildColdRows(input: BuildColdRowsInput): ColdRows {
     a.purchase_value += n.purchase_value;
     a.leads += n.leads;
     a.complete_registrations += n.complete_registrations;
+    a.landing_page_views += n.landing_page_views;
     accByDate.set(n.date, a);
   }
   const accAll = [...accByDate.values()].sort((a, b) => a.date.localeCompare(b.date));

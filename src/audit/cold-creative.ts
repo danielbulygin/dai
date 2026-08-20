@@ -530,7 +530,7 @@ export async function runColdCreativeAnalysis(args: ColdCreativeArgs): Promise<P
       `${JSON.stringify(facts, null, 1)}\n\n` +
       `Write the "Creative Performance & Angles" audit section. Voice: plain operator language. Never use "not X but Y" constructions. No metaphors. Schema:\n` +
       `{"summary": "2-3 sentences, must name at least one specific ad and number",` +
-      `"winners": [up to 4 of {"ad_name","spend","key_stat","why"}] (key_stat like "Meta ROAS 3.4" or "hook rate 38%", why = one sharp sentence on WHY it wins, grounded in its creative_read hook/format/casting when present),` +
+      `"winners": [up to 4 of {"ad_name","spend","key_stat","why"}] (key_stat quotes the ad's OWN kpi field from the facts, e.g. "Meta ROAS 3.4", "Meta CPL 18.59" or "hook rate 38%" — never a metric the facts do not carry, and never a zero, why = one sharp sentence on WHY it wins, grounded in its creative_read hook/format/casting when present),` +
       `"angle_patterns": [up to 4 of {"pattern","evidence"}] (messaging/format/casting patterns across the spend-weighted inventory — cite the ads),` +
       `"gaps": [up to 3 strings] (creative lanes the account is NOT running that the observed inventory suggests it should test),` +
       `"warnings": [up to 3 strings] (concentration on one creative, one format, weak hooks — only if the data shows it)}`,

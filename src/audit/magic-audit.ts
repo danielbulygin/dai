@@ -471,7 +471,9 @@ async function runCreativeAnalysis(
   const since = daysAgoISO(30);
   const rows = await pageAll<Record<string, unknown>>(
     'ad_daily',
-    'ad_id, ad_name, spend, impressions, clicks, link_clicks, purchases, purchase_value, results, hook_rate, thruplays, video_plays',
+    // leads:actions->lead — ad_daily.results is NULL on most lead-gen accounts,
+    // so without the lead actions every ad here reads as a zero-ROAS loser.
+    'ad_id, ad_name, spend, impressions, clicks, link_clicks, purchases, purchase_value, results, leads:actions->lead, hook_rate, thruplays, video_plays',
     (q) => q.eq('client_id', client.id).gte('date', since),
   );
 
@@ -482,13 +484,13 @@ async function runCreativeAnalysis(
   // Aggregate per ad
   const byAd = new Map<string, {
     ad_name: string; spend: number; impressions: number; clicks: number; link_clicks: number;
-    purchases: number; purchase_value: number; results: number; hook_w: number; hook_imp: number; is_video: boolean;
+    purchases: number; purchase_value: number; results: number; leads: number; hook_w: number; hook_imp: number; is_video: boolean;
   }>();
   for (const r of rows) {
     const id = String(r.ad_id);
     const a = byAd.get(id) ?? {
       ad_name: String(r.ad_name ?? id), spend: 0, impressions: 0, clicks: 0, link_clicks: 0,
-      purchases: 0, purchase_value: 0, results: 0, hook_w: 0, hook_imp: 0, is_video: false,
+      purchases: 0, purchase_value: 0, results: 0, leads: 0, hook_w: 0, hook_imp: 0, is_video: false,
     };
     a.spend += num(r.spend);
     a.impressions += num(r.impressions);
@@ -497,6 +499,7 @@ async function runCreativeAnalysis(
     a.purchases += num(r.purchases);
     a.purchase_value += num(r.purchase_value);
     a.results += num(r.results);
+    a.leads += num(r.leads);
     if (num(r.hook_rate) > 0) {
       a.hook_w += num(r.hook_rate) * num(r.impressions);
       a.hook_imp += num(r.impressions);
@@ -505,18 +508,28 @@ async function runCreativeAnalysis(
     byAd.set(id, a);
   }
 
+  // The account's own economics decide the per-ad number. Sending roas: 0 on a
+  // lead-gen account made the synthesis apologise about a ROAS that never
+  // existed, because every metric must state its source; a cost per lead is the
+  // number this account actually has.
+  const leadGen =
+    [...byAd.values()].every((a) => a.purchase_value === 0 && a.purchases === 0) &&
+    [...byAd.values()].some((a) => (a.leads || a.results) > 0);
   const ads = [...byAd.entries()]
-    .map(([ad_id, a]) => ({
-      ad_id,
-      ad_name: a.ad_name,
-      spend: round2(a.spend),
-      roas: a.spend > 0 ? round2(a.purchase_value / a.spend) : 0,
-      purchases: a.purchases,
-      results: a.results,
-      ctr_link: a.impressions > 0 ? round2((a.link_clicks / a.impressions) * 100) : 0,
-      hook_rate: a.hook_imp > 0 ? round2(a.hook_w / a.hook_imp) : null,
-      is_video: a.is_video,
-    }))
+    .map(([ad_id, a]) => {
+      const results = a.results || a.purchases || a.leads || 0;
+      return {
+        ad_id,
+        ad_name: a.ad_name,
+        spend: round2(a.spend),
+        ...(leadGen
+          ? { cpl: results > 0 ? round2(a.spend / results) : null, leads: results }
+          : { roas: a.spend > 0 ? round2(a.purchase_value / a.spend) : 0, purchases: a.purchases, results: a.results }),
+        ctr_link: a.impressions > 0 ? round2((a.link_clicks / a.impressions) * 100) : 0,
+        hook_rate: a.hook_imp > 0 ? round2(a.hook_w / a.hook_imp) : null,
+        is_video: a.is_video,
+      };
+    })
     .filter((a) => a.spend > 0)
     .sort((a, b) => b.spend - a.spend);
 
@@ -559,6 +572,7 @@ async function runCreativeAnalysis(
     client: client.name,
     currency: client.currency,
     window: 'last 30 days',
+    kpi: leadGen ? 'cost per lead (this account records leads, not purchases)' : 'Meta ROAS',
     total_spend: Math.round(totalSpend),
     ads_with_spend: ads.length,
     top12_spend_share_pct: topShare,
@@ -573,7 +587,7 @@ async function runCreativeAnalysis(
     `Account creative data (deterministic, from the Meta-synced warehouse):\n${JSON.stringify(facts, null, 1)}\n\n` +
       `Write the "Creative Performance & Angles" audit section. Schema:\n` +
       `{"summary": "2-3 sentences, must name at least one specific ad and number",` +
-      `"winners": [up to 4 of {"ad_name","spend","key_stat","why"}] (key_stat like "ROAS 3.4" or "hook rate 38%", why = one sharp sentence on WHY it wins, grounded in its copy/transcript when present),` +
+      `"winners": [up to 4 of {"ad_name","spend","key_stat","why"}] (key_stat quotes the ad's OWN number from the facts, e.g. "Meta ROAS 3.4", "Meta CPL 18.59" or "hook rate 38%" — never a metric the facts do not carry, and never a zero, why = one sharp sentence on WHY it wins, grounded in its copy/transcript when present),` +
       `"angle_patterns": [up to 4 of {"pattern","evidence"}] (messaging/format patterns across the spend-weighted inventory),` +
       `"gaps": [up to 3 strings] (creative lanes the account is NOT running that the data suggests it should test),` +
       `"warnings": [up to 3 strings] (fatigue, concentration on one creative, weak hooks — only if the data shows it)}`,
@@ -617,30 +631,86 @@ interface FunnelSynthesis {
 }
 
 function aggregateDaily(rows: Array<Record<string, unknown>>): Record<string, number> {
+  // landing_page_views exists on the cold/bridged rows only — the warehouse
+  // account_daily has no such column, and an absent field sums to 0.
   const fields = [
     'spend', 'impressions', 'clicks', 'link_clicks', 'content_views', 'add_to_carts',
     'checkouts_initiated', 'purchases', 'purchase_value', 'leads', 'complete_registrations', 'results',
+    'landing_page_views',
   ];
   const out: Record<string, number> = {};
   for (const f of fields) out[f] = rows.reduce((s, r) => s + num(r[f]), 0);
   return out;
 }
 
-function funnelStages(t: Record<string, number>, currency: string): Array<{ stage: string; value: number; rate_from_prev: number | null }> {
+export interface FunnelShape {
+  /** Which chain the account's own recorded events describe. */
+  kind: 'ecommerce' | 'lead_gen' | 'no_conversion_recorded';
+  stages: Array<{ stage: string; value: number; rate_from_prev: number | null }>;
+  /** Present only when we cannot see the conversion: says so instead of implying one. */
+  note?: string;
+}
+
+/**
+ * The funnel is built from THIS account's recorded events, not from a fixed
+ * e-commerce chain. A lead-gen account has no cart and no checkout, so the old
+ * six-stage chain printed three permanent zeros and invited the synthesis to
+ * write about an "add to cart collapse" on an account that never sold anything
+ * online. Purchases decide the e-commerce chain; leads with zero purchases
+ * decide the lead chain; neither means we say we cannot see the conversion.
+ */
+export function funnelStages(t: Record<string, number>, currency: string): FunnelShape {
   void currency;
-  const chain: Array<[string, number]> = [
+  const purchases = t.purchases ?? 0;
+  const leads = t.leads ?? 0;
+  const registrations = t.complete_registrations ?? 0;
+  const landingViews = t.landing_page_views ?? 0;
+
+  const build = (chain: Array<[string, number]>): FunnelShape['stages'] =>
+    chain.map(([stage, value], i) => ({
+      stage,
+      value,
+      rate_from_prev: i === 0 ? null : chain[i - 1]![1] > 0 ? round2((value / chain[i - 1]![1]) * 100) : null,
+    }));
+
+  if (purchases > 0) {
+    return {
+      kind: 'ecommerce',
+      stages: build([
+        ['Impressions', t.impressions ?? 0],
+        ['Link clicks', t.link_clicks ?? 0],
+        ['Content views', t.content_views ?? 0],
+        ['Add to cart', t.add_to_carts ?? 0],
+        ['Checkout initiated', t.checkouts_initiated ?? 0],
+        ['Purchases', purchases],
+      ]),
+    };
+  }
+
+  if (leads > 0) {
+    const chain: Array<[string, number]> = [
+      ['Impressions', t.impressions ?? 0],
+      ['Link clicks', t.link_clicks ?? 0],
+    ];
+    if (landingViews > 0) chain.push(['Landing page views', landingViews]);
+    if (registrations > 0 && registrations !== leads) chain.push(['Registrations', registrations]);
+    chain.push(['Leads', leads]);
+    return { kind: 'lead_gen', stages: build(chain) };
+  }
+
+  const fallback: Array<[string, number]> = [
     ['Impressions', t.impressions ?? 0],
     ['Link clicks', t.link_clicks ?? 0],
-    ['Content views', t.content_views ?? 0],
-    ['Add to cart', t.add_to_carts ?? 0],
-    ['Checkout initiated', t.checkouts_initiated ?? 0],
-    ['Purchases', t.purchases ?? 0],
   ];
-  return chain.map(([stage, value], i) => ({
-    stage,
-    value,
-    rate_from_prev: i === 0 ? null : (chain[i - 1]![1] > 0 ? round2((value / chain[i - 1]![1]) * 100) : null),
-  }));
+  if (landingViews > 0) fallback.push(['Landing page views', landingViews]);
+  return {
+    kind: 'no_conversion_recorded',
+    stages: build(fallback),
+    note:
+      'This account recorded no purchases and no leads in the window, so the funnel stops at the click. ' +
+      'The conversion is happening off-platform, or the pixel is not reporting it. Do not read a conversion ' +
+      'rate into this: state which of the two it is before advising anything.',
+  };
 }
 
 async function runFunnelRead(
@@ -666,7 +736,8 @@ async function runFunnelRead(
   const t7 = aggregateDaily(last7);
   const p7 = aggregateDaily(prior7);
 
-  const stages = funnelStages(t30, client.currency);
+  const funnel = funnelStages(t30, client.currency);
+  const stages = funnel.stages;
   const derived = {
     cpm: t30.impressions! > 0 ? round2((t30.spend! / t30.impressions!) * 1000) : null,
     ctr_link_pct: t30.impressions! > 0 ? round2((t30.link_clicks! / t30.impressions!) * 100) : null,
@@ -696,7 +767,10 @@ async function runFunnelRead(
     window: 'last 30 days',
     totals_30d: { ...t30, spend: Math.round(t30.spend!) },
     derived_30d: derived,
+    funnel_kind: funnel.kind,
     stages_30d: stages,
+    off_platform_note: funnel.note,
+    headline_kpi: funnel.kind === 'ecommerce' ? 'Meta ROAS and Meta CPA' : funnel.kind === 'lead_gen' ? 'cost per lead (Meta CPL)' : 'cost per link click',
     last7_vs_prior7: {
       spend: [Math.round(t7.spend!), Math.round(p7.spend!)],
       purchases: [t7.purchases, p7.purchases],
@@ -708,7 +782,9 @@ async function runFunnelRead(
     },
     triple_whale_blended: twSummary,
     benchmark_heuristics:
-      'Rough DTC heuristics, label as such: link CTR 1-2% healthy; content-view/link-click 70-85% (lower = slow LP or tracking gap); ATC/content-view 8-15%; purchase/link-click 1-3%. Lead-gen and app accounts differ — judge against the account\'s own trend first.',
+      funnel.kind === 'ecommerce'
+        ? 'Rough DTC heuristics, label as such: link CTR 1-2% healthy; content-view/link-click 70-85% (lower = slow LP or tracking gap); ATC/content-view 8-15%; purchase/link-click 1-3%. Judge against the account\'s own trend first.'
+        : 'Rough lead-gen heuristics, label as such: link CTR 1-2% healthy; landing-page-view/link-click 70-85% (lower = slow page or tracking gap); lead/landing-page-view 5-15% on a form, higher on an instant form. This account has no cart and no checkout, so never write about one. Judge against the account\'s own trend first.',
   };
 
   const synth = await synthesizeJson<FunnelSynthesis>(
@@ -716,15 +792,19 @@ async function runFunnelRead(
     'funnel_read',
     synthSystem,
     `Account funnel data (deterministic):\n${JSON.stringify(facts, null, 1)}\n\n` +
-      `Write the "Funnel Diagnosis" audit section. Schema:\n` +
-      `{"summary":"2-3 sentences with the bottom line and the headline numbers (CPA or CPL and ROAS with currency)",` +
-      `"biggest_leak":{"stage":"<stage name>","read":"1-2 sentences on the weakest stage-to-stage rate and what it implies"},` +
+      `Write the "Funnel Diagnosis" audit section. The stages in stages_30d ARE this account's funnel (funnel_kind=${funnel.kind}); ` +
+      `name only those stages, and lead with ${facts.headline_kpi}.\n` +
+      `Schema:\n` +
+      `{"summary":"2-3 sentences with the bottom line and the headline numbers (with currency)",` +
+      `"biggest_leak":{"stage":"<one of the stage names in stages_30d, verbatim>","read":"1-2 sentences on the weakest stage-to-stage rate and what it implies"},` +
       `"opportunities":[up to 3 strings, each concrete and tied to a number],` +
       `"warnings":[up to 2 strings — only genuine risks visible in the data]}`,
   );
 
   const data = {
     currency: client.currency,
+    funnel_kind: funnel.kind,
+    off_platform_note: funnel.note,
     stages: stages,
     derived: derived,
     spend_30d: Math.round(t30.spend!),
@@ -736,7 +816,12 @@ async function runFunnelRead(
   if (!synth) {
     return {
       status: 'complete',
-      summary: `30-day spend ${Math.round(t30.spend!)} ${client.currency}, ${t30.purchases} purchases, ROAS ${derived.roas ?? '—'} (cost cap reached before narrative synthesis).`,
+      summary:
+        funnel.kind === 'lead_gen'
+          ? `30-day spend ${Math.round(t30.spend!)} ${client.currency}, ${t30.leads} leads, cost per lead ${derived.cost_per_lead ?? 'not computable'} (cost cap reached before narrative synthesis).`
+          : funnel.kind === 'ecommerce'
+            ? `30-day spend ${Math.round(t30.spend!)} ${client.currency}, ${t30.purchases} purchases, Meta ROAS ${derived.roas ?? 'not computable'} (cost cap reached before narrative synthesis).`
+            : `30-day spend ${Math.round(t30.spend!)} ${client.currency}, no purchases and no leads recorded in the window (cost cap reached before narrative synthesis).`,
       data,
       warnings: [],
     };
