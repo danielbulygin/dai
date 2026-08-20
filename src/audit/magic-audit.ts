@@ -25,6 +25,7 @@ import {
 import { buildAccountModel, mergeAccountModel, type AccountModel, type AccountModelInputs } from './account-model.js';
 import { coldBreakeven, buildColdKnowledge, type ColdRows } from './cold-source.js';
 import { runColdCreativeAnalysis, type OwnLibraryScrape } from './cold-creative.js';
+import type { StoreMediaCandidate } from './cold-creative-source.js';
 
 /**
  * Magic Audit orchestrator (master-plan B1, expanded 2026-06-11: creative /
@@ -83,7 +84,10 @@ export interface AuditOptions {
  */
 export interface ColdInjection {
   userId: string;
-  accessToken: string;
+  /** Null on the Tinkers bridge path: no credential crosses that seam — the
+   *  account data arrives over their generation API instead, and every
+   *  token-needing section is marked planned (TOKENLESS_SKIP_SECTIONS). */
+  accessToken: string | null;
   adAccountId: string;
   accountName: string | null;
   currency: string;
@@ -93,6 +97,9 @@ export interface ColdInjection {
   /** Lead-stated gross margin % (ada_leads.gross_margin_pct, 0<x<100 or null).
    * When set, the fatigue breakeven re-bases from 1.0× to 1 ÷ margin. */
   grossMarginPct?: number | null;
+  /** Tinkers media store creatives by provider ad id (the tokenless path's
+   *  media + copy source for creative_analysis). */
+  storeMedia?: Map<string, StoreMediaCandidate> | null;
 }
 
 /** Sections that read warehouse tables a stranger doesn't have.
@@ -104,6 +111,16 @@ export interface ColdInjection {
  * media resolved live (Graph → own Ads Library fallback) + Gemini reads,
  * launched as a background task after the fast tier. */
 const COLD_SKIP_SECTIONS = ['dataset_health', 'account_structure', 'concept_roas', 'creative_diversity'];
+
+/** Sections whose reads live on the connection token. The tokenless bridge
+ *  path (Tinkers — no credential crosses the seam) marks them planned rather
+ *  than letting them error: their pulls would come back empty AND
+ *  metaTokenFor('') falls back to the AGENCY token, and probing a stranger's
+ *  account with our own credential is the one call this path must never make. */
+const TOKENLESS_SKIP_SECTIONS = [
+  'placement_breakdown', 'audience_breakdown', 'saturation', 'optimization_events',
+  'learning_limited', 'targeting_split', 'account_activity', 'competitor_teardown',
+];
 
 export interface LeadInsight {
   headline: string;
@@ -1574,6 +1591,13 @@ export async function runMagicAudit(
   // Cold path: warehouse-backed sections can't run for a stranger — mark them
   // planned via the existing skip machinery, never as errors.
   if (cold) for (const k of COLD_SKIP_SECTIONS) skip.add(k);
+  if (cold && !cold.accessToken) for (const k of TOKENLESS_SKIP_SECTIONS) skip.add(k);
+  // On a cold run the connection token is the ONLY credential the per-section
+  // Graph reads may use. A null cold token reaching the helpers as undefined
+  // would let them fall back to the agency token via metaTokenFor('') — so a
+  // tokenless cold run passes '' (falsy), which every helper answers with its
+  // honest no-token result instead.
+  const coldToken = cold ? (cold.accessToken ?? '') : undefined;
 
   // Cold path synthesizes the client shape from the live connection; `id` is
   // the auth user's uuid and is ONLY used as tenant identity — every
@@ -1807,7 +1831,7 @@ export async function runMagicAudit(
   let ownLibraryPromise: Promise<OwnLibraryScrape> | undefined;
   const getOwnLibrary = (): Promise<OwnLibraryScrape> => {
     ownLibraryPromise ??= (async () => {
-      const own = await resolveOwnPage(code, client.adAccountId, cold?.accessToken);
+      const own = await resolveOwnPage(code, client.adAccountId, coldToken);
       if (!own) throw new Error('own FB page could not be resolved');
       if (meter.exhausted()) throw new Error(`cost cap reached before scraping ${own.name}`);
       const ads = await apifyScrapePage(own.pageId, 250, meter);
@@ -1843,7 +1867,7 @@ export async function runMagicAudit(
     // already-benchmarked rate dims into the dedicated band chapter; posts a stat.
     how_you_compare: async () => buildComparisonSection(savedScorecard ?? []),
     placement_breakdown: async () => {
-      const raw = await fetchInsightsBreakdown(code, client.adAccountId, 'publisher_platform,platform_position', '', cold?.accessToken);
+      const raw = await fetchInsightsBreakdown(code, client.adAccountId, 'publisher_platform,platform_position', '', coldToken);
       if (!raw) return { status: 'error', error: 'placement insights pull failed' };
       const rows: PlacementInsightRow[] = raw.map((r) => ({
         publisher_platform: String(r.publisher_platform ?? 'unknown'),
@@ -1858,8 +1882,8 @@ export async function runMagicAudit(
     },
     audience_breakdown: async () => {
       const [demoRaw, geoRaw] = await Promise.all([
-        fetchInsightsBreakdown(code, client.adAccountId, 'age,gender', '', cold?.accessToken),
-        fetchInsightsBreakdown(code, client.adAccountId, 'country', '', cold?.accessToken),
+        fetchInsightsBreakdown(code, client.adAccountId, 'age,gender', '', coldToken),
+        fetchInsightsBreakdown(code, client.adAccountId, 'country', '', coldToken),
       ]);
       if (!demoRaw) return { status: 'error', error: 'demographic insights pull failed' };
       const demo: DemoInsightRow[] = demoRaw.map((r) => ({
@@ -1882,7 +1906,7 @@ export async function runMagicAudit(
       return computeAudienceBreakdown(demo, geo, client.currency);
     },
     saturation: async () => {
-      const weeks = await fetchWeeklyReach(code, client.adAccountId, cold?.accessToken);
+      const weeks = await fetchWeeklyReach(code, client.adAccountId, coldToken);
       if (!weeks) return { status: 'error', error: 'weekly reach pull failed' };
       return computeSaturation(weeks, client.currency);
     },
@@ -1896,7 +1920,7 @@ export async function runMagicAudit(
         client.currency,
       ),
     optimization_events: async () => {
-      adsetConfigsForModel = await fetchAdsetConfigs(code, client.adAccountId, cold?.accessToken);
+      adsetConfigsForModel = await fetchAdsetConfigs(code, client.adAccountId, coldToken);
       const t = accountTotals30 ?? { purchases: 0, leads: 0, purchase_value: 0 };
       return computeOptimizationEvents(adsetConfigsForModel, spendByAdset, {
         purchases: t.purchases ?? 0,
@@ -1913,11 +1937,11 @@ export async function runMagicAudit(
         const events = auditKpiMode === 'roas' ? r.purchases || 0 : r.purchases || r.leads || 0;
         weekly.set(String(r.adset_id), (weekly.get(String(r.adset_id)) ?? 0) + events / 4);
       }
-      const adsets = adsetConfigsForModel.length ? adsetConfigsForModel : await fetchAdsetConfigs(code, client.adAccountId, cold?.accessToken);
+      const adsets = adsetConfigsForModel.length ? adsetConfigsForModel : await fetchAdsetConfigs(code, client.adAccountId, coldToken);
       return computeLearningLimited(adsets, weekly, spendByAdset, client.currency);
     },
     targeting_split: async () => {
-      const specs = await fetchTargetingSpecs(code, client.adAccountId, cold?.accessToken);
+      const specs = await fetchTargetingSpecs(code, client.adAccountId, coldToken);
       if (!specs) return { status: 'error', error: 'targeting spec pull failed' };
       const kpiByAdset = new Map<string, { value: number; results: number }>();
       for (const r of rows30) {
@@ -1948,7 +1972,7 @@ export async function runMagicAudit(
       // ALL ads with spend in the window (Dan 2026-07-06) — the engine drops the
       // no-longer-delivering ones and dedupes by URL, so this stays cheap.
       const spendingAds = [...byAd.values()].filter((a) => a.spend > 0).sort((a, b) => b.spend - a.spend);
-      const { checks, uncheckedUrls } = await checkAdDestinations(code, spendingAds, cold?.accessToken);
+      const { checks, uncheckedUrls } = await checkAdDestinations(code, spendingAds, coldToken);
       return computeLandingPages(adRows, checks, client.currency, auditKpiMode, uncheckedUrls);
     },
     creative_analysis: async () => {
@@ -1991,7 +2015,7 @@ export async function runMagicAudit(
     },
     funnel_read: () => runFunnelRead(code, meter, client, synthSystem, cold ? accFull30 : undefined),
     account_facts: async () => {
-      const partnershipIds = await fetchPartnershipAdIds(code, client.adAccountId, cold?.accessToken);
+      const partnershipIds = await fetchPartnershipAdIds(code, client.adAccountId, coldToken);
       let partnershipPct: number | null = null;
       if (partnershipIds && partnershipIds.size > 0) {
         const total = rows30.reduce((s, r) => s + (r.spend || 0), 0);
@@ -2007,7 +2031,7 @@ export async function runMagicAudit(
     account_activity: async () => {
       // Change history reads live from Meta's activities edge on BOTH paths
       // (cold connection token or the agency token) — no warehouse dependency.
-      const res = await fetchAccountActivities(code, client.adAccountId, cold?.accessToken);
+      const res = await fetchAccountActivities(code, client.adAccountId, coldToken);
       if (!res) return { status: 'error', error: 'account change-history pull failed or is unavailable under ads_read' };
       // Monthly retainer is nullable — unknown at audit time. This is the wire
       // point: when a lead states what they pay their manager, thread it here to
@@ -2095,7 +2119,7 @@ export async function runMagicAudit(
       try {
         const hooksEntry = scorecard.find((e) => e.key === 'hooks');
         if (hooksEntry) {
-          const placementRows = await fetchPlacementHookRows(code, client.adAccountId, cold?.accessToken);
+          const placementRows = await fetchPlacementHookRows(code, client.adAccountId, coldToken);
           const correction = placementRows ? computeHookCorrection(placementRows) : null;
           if (correction?.material) {
             hooksEntry.correction = { corrected_value: correction.corrected_pct, note: correction.note };
@@ -2142,7 +2166,7 @@ export async function runMagicAudit(
         .filter((v): v is string => typeof v === 'string' && v.length > 0);
       const ids = [...new Set(surfaced)].slice(0, AD_PREVIEW_CAP);
       if (ids.length === 0) return;
-      const previews = await fetchAdPreviews(code, ids, cold?.accessToken);
+      const previews = await fetchAdPreviews(code, ids, coldToken);
       if (previews.size === 0) return;
       if (fatigueData?.ads?.length) {
         fatigueData.ads = mergeAdPreviews(fatigueData.ads, previews)!;
@@ -2228,6 +2252,7 @@ export async function runMagicAudit(
             runColdCreativeAnalysis({
               meter,
               accessToken: cold.accessToken,
+              storeMedia: cold.storeMedia ?? null,
               accountName: client.name,
               currency: client.currency,
               rows30,

@@ -1,17 +1,25 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 /**
- * The Tinkers monorepo seam: HMAC signing, the context contract (including the
- * ok:false refusals), snake_case → camelCase patch mapping, and the rule that
- * makes the whole thing safe to run — the access token never reaches a log.
+ * The Tinkers monorepo seam: the generation reads (Bearer-authorized GETs — no
+ * credential ever crosses this boundary), the row mapper, HMAC signing on the
+ * write-backs, snake_case → camelCase patch mapping, and the rule that makes
+ * the whole thing safe to run — nothing token-shaped reaches a log or the wire.
  */
 
 const { state } = vi.hoisted(() => ({
   state: {
     baseUrl: 'https://tinkers.test' as string | undefined,
     secret: 'seam-secret' as string | undefined,
-    calls: [] as Array<{ url: string; signature: string | null; body: string }>,
+    calls: [] as Array<{ url: string; method: string; auth: string | null; signature: string | null; body: string | null }>,
+    /** Queued answers for POSTs to /audit-complete (shifted in order). */
     responses: [] as Array<{ status?: number; json?: unknown; throws?: Error }>,
+    /** Handlers for the generation GETs, by path segment. An array shifts
+     *  per call, so a test can fail one window out of six. */
+    reads: {} as Record<
+      string,
+      { status?: number; json?: unknown; throws?: Error } | Array<{ status?: number; json?: unknown; throws?: Error }>
+    >,
     logs: [] as string[],
     // The real column patches magic-audit writes, in the order it writes them
     // (copied from a run of tests/magic-audit-row-mirror.test.ts).
@@ -19,6 +27,8 @@ const { state } = vi.hoisted(() => ({
     finalRowState: {} as Record<string, unknown>,
     /** Set to a pending promise to hold a run open (concurrency tests). */
     holdRun: undefined as Promise<void> | undefined,
+    /** What runMagicAudit received (the cold injection under test). */
+    magicAuditOptions: undefined as Record<string, unknown> | undefined,
   },
 }));
 
@@ -46,20 +56,15 @@ vi.mock('../src/utils/logger.js', () => {
   return { logger: { info: record('info'), warn: record('warn'), error: record('error'), debug: record('debug') } };
 });
 
-// The audit machinery is stubbed down to the one thing this file is about: the
-// patches the orchestrator hands the bridge, and what leaves the wire for each.
-vi.mock('../src/audit/cold-fetch.js', () => ({
-  fetchAccountMeta: async () => ({ name: 'Acme', currency: 'EUR' }),
-  fetchColdAdDays: async () => ({ adDays: [], truncated: false, failedSlices: 0 }),
-  resolveDestinations: async () => ({}),
-}));
-
+// The audit machinery is stubbed down to the two things this file is about:
+// what the bridge reads and what leaves the wire for each patch.
 vi.mock('../src/audit/cold-source.js', () => ({
   buildColdRows: () => ({ packRows90: [], packRows180: [], packAccRows90: [], accFull30: [], landing30: [], rowCount: 7, daysCovered: 3 }),
 }));
 
 vi.mock('../src/audit/magic-audit.js', () => ({
   runMagicAudit: async (_code: string, options: { onRowUpdate?: (p: Record<string, unknown>, m: { final: boolean }) => void | Promise<void> }) => {
+    state.magicAuditOptions = options as unknown as Record<string, unknown>;
     if (state.holdRun) await state.holdRun;
     for (const patch of state.orchestratorPatches) await options.onRowUpdate?.(patch, { final: false });
     await options.onRowUpdate?.(state.finalRowState, { final: true });
@@ -67,13 +72,24 @@ vi.mock('../src/audit/magic-audit.js', () => ({
   },
 }));
 
-vi.stubGlobal('fetch', async (url: string, init: { headers: Record<string, string>; body: string }) => {
+vi.stubGlobal('fetch', async (url: string, init?: { method?: string; headers?: Record<string, string>; body?: string }) => {
+  const u = String(url);
   state.calls.push({
-    url: String(url),
-    signature: init.headers['x-tinkers-signature-256'] ?? null,
-    body: init.body,
+    url: u,
+    method: init?.method ?? 'GET',
+    auth: init?.headers?.Authorization ?? null,
+    signature: init?.headers?.['x-tinkers-signature-256'] ?? null,
+    body: init?.body ?? null,
   });
-  const next = state.responses.shift() ?? { json: { ok: false, reason: 'not_configured' } };
+  let next: { status?: number; json?: unknown; throws?: Error } | undefined;
+  if (u.includes('/api/generation/')) {
+    const seg = u.match(/\/api\/generation\/[^/]+\/([a-z-]+)/)?.[1] ?? '';
+    const handler = state.reads[seg];
+    next = Array.isArray(handler) ? handler.shift() : handler;
+  } else {
+    next = state.responses.shift();
+  }
+  next ??= { json: { ok: false, reason: 'not_configured' } };
   if (next.throws) throw next.throws;
   const status = next.status ?? 200;
   return { ok: status >= 200 && status < 300, status, json: async () => next.json } as unknown as Response;
@@ -81,27 +97,53 @@ vi.stubGlobal('fetch', async (url: string, init: { headers: Record<string, strin
 
 import { runBridgedColdAudit } from '../src/audit/tinkers-bridge.js';
 import {
-  fetchAuditContext,
+  fetchTinkersAdDays,
+  fetchTinkersDestinations,
+  fetchTinkersStoreMedia,
   hasReportContent,
   isTinkersSeamConfigured,
   redactSecrets,
   reportAuditFinalize,
   reportAuditUpdate,
   signRequest,
+  toRawAdDay,
+  topSpendingAdIds,
   toTinkersPatch,
 } from '../src/audit/tinkers-bridge.js';
 
-const okContext = {
+const okAccount = {
   ok: true,
-  auditId: 'aud_1',
-  adAccountId: 'act_123',
-  accessToken: 'EAA-super-secret-token',
-  currency: 'EUR',
-  accountName: 'Acme',
-  goalMetric: 'roas',
-  goalValue: 2.5,
-  grossMarginPct: 45,
+  account: { externalId: 'act_123', name: 'Acme', currency: 'EUR', timezone: 'Europe/Berlin' },
 };
+
+const insightRow = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+  level: 'ad',
+  entityId: 'ad_1',
+  entityName: 'Blue hoodie UGC',
+  campaignId: 'c_1',
+  adsetId: 'as_1',
+  date: '2026-08-01',
+  dateStop: '2026-08-01',
+  spend: 12.5,
+  impressions: 1000,
+  clicks: 40,
+  linkClicks: 30,
+  reach: 800,
+  ctr: 4,
+  cpm: 12.5,
+  frequency: 1.25,
+  actions: [
+    { type: 'purchase', value: 2 },
+    { type: 'video_view', value: 300 },
+  ],
+  actionValues: [{ type: 'purchase', value: 90 }],
+  purchaseRoas: [],
+  videoPlays: 300,
+  videoP25: 250,
+  videoP75: 120,
+  thruplays: 90,
+  ...over,
+});
 
 beforeEach(() => {
   state.baseUrl = 'https://tinkers.test';
@@ -110,6 +152,13 @@ beforeEach(() => {
   state.responses.length = 0;
   state.logs.length = 0;
   state.holdRun = undefined;
+  state.magicAuditOptions = undefined;
+  state.reads = {
+    account: { json: okAccount },
+    'ad-days': { json: { ok: true, rows: [], partial: false } },
+    creatives: { json: { ok: true, creatives: [] } },
+    'creative-media': { json: { ok: true, ads: [] } },
+  };
   state.orchestratorPatches = [
     { recognition: { ads_count: 12 }, updated_at: 'ts' },
     { work_log: [{ at: 'ts', line: 'Read 12 ads' }] },
@@ -131,57 +180,168 @@ beforeEach(() => {
 
 describe('signRequest', () => {
   it('is the hex HMAC-SHA256 of the exact body bytes', () => {
-    expect(signRequest('{"organizationId":"org_1"}', 'seam-secret')).toBe(
-      '5b8c36ecc5ad22ac3da97c819ce7c8f39097491de30fcbf71c742d7aed9f60cf',
-    );
+    expect(signRequest('{"a":1}', 'seam-secret')).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it('changes with the body and with the secret', () => {
-    const base = signRequest('{"a":1}', 's1');
-    expect(signRequest('{"a":2}', 's1')).not.toBe(base);
-    expect(signRequest('{"a":1}', 's2')).not.toBe(base);
+    expect(signRequest('{"a":1}', 's1')).not.toBe(signRequest('{"a":2}', 's1'));
+    expect(signRequest('{"a":1}', 's1')).not.toBe(signRequest('{"a":1}', 's2'));
   });
 });
 
 describe('isTinkersSeamConfigured', () => {
   it('needs both halves', () => {
     expect(isTinkersSeamConfigured()).toBe(true);
-    state.secret = undefined;
-    expect(isTinkersSeamConfigured()).toBe(false);
-    state.secret = 'seam-secret';
     state.baseUrl = undefined;
+    expect(isTinkersSeamConfigured()).toBe(false);
+    state.baseUrl = 'https://tinkers.test';
+    state.secret = undefined;
     expect(isTinkersSeamConfigured()).toBe(false);
   });
 });
 
-describe('fetchAuditContext', () => {
-  it('signs the body it actually sends, to the contract path', async () => {
-    state.responses.push({ json: okContext });
-    await fetchAuditContext('org_1');
-
+describe('the generation reads', () => {
+  it('authorizes with the Bearer secret and never signs a read', async () => {
+    await fetchTinkersDestinations('aud_1');
     const call = state.calls[0]!;
-    expect(call.url).toBe('https://tinkers.test/api/webhooks/audit-context');
-    expect(call.body).toBe('{"organizationId":"org_1"}');
-    expect(call.signature).toBe(signRequest(call.body, 'seam-secret'));
+    expect(call.url).toBe('https://tinkers.test/api/generation/aud_1/creatives');
+    expect(call.method).toBe('GET');
+    expect(call.auth).toBe('Bearer seam-secret');
+    expect(call.signature).toBeNull();
+    expect(call.body).toBeNull();
   });
 
-  it('returns the refusal as data (never throws on ok:false)', async () => {
-    state.responses.push({ json: { ok: false, reason: 'no_connection' } });
-    await expect(fetchAuditContext('org_1')).resolves.toEqual({ ok: false, reason: 'no_connection' });
+  it('a not-ready account read refuses the whole run and posts nothing', async () => {
+    state.reads.account = { json: { ok: false, reason: 'no_connection' } };
+    await expect(runBridgedColdAudit({ organizationId: 'org_1', auditId: 'aud_1' })).rejects.toThrow('no_connection');
+    expect(state.calls.filter((c) => c.url.endsWith('/audit-complete'))).toHaveLength(0);
   });
 
-  it('throws on a non-2xx answer and on a response off-contract', async () => {
-    state.responses.push({ status: 500, json: {} });
-    await expect(fetchAuditContext('org_1')).rejects.toThrow('500');
-
-    state.responses.push({ json: { ok: true, auditId: 'aud_1' } });
-    await expect(fetchAuditContext('org_1')).rejects.toThrow('contract');
+  it("an unknown audit is their 404 and refuses loudly", async () => {
+    state.reads.account = { status: 404, json: { error: { code: 'NOT_FOUND' } } };
+    await expect(runBridgedColdAudit({ organizationId: 'org_1', auditId: 'nope' })).rejects.toThrow('404');
   });
 
-  it('throws when the seam is not configured', async () => {
+  it('refuses an unconfigured seam before any call leaves', async () => {
     state.secret = undefined;
-    await expect(fetchAuditContext('org_1')).rejects.toThrow('not configured');
+    await expect(runBridgedColdAudit({ organizationId: 'org_1', auditId: 'aud_1' })).rejects.toThrow('not configured');
     expect(state.calls).toHaveLength(0);
+  });
+});
+
+describe('toRawAdDay', () => {
+  it('maps their normalized row onto the raw Graph shape the pack builder eats', () => {
+    const raw = toRawAdDay(insightRow())!;
+    expect(raw).toMatchObject({
+      ad_id: 'ad_1',
+      ad_name: 'Blue hoodie UGC',
+      adset_id: 'as_1',
+      date_start: '2026-08-01',
+      date_stop: '2026-08-01',
+      spend: 12.5,
+      impressions: 1000,
+      clicks: 40,
+      frequency: 1.25,
+    });
+    expect(raw.actions).toContainEqual({ action_type: 'purchase', value: 2 });
+    expect(raw.action_values).toEqual([{ action_type: 'purchase', value: 90 }]);
+    // Thruplays land under the video_view type — the type Meta itself uses
+    // inside video_thruplay_watched_actions, and the one cold-source reads.
+    expect(raw.video_thruplay_watched_actions).toEqual([{ action_type: 'video_view', value: 90 }]);
+  });
+
+  it('re-injects video_view from videoPlays when the actions list dropped it', () => {
+    const raw = toRawAdDay(insightRow({ actions: [{ type: 'purchase', value: 2 }] }))!;
+    expect(raw.actions).toContainEqual({ action_type: 'video_view', value: 300 });
+  });
+
+  it('refuses a row it cannot identify, and tolerates junk fields', () => {
+    expect(toRawAdDay(null)).toBeNull();
+    expect(toRawAdDay({ entityId: '', date: '2026-08-01' })).toBeNull();
+    expect(toRawAdDay(insightRow({ date: null }))).toBeNull();
+    const raw = toRawAdDay(insightRow({ spend: 'twelve', actions: 'nope', thruplays: null }))!;
+    expect(raw.spend).toBe(0);
+    expect(raw.video_thruplay_watched_actions).toEqual([]);
+  });
+});
+
+describe('fetchTinkersAdDays', () => {
+  it('pulls 180 days as six ≤31-day windows — their functions stop at 300s, so the slicing IS the contract', async () => {
+    state.reads['ad-days'] = { json: { ok: true, rows: [insightRow()], partial: false } };
+    const pull = await fetchTinkersAdDays('aud_1', { asOf: '2026-08-20' });
+
+    const windows = state.calls.filter((c) => c.url.includes('/ad-days'));
+    expect(windows).toHaveLength(6);
+    for (const w of windows) {
+      const since = new Date(`${w.url.match(/since=([\d-]+)/)![1]}T00:00:00Z`).getTime();
+      const until = new Date(`${w.url.match(/until=([\d-]+)/)![1]}T00:00:00Z`).getTime();
+      const days = (until - since) / 86_400_000 + 1;
+      expect(days).toBeGreaterThan(0);
+      expect(days).toBeLessThanOrEqual(31);
+    }
+    expect(pull.adDays).toHaveLength(6);
+    expect(pull.failedSlices).toBe(0);
+  });
+
+  it('a failed window costs that window, never the audit', async () => {
+    const good = { json: { ok: true, rows: [insightRow()], partial: false } };
+    state.reads['ad-days'] = [good, { status: 502, json: {} }, good, good, good, good];
+
+    const pull = await fetchTinkersAdDays('aud_1', { asOf: '2026-08-20' });
+    expect(pull.failedSlices).toBe(1);
+    expect(pull.adDays).toHaveLength(5);
+    expect(state.logs.some((l) => l.includes('window failed'))).toBe(true);
+  });
+});
+
+describe('fetchTinkersDestinations + fetchTinkersStoreMedia', () => {
+  it('maps landing urls to paths and skips what it cannot parse', async () => {
+    state.reads.creatives = {
+      json: {
+        ok: true,
+        creatives: [
+          { adId: 'ad_1', adName: 'A', landingUrl: 'https://shop.example/products/hoodie?x=1', mediaType: 'video' },
+          { adId: 'ad_2', adName: 'B', landingUrl: 'fb.me/whatever', mediaType: 'image' },
+          { adId: 'ad_3', adName: 'C', landingUrl: null, mediaType: null },
+        ],
+      },
+    };
+    await expect(fetchTinkersDestinations('aud_1')).resolves.toEqual({
+      ad_1: { market: null, path: '/products/hoodie' },
+    });
+  });
+
+  it('store media arrives keyed by ad id; a not-ready answer degrades to null', async () => {
+    state.reads['creative-media'] = {
+      json: {
+        ok: true,
+        ads: [{ adId: 'ad_1', body: 'Buy the hoodie', headline: 'Hoodie', videoUrl: 'https://signed/video.mp4', imageUrl: null, posterUrl: 'https://signed/poster.jpg' }],
+      },
+    };
+    const media = await fetchTinkersStoreMedia('aud_1', ['ad_1']);
+    expect(media?.get('ad_1')).toEqual({
+      body: 'Buy the hoodie',
+      title: 'Hoodie',
+      video_url: 'https://signed/video.mp4',
+      image_url: null,
+      poster_url: 'https://signed/poster.jpg',
+    });
+
+    state.reads['creative-media'] = { json: { ok: false, reason: 'media_store_unconfigured' } };
+    await expect(fetchTinkersStoreMedia('aud_1', ['ad_1'])).resolves.toBeNull();
+    expect(await fetchTinkersStoreMedia('aud_1', [])).toBeNull();
+  });
+});
+
+describe('topSpendingAdIds', () => {
+  it('ranks by 30d spend and ignores older rows', () => {
+    const rows = [
+      { ad_id: 'old', date_start: '2026-05-01', spend: 999 },
+      { ad_id: 'small', date_start: '2026-08-10', spend: 1 },
+      { ad_id: 'big', date_start: '2026-08-10', spend: 50 },
+      { ad_id: 'big', date_start: '2026-08-11', spend: 50 },
+    ];
+    expect(topSpendingAdIds(rows, '2026-08-20', 2)).toEqual(['big', 'small']);
   });
 });
 
@@ -189,15 +349,15 @@ describe('reportAuditUpdate', () => {
   it('sends every content payload as a partial, and seals with a contentless finalize', async () => {
     state.responses.push({ json: { received: true, recorded: true } });
     await reportAuditUpdate('aud_1', { costUsd: 1.5 });
-    expect(JSON.parse(state.calls[0]!.body)).toEqual({ auditId: 'aud_1', partial: true, costUsd: 1.5 });
+    expect(JSON.parse(state.calls[0]!.body!)).toEqual({ auditId: 'aud_1', partial: true, costUsd: 1.5 });
     expect(state.calls[0]!.url).toBe('https://tinkers.test/api/webhooks/audit-complete');
 
     // The finalize call stays tiny no matter how fat the report got — that is
     // the whole point of splitting it off the last content payload.
     state.responses.push({ json: { received: true, recorded: true } });
     await reportAuditFinalize('aud_1');
-    expect(JSON.parse(state.calls[1]!.body)).toEqual({ auditId: 'aud_1', finalize: true });
-    expect(state.calls[1]!.body.length).toBeLessThan(64);
+    expect(JSON.parse(state.calls[1]!.body!)).toEqual({ auditId: 'aud_1', finalize: true });
+    expect(state.calls[1]!.body!.length).toBeLessThan(64);
   });
 
   it('is fail-soft: a transport failure warns instead of throwing', async () => {
@@ -263,17 +423,12 @@ describe('token hygiene', () => {
     expect(redactSecrets('audit-context returned 500')).toBe('audit-context returned 500');
   });
 
-  it('never lets the access token reach a log line', async () => {
-    state.responses.push({ json: okContext });
-    const context = await fetchAuditContext('org_1');
-    expect(context.ok).toBe(true);
-
-    state.responses.push({ throws: new Error(`upstream rejected token ${okContext.accessToken}`) });
+  it('a token-shaped upstream error never reaches a log line', async () => {
+    state.responses.push({ throws: new Error('upstream rejected token EAA-super-secret-token') });
     await reportAuditUpdate('aud_1', { costUsd: 1 });
 
     const logged = state.logs.join('\n');
     expect(logged).not.toContain('EAA');
-    expect(logged).not.toContain(okContext.accessToken);
     expect(logged).toContain('upstream rejected token'); // the message still lands, just not the secret
   });
 });
@@ -290,17 +445,16 @@ describe('hasReportContent', () => {
 describe('runBridgedColdAudit reporting', () => {
   const SNAKE_KEYS = ['lead_insights', 'work_log', 'cost_usd', 'ads_count'];
 
-  const runWithContext = async (): Promise<Array<Record<string, unknown>>> => {
-    state.responses.push({ json: okContext }); // audit-context
+  const runBridge = async (): Promise<Array<Record<string, unknown>>> => {
     for (let i = 0; i < 12; i += 1) state.responses.push({ json: { received: true, recorded: true } });
-    await runBridgedColdAudit({ organizationId: 'org_1' });
+    await runBridgedColdAudit({ organizationId: 'org_1', auditId: 'aud_1' });
     return state.calls
       .filter((c) => c.url.endsWith('/audit-complete'))
-      .map((c) => JSON.parse(c.body) as Record<string, unknown>);
+      .map((c) => JSON.parse(c.body!) as Record<string, unknown>);
   };
 
   it('maps EVERY payload, not just the last one', async () => {
-    const posted = await runWithContext();
+    const posted = await runBridge();
 
     for (const body of posted) {
       // Tinkers' zod strips unknown keys: a snake_case key at the TOP LEVEL of a
@@ -326,11 +480,23 @@ describe('runBridgedColdAudit reporting', () => {
     expect(posted.slice(0, -1).every((b) => b.partial === true)).toBe(true);
   });
 
+  it('runs the audit TOKENLESS: the cold injection carries no credential', async () => {
+    await runBridge();
+    const cold = state.magicAuditOptions?.cold as Record<string, unknown>;
+    expect(cold.accessToken).toBeNull();
+    expect(cold.adAccountId).toBe('act_123');
+    expect(cold.accountName).toBe('Acme');
+    expect(cold.currency).toBe('EUR');
+    // The trigger fires at Meta connect, before the funnel's goal step.
+    expect(cold.goalMetric).toBeNull();
+    expect(cold.grossMarginPct).toBeNull();
+  });
+
   it('skips the contentless cost-only patch instead of earning a warning for it', async () => {
     // The orchestrator's closing { status, cost_usd } write maps to costUsd
     // alone, which Tinkers reads as no content — posting it would warn on every
     // healthy run.
-    const posted = await runWithContext();
+    const posted = await runBridge();
     // Five of the six orchestrator patches carry content; the sixth is dropped.
     // The accumulated row then goes out as one more partial.
     const partials = posted.filter((b) => b.partial === true);
@@ -339,8 +505,8 @@ describe('runBridgedColdAudit reporting', () => {
     expect(state.logs.some((l) => l.includes('not recorded'))).toBe(false);
   });
 
-  it("seals with a tiny finalize carrying no content, after the whole report is stored", async () => {
-    const posted = await runWithContext();
+  it('seals with a tiny finalize carrying no content, after the whole report is stored', async () => {
+    const posted = await runBridge();
     const finalize = posted.at(-1)!;
     const lastContent = posted.at(-2)!;
 
@@ -364,7 +530,7 @@ describe('runBridgedColdAudit reporting', () => {
     state.orchestratorPatches = [{ sections: { creative_fatigue: { status: 'error' } } }, { status: 'error', cost_usd: 1 }];
     state.finalRowState = { sections: { creative_fatigue: { status: 'error' } }, cost_usd: 1, status: 'error' };
 
-    const posted = await runWithContext();
+    const posted = await runBridge();
 
     expect(posted.every((b) => b.partial === true)).toBe(true);
     expect(posted.some((b) => b.finalize === true)).toBe(false);
@@ -372,18 +538,9 @@ describe('runBridgedColdAudit reporting', () => {
     expect(state.logs.some((l) => l.includes('not finalizing'))).toBe(true);
   });
 
-  it('reports to the auditId Tinkers returned, and posts nothing when it refuses', async () => {
-    const posted = await runWithContext();
+  it('reports to the auditId the trigger named', async () => {
+    const posted = await runBridge();
     expect(posted.every((b) => b.auditId === 'aud_1')).toBe(true);
-
-    state.calls.length = 0;
-    state.responses.length = 0; // drop the unused report answers from the run above
-    state.responses.push({ json: { ok: false, reason: 'already_complete' } });
-    await expect(runBridgedColdAudit({ organizationId: 'org_1' })).resolves.toEqual({
-      status: 'skipped',
-      reason: 'already_complete',
-    });
-    expect(state.calls.filter((c) => c.url.endsWith('/audit-complete'))).toHaveLength(0);
   });
 
   it('redacts token-shaped strings INSIDE the payload, not just the log line', async () => {
@@ -394,7 +551,7 @@ describe('runBridgedColdAudit reporting', () => {
     state.orchestratorPatches = [{ sections: { creative_fatigue: { status: 'error', error: leaked } } }];
     state.finalRowState = { sections: { creative_fatigue: { status: 'error', error: leaked } }, status: 'complete' };
 
-    const posted = await runWithContext();
+    const posted = await runBridge();
     const wire = JSON.stringify(posted);
 
     expect(wire).not.toContain('EAAsecretlive');
@@ -405,26 +562,24 @@ describe('runBridgedColdAudit reporting', () => {
 
 describe('runBridgedColdAudit idempotency', () => {
   it('refuses a second concurrent trigger for the same org, but not for another', async () => {
-    // Two Graph pulls and two LLM bills interleaving partials into one row is
-    // what a double-click costs without this — Tinkers' own idempotency answer
-    // cannot see an audit that started a second ago.
+    // Two tinkers pulls and two LLM bills interleaving partials into one row is
+    // what a double-click costs without this — the trigger is fire-and-forget
+    // and cannot see an audit that started a second ago.
     let release: () => void = () => {};
     state.holdRun = new Promise<void>((r) => {
       release = r;
     });
-    state.responses.length = 0;
-    state.responses.push({ json: okContext });
     for (let i = 0; i < 24; i += 1) state.responses.push({ json: { received: true, recorded: true } });
 
-    const first = runBridgedColdAudit({ organizationId: 'org_1' });
+    const first = runBridgedColdAudit({ organizationId: 'org_1', auditId: 'aud_1' });
     await new Promise((r) => setTimeout(r, 0));
 
-    await expect(runBridgedColdAudit({ organizationId: 'org_1' })).resolves.toEqual({
+    await expect(runBridgedColdAudit({ organizationId: 'org_1', auditId: 'aud_1' })).resolves.toEqual({
       status: 'skipped',
       reason: 'already_running',
     });
     expect(state.logs.some((l) => l.includes('already running'))).toBe(true);
-    expect(state.calls.filter((c) => c.url.endsWith('/audit-context'))).toHaveLength(1);
+    expect(state.calls.filter((c) => c.url.includes('/account'))).toHaveLength(1);
 
     release();
     await expect(first).resolves.toMatchObject({ status: 'complete' });
@@ -432,8 +587,7 @@ describe('runBridgedColdAudit idempotency', () => {
     // And the guard releases: the same org can be audited again afterwards.
     state.holdRun = undefined;
     state.responses.length = 0;
-    state.responses.push({ json: okContext });
     for (let i = 0; i < 12; i += 1) state.responses.push({ json: { received: true, recorded: true } });
-    await expect(runBridgedColdAudit({ organizationId: 'org_1' })).resolves.toMatchObject({ status: 'complete' });
+    await expect(runBridgedColdAudit({ organizationId: 'org_1', auditId: 'aud_1' })).resolves.toMatchObject({ status: 'complete' });
   });
 });

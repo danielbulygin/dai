@@ -52,7 +52,8 @@ auditTriggerRouter.post('/audit/trigger', async (c) => {
       return c.json({ error: 'TINKERS_BASE_URL / TINKERS_AUDIT_SEAM_SECRET not configured' }, 503);
     }
     const organizationId = userId;
-    void runBridgedColdAudit({ organizationId })
+    const auditId = tinkersAuditId;
+    void runBridgedColdAudit({ organizationId, auditId })
       .then((r) =>
         r.status === 'complete'
           ? logger.info({ organizationId, auditId: r.auditId, costUsd: r.costUsd }, 'bridged cold audit complete')

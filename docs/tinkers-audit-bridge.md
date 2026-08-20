@@ -7,8 +7,10 @@ application with a separate database, and it triggers this endpoint with its
 **organization id** in `userId`. Nothing in our tables resolves that id, so
 before this bridge those audits died at token resolution.
 
-The bridge adds a second path through the same machinery: context comes FROM
-Tinkers, results go BACK to Tinkers, and we never touch their database.
+The bridge adds a second path through the same machinery: the account data is
+READ from Tinkers' generation API (no credential crosses the seam — they return
+data, never a Meta token), results go BACK to Tinkers, and we never touch
+their database.
 
 **The agency path is untouched.** A body without the bridge marker runs the
 exact code it ran before — same idempotency reads, same `runColdAudit`, same
@@ -33,28 +35,63 @@ falls back to the legacy path. With `TINKERS_BASE_URL` or
 shape `AUDIT_TRIGGER_SECRET` uses when it is unset) and starts nothing.
 
 The bridge path deliberately SKIPS the legacy idempotency reads — they cannot
-resolve a monorepo org. Tinkers answers idempotency itself (see
-`already_complete` below).
+resolve a monorepo org. Tinkers' own trigger is idempotent (one live audit per
+lead org), and the in-process running set below is the burst guard.
 
-## The seam
+## The seam — no credential ever crosses it
 
-Every request we send Tinkers is signed with HMAC-SHA256 over the exact JSON
-bytes of the body, hex digest, in the `x-tinkers-signature-256` header, under
-`TINKERS_AUDIT_SEAM_SECRET`.
+Tinkers' ruling (2026-08-20): they return DATA, never a Meta token — their
+plaintext token never leaves their meta package, so a compromised generator
+cannot spend a customer's ad account. The audit id in every path is the tenant
+capability: their row's own organization decides everything, and an unknown,
+revoked or expired audit is their 404.
 
-**`POST {TINKERS_BASE_URL}/api/webhooks/audit-context`** — `{ organizationId }`
+**Reads** — `Authorization: Bearer $TINKERS_AUDIT_SEAM_SECRET` (the same secret
+that signs the write-backs; one secret for the whole boundary):
 
-```jsonc
-{ "ok": true, "auditId": "...", "adAccountId": "act_…", "accessToken": "…",
-  "currency": "EUR", "accountName": "…", "goalMetric": "roas", "goalValue": 2.5,
-  "grossMarginPct": 45 }
-// or
-{ "ok": false, "reason": "unknown_org" | "no_connection" | "already_complete" | "not_configured" }
+```
+GET {TINKERS_BASE_URL}/api/generation/:auditId/account
+  → { ok, account: { externalId, name, currency, timezone } }
+GET {TINKERS_BASE_URL}/api/generation/:auditId/ad-days?since&until
+  → { ok, rows: [normalized ad-level daily rows], partial }
+     one ≤31-day window per request — their functions stop at 300s, so the
+     slicing IS the contract (a window past the cap is refused, not truncated);
+     a failed slice costs that slice (failedSlices), never the audit
+GET {TINKERS_BASE_URL}/api/generation/:auditId/creatives
+  → { ok, creatives: [{ adId, adName, landingUrl, mediaType }] }
+GET {TINKERS_BASE_URL}/api/generation/:auditId/creative-media?adIds=<top 12>
+  → { ok, ads: [{ adId, body, headline, videoUrl, imageUrl, posterUrl }] }
+     30-minute signed URLs onto their media store — their connect burst
+     downloads the real files at Meta connect (full images, playable mp4s),
+     where ads_read Graph would give us a 64×64 thumbnail
 ```
 
-`already_complete` is a clean no-op: we log it and return without running.
-Every other `ok: false` is fail-loud — no context means no audit, and the reason
-is logged at error level. Nothing runs blind.
+`toRawAdDay` maps their normalized rows onto the raw Graph row shape
+`buildColdRows` consumes (loose on purpose: a field the mapper cannot place
+costs that field, never the row; thruplays land back under the `video_view`
+action type Meta itself uses, and `video_view` is re-injected from `videoPlays`
+so hook rates survive).
+
+**Tokenless sections.** Sections whose reads only a connection token could
+serve run as `planned` (TOKENLESS_SKIP_SECTIONS in magic-audit.ts):
+placement_breakdown, audience_breakdown, saturation, optimization_events,
+learning_limited, targeting_split, account_activity, competitor_teardown. An
+honest gap, not an error — and the road back is more generation endpoints, not
+a credential. The gate matters twice: `metaTokenFor('')` falls back to the
+AGENCY token, so a tokenless cold run passes `''` (falsy) to every per-section
+Graph helper — probing a stranger's account with our own credential is the one
+call this path must never make.
+
+**creative_analysis runs**, tokenless, off the store media: the winners' words
+come with the media payload, `pickMedia` prefers a stored playable mp4 or full
+image over everything the tokenless path could otherwise reach, and a stored
+poster frame still beats a Graph thumbnail. The own-Ads-Library fallback is
+unavailable (resolving the page needs a token) — unresolved ads are reported as
+such, the section's normal degradation.
+
+**Write-backs** — unchanged: HMAC-SHA256 over the exact JSON bytes of the body,
+hex digest, in the `x-tinkers-signature-256` header, under
+`TINKERS_AUDIT_SEAM_SECRET`.
 
 **`POST {TINKERS_BASE_URL}/api/webhooks/audit-complete`** — contract v1.1: EVERY
 content payload is a partial, including the last one, and the audit is sealed by
@@ -119,30 +156,20 @@ handles the lead honestly instead. Both branches are tested.
 `runBridgedColdAudit` keeps an in-process set of organization ids with a run in
 flight. A second trigger for an org already running logs and returns
 `{ status: 'skipped', reason: 'already_running' }` without starting anything.
-The trigger is fire-and-forget from Tinkers and their idempotency answer cannot
-see an audit that started a second ago, so without this a double-click costs two
-Graph pulls, two LLM bills, and two streams of partials interleaving into one
-row. The guard is per-process (a restart clears it) — it is a burst guard, not a
-distributed lock; `already_complete` from the context endpoint remains the
-durable half of idempotency.
+The trigger is fire-and-forget from Tinkers, so without this a double-click
+costs two data pulls, two LLM bills, and two streams of partials interleaving
+into one row. The guard is per-process (a restart clears it) — it is a burst
+guard, not a distributed lock; Tinkers' own one-live-audit-per-lead trigger is
+the durable half of idempotency.
 
-### The token
+### Redaction stays, even tokenless
 
-`accessToken` is in memory for the run only. It is never persisted, never
-echoed back, and never logged. Errors bound for a log are reduced to their
-message and then scrubbed by `redactSecrets` (access_token query params, `EAA…`
-tokens, any 40+ character secret-shaped run) — because an upstream error
-message can quote the credential it choked on.
-
-The same scrub runs over the string values INSIDE every payload
-(`redactPayload`, applied in `toTinkersPatch`), not just over log lines. Section
-errors carry raw `err.message` from whatever threw, every Graph URL in the
-orchestrator interpolates the access token inline, and this content is rendered
-on a public `/audit/<token>` page — so one future `throw new Error(url)` in a
-section runner would publish a live customer token to a shareable page. Nothing
-leaks today; the scrub sits where the token is known so that class of bug cannot
-reach the wire even once. Two tests pin it: the token cannot reach a log line,
-and a section error embedding a token arrives at the wire redacted.
+No token crosses this seam any more, but `redactSecrets` (log lines) and
+`redactPayload` (every string INSIDE every payload) both remain: section errors
+carry raw `err.message` from whatever threw, the legacy path still interpolates
+tokens into Graph URLs inside the same orchestrator, and this content is
+rendered on a public `/audit/<token>` page. The scrub sits where a secret COULD
+be known so that class of bug cannot reach the wire even once. Two tests pin it.
 
 ## What changed inside the audit
 

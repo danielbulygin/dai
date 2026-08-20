@@ -5,7 +5,7 @@ import type { LibraryAd } from './library-triage.js';
 import {
   rankTopAds, extractLibraryMedia, matchLibraryMedia, pickMedia,
   buildColdCreativeFacts, fallbackWinners,
-  type GraphCreativeLite, type CreativeRead, type UnresolvedAd, type ResolvedMedia,
+  type GraphCreativeLite, type CreativeRead, type UnresolvedAd, type ResolvedMedia, type StoreMediaCandidate,
 } from './cold-creative-source.js';
 
 /**
@@ -337,7 +337,8 @@ export function coerceStringList(v: unknown): string[] {
 
 export interface ColdCreativeArgs {
   meter: AuditCostMeter;
-  accessToken: string;
+  /** Null on the tokenless Tinkers bridge path — no Graph read runs then. */
+  accessToken: string | null;
   accountName: string;
   currency: string;
   /** 30d ad-level rows (cold pack rows filtered upstream). */
@@ -346,6 +347,10 @@ export interface ColdCreativeArgs {
   getOwnLibrary: () => Promise<OwnLibraryScrape>;
   /** The orchestrator's Opus synthesizeJson, bound to meter + synth system. */
   synthesize: <T>(label: string, user: string) => Promise<T | null>;
+  /** Per-ad creatives from the Tinkers media store, keyed by provider ad id.
+   *  On the tokenless path both the media and the copy come from here; with a
+   *  token it still wins on fidelity wherever a file exists (pickMedia). */
+  storeMedia?: Map<string, StoreMediaCandidate> | null;
 }
 
 const withTimeout = async <T>(p: Promise<T>, ms: number, what: string): Promise<T> => {
@@ -375,13 +380,30 @@ export async function runColdCreativeAnalysis(args: ColdCreativeArgs): Promise<P
   }
   const sectionWarnings: string[] = [];
 
-  // 1) One batched Graph read: creative text + media identifiers.
+  // 1) One batched Graph read: creative text + media identifiers. Tokenless
+  //    (the Tinkers bridge) skips Graph entirely — the store carries the words.
   let graphByAdId = new Map<string, GraphCreativeLite>();
-  try {
-    graphByAdId = await fetchGraphCreatives(args.accessToken, summary.ads.map((a) => a.ad_id));
-  } catch (err) {
-    logger.warn({ err }, 'cold creative: graph creative batch failed (continuing on library fallback only)');
-    sectionWarnings.push('Meta creative details were not readable for this connection — analysis ran on the public Ads Library copies only.');
+  if (args.accessToken) {
+    try {
+      graphByAdId = await fetchGraphCreatives(args.accessToken, summary.ads.map((a) => a.ad_id));
+    } catch (err) {
+      logger.warn({ err }, 'cold creative: graph creative batch failed (continuing on library fallback only)');
+      sectionWarnings.push('Meta creative details were not readable for this connection — analysis ran on the public Ads Library copies only.');
+    }
+  }
+  // Store words fill in for ads Graph did not describe, so the text matching
+  // and the synthesis facts see the ad copy either way.
+  for (const ad of summary.ads) {
+    const store = args.storeMedia?.get(ad.ad_id);
+    if (!store || graphByAdId.has(ad.ad_id)) continue;
+    graphByAdId.set(ad.ad_id, {
+      ad_id: ad.ad_id,
+      body: store.body,
+      title: store.title,
+      video_id: null,
+      image_url: null,
+      thumbnail_url: null,
+    });
   }
 
   // 2) Video source URLs — usually denied on ads_read; stop probing after 3
@@ -391,7 +413,7 @@ export async function runColdCreativeAnalysis(args: ColdCreativeArgs): Promise<P
   for (const ad of summary.ads) {
     const videoId = graphByAdId.get(ad.ad_id)?.video_id;
     if (!ad.is_video || !videoId || consecutiveMisses >= 3) continue;
-    const src = await fetchVideoSourceUrl(args.accessToken, videoId);
+    const src = args.accessToken ? await fetchVideoSourceUrl(args.accessToken, videoId) : null;
     if (src) {
       videoSourceByAdId.set(ad.ad_id, src);
       consecutiveMisses = 0;
@@ -403,8 +425,9 @@ export async function runColdCreativeAnalysis(args: ColdCreativeArgs): Promise<P
   // 3) Library fallback — only when at least one ad still lacks a video/image.
   const needsLibrary = summary.ads.some((ad) => {
     const g = graphByAdId.get(ad.ad_id) ?? null;
-    return !pickMedia({ videoSourceUrl: videoSourceByAdId.get(ad.ad_id) ?? null, graph: g, lib: null }) ||
-      (ad.is_video && !videoSourceByAdId.has(ad.ad_id));
+    const store = args.storeMedia?.get(ad.ad_id) ?? null;
+    return !pickMedia({ videoSourceUrl: videoSourceByAdId.get(ad.ad_id) ?? null, graph: g, lib: null, store }) ||
+      (ad.is_video && !videoSourceByAdId.has(ad.ad_id) && !store?.video_url);
   });
   let libraryCandidates: ReturnType<typeof extractLibraryMedia> = [];
   if (needsLibrary) {
@@ -427,10 +450,11 @@ export async function runColdCreativeAnalysis(args: ColdCreativeArgs): Promise<P
 
   const processAd = async (ad: (typeof summary.ads)[number]): Promise<void> => {
     const graph = graphByAdId.get(ad.ad_id) ?? null;
+    const store = args.storeMedia?.get(ad.ad_id) ?? null;
     const lib = libraryCandidates.length
       ? matchLibraryMedia({ body: graph?.body ?? null, title: graph?.title ?? null }, libraryCandidates)
       : null;
-    const media = pickMedia({ videoSourceUrl: videoSourceByAdId.get(ad.ad_id) ?? null, graph, lib });
+    const media = pickMedia({ videoSourceUrl: videoSourceByAdId.get(ad.ad_id) ?? null, graph, lib, store });
     if (!media) {
       unresolved.push({ ad_name: ad.ad_name, spend: ad.spend, reason: 'no retrievable media (Graph denied video source; no Ads Library match)' });
       return;

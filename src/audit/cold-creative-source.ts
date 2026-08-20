@@ -199,11 +199,27 @@ export function matchLibraryMedia(
 // ---------------------------------------------------------------------------
 
 export type MediaSource =
+  | 'store_video'
+  | 'store_image'
   | 'graph_video_source'
   | 'library_video'
   | 'graph_image'
   | 'library_image'
   | 'graph_thumbnail';
+
+/** One ad's creative as the TINKERS media store holds it (their connect burst
+ *  downloads the real files at Meta connect; we get 30-minute signed URLs plus
+ *  the ad's own words). On the tokenless bridge path this is the primary
+ *  source — Meta serves an ads_read app only a 64×64 thumbnail, while the
+ *  store has the full image or the playable mp4. */
+export interface StoreMediaCandidate {
+  body: string | null;
+  title: string | null;
+  video_url: string | null;
+  image_url: string | null;
+  /** A video's poster frame — the still we read when the mp4 is absent. */
+  poster_url: string | null;
+}
 
 export interface ResolvedMedia {
   kind: 'video' | 'image';
@@ -215,11 +231,17 @@ export function pickMedia(input: {
   videoSourceUrl: string | null;
   graph: GraphCreativeLite | null;
   lib: LibraryMediaCandidate | null;
+  store?: StoreMediaCandidate | null;
 }): ResolvedMedia | null {
+  if (input.store?.video_url) return { kind: 'video', url: input.store.video_url, source: 'store_video' };
   if (input.videoSourceUrl) return { kind: 'video', url: input.videoSourceUrl, source: 'graph_video_source' };
   if (input.lib?.video_url) return { kind: 'video', url: input.lib.video_url, source: 'library_video' };
+  if (input.store?.image_url) return { kind: 'image', url: input.store.image_url, source: 'store_image' };
   if (input.graph?.image_url) return { kind: 'image', url: input.graph.image_url, source: 'graph_image' };
   if (input.lib?.image_url) return { kind: 'image', url: input.lib.image_url, source: 'library_image' };
+  // A stored poster frame is a full-size still of the video — better than the
+  // 64px Graph thumbnail below, worse than any playable copy above.
+  if (input.store?.poster_url) return { kind: 'image', url: input.store.poster_url, source: 'store_image' };
   if (input.graph?.thumbnail_url) return { kind: 'image', url: input.graph.thumbnail_url, source: 'graph_thumbnail' };
   return null;
 }

@@ -2,8 +2,8 @@ import crypto from 'node:crypto';
 import { z } from 'zod';
 import { env } from '../env.js';
 import { logger } from '../utils/logger.js';
-import { fetchAccountMeta, fetchColdAdDays, resolveDestinations } from './cold-fetch.js';
-import { buildColdRows } from './cold-source.js';
+import { buildColdRows, type RawAdDay } from './cold-source.js';
+import type { StoreMediaCandidate } from './cold-creative-source.js';
 import { runMagicAudit } from './magic-audit.js';
 
 /**
@@ -13,32 +13,84 @@ import { runMagicAudit } from './magic-audit.js';
  * The legacy cold path (cold-audit.ts) resolves everything from OUR tables:
  * ada_leads for the goal, meta_connections for the token. A monorepo org has
  * neither row, so a cold audit triggered for one dies at token resolution.
- * This bridge fetches that context FROM Tinkers over an HMAC seam and reports
- * results BACK the same way. We never touch the monorepo database.
+ * This bridge reads the account THROUGH Tinkers' generation API and reports
+ * results BACK over the HMAC seam. We never touch the monorepo database.
  *
- * The access token Tinkers hands us is in-memory for the run only: never
- * logged, never persisted, never echoed back.
+ * NO CREDENTIAL CROSSES THE SEAM (their ruling, 2026-08-20): Tinkers returns
+ * DATA, never a Meta token — their hard rule is that the plaintext token
+ * never leaves their meta package. So the reads here are:
+ *   GET /api/generation/:auditId/account         → name, currency, timezone
+ *   GET /api/generation/:auditId/ad-days?since&until → one ≤31-day window of
+ *       ad-level daily rows (their functions die at 300s, so we slice — which
+ *       is what fetchColdAdDays did against Graph anyway)
+ *   GET /api/generation/:auditId/creatives       → per-ad landing destinations
+ *   GET /api/generation/:auditId/creative-media?adIds= → the top ads' words +
+ *       30-minute signed URLs onto their media store (their connect burst
+ *       downloads the real files at Meta connect — full images and playable
+ *       mp4s, where ads_read Graph would give us a 64px thumbnail)
+ * all authorized with `Authorization: Bearer TINKERS_AUDIT_SEAM_SECRET` — the
+ * same secret that signs the write-backs, one secret for the whole boundary.
+ * The audit id in the path is the tenant capability: their row's own org
+ * decides everything, and an unknown or expired audit is a 404.
+ *
+ * Sections whose reads only a connection token could serve run as `planned`
+ * (TOKENLESS_SKIP_SECTIONS in magic-audit.ts) — an honest gap, not an error.
  */
 
-const CONTEXT_TIMEOUT_MS = 15_000;
+const READ_TIMEOUT_MS = 60_000;
 const REPORT_TIMEOUT_MS = 10_000;
 
-const contextSchema = z.union([
+const notReady = z.object({ ok: z.literal(false), reason: z.string() });
+
+const accountSchema = z.union([
   z.object({
     ok: z.literal(true),
-    auditId: z.string().min(1),
-    adAccountId: z.string().min(1),
-    accessToken: z.string().min(1),
-    currency: z.string().nullish(),
-    accountName: z.string().nullish(),
-    goalMetric: z.string().nullish(),
-    goalValue: z.number().nullish(),
-    grossMarginPct: z.number().nullish(),
+    account: z.object({
+      externalId: z.string().min(1),
+      name: z.string().nullish(),
+      currency: z.string().nullish(),
+      timezone: z.string().nullish(),
+    }),
   }),
-  z.object({ ok: z.literal(false), reason: z.string() }),
+  notReady,
 ]);
 
-export type TinkersAuditContext = z.infer<typeof contextSchema>;
+const adDaysSchema = z.union([
+  z.object({ ok: z.literal(true), rows: z.array(z.unknown()), partial: z.boolean() }),
+  notReady,
+]);
+
+const creativesSchema = z.union([
+  z.object({
+    ok: z.literal(true),
+    creatives: z.array(
+      z.object({
+        adId: z.string(),
+        adName: z.string().nullish(),
+        landingUrl: z.string().nullish(),
+        mediaType: z.string().nullish(),
+      }),
+    ),
+  }),
+  notReady,
+]);
+
+const creativeMediaSchema = z.union([
+  z.object({
+    ok: z.literal(true),
+    ads: z.array(
+      z.object({
+        adId: z.string(),
+        body: z.string().nullish(),
+        headline: z.string().nullish(),
+        videoUrl: z.string().nullish(),
+        imageUrl: z.string().nullish(),
+        posterUrl: z.string().nullish(),
+      }),
+    ),
+  }),
+  notReady,
+]);
 
 /** The patch shape Tinkers accepts — camelCase, unlike our snake_case columns. */
 export interface TinkersAuditPatch {
@@ -93,18 +145,188 @@ async function postSigned(path: string, payload: unknown, timeoutMs: number): Pr
   return resp.json();
 }
 
-/**
- * Ask Tinkers for everything the audit needs. Tinkers also answers idempotency
- * here: `already_complete` means an audit for this org is already done or
- * running on their side, so there is nothing for us to do.
- */
-export async function fetchAuditContext(organizationId: string): Promise<TinkersAuditContext> {
-  const raw = await postSigned('/api/webhooks/audit-context', { organizationId }, CONTEXT_TIMEOUT_MS);
-  const parsed = contextSchema.safeParse(raw);
+/** One authorized GET against Tinkers' generation seam. The Bearer secret
+ *  authenticates us; the audit id in the path is the tenant capability. */
+async function getGeneration(path: string): Promise<unknown> {
+  const baseUrl = env.TINKERS_BASE_URL;
+  const secret = env.TINKERS_AUDIT_SEAM_SECRET;
+  if (!baseUrl || !secret) throw new Error('TINKERS_BASE_URL / TINKERS_AUDIT_SEAM_SECRET not configured');
+  const resp = await fetch(`${baseUrl.replace(/\/$/, '')}${path}`, {
+    headers: { Authorization: `Bearer ${secret}` },
+    signal: AbortSignal.timeout(READ_TIMEOUT_MS),
+  });
+  if (!resp.ok) throw new Error(`${path.replace(/\?.*$/, '')} returned ${resp.status}`);
+  return resp.json();
+}
+
+function parseOrThrow<T>(schema: z.ZodType<T>, raw: unknown, what: string): T {
+  const parsed = schema.safeParse(raw);
   if (!parsed.success) {
-    throw new Error(`audit-context response did not match the contract: ${parsed.error.issues[0]?.message}`);
+    throw new Error(`${what} response did not match the contract: ${parsed.error.issues[0]?.message}`);
   }
   return parsed.data;
+}
+
+const isoDaysAgo = (asOf: string, days: number): string => {
+  const d = new Date(`${asOf}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - days);
+  return d.toISOString().slice(0, 10);
+};
+
+/** Tinkers' normalized insight row → the raw Graph row shape buildColdRows
+ *  consumes. Loose on purpose: their port ships on its own schedule, so a
+ *  field this mapper cannot place costs that field, never the row. */
+export function toRawAdDay(row: unknown): RawAdDay | null {
+  if (!row || typeof row !== 'object') return null;
+  const r = row as Record<string, unknown>;
+  const adId = typeof r.entityId === 'string' && r.entityId ? r.entityId : null;
+  const date = typeof r.date === 'string' && r.date ? r.date : null;
+  if (!adId || !date) return null;
+
+  type RawAction = { action_type?: string; value?: string | number };
+  const actionList = (v: unknown): RawAction[] =>
+    Array.isArray(v)
+      ? v.flatMap((a) => {
+          if (!a || typeof a !== 'object') return [];
+          const t = (a as { type?: unknown }).type;
+          const val = (a as { value?: unknown }).value;
+          return typeof t === 'string' && typeof val === 'number' ? [{ action_type: t, value: val }] : [];
+        })
+      : [];
+
+  const actions = actionList(r.actions);
+  // The hook rate derives from the video_view action; their port lifts it into
+  // `videoPlays` and some adapter versions may drop it from the list — put it
+  // back so a video ad reads as one.
+  const videoPlays = typeof r.videoPlays === 'number' ? r.videoPlays : 0;
+  if (videoPlays > 0 && !actions.some((a) => a.action_type === 'video_view')) {
+    actions.push({ action_type: 'video_view', value: videoPlays });
+  }
+
+  const thruplays = typeof r.thruplays === 'number' ? r.thruplays : 0;
+
+  return {
+    ad_id: adId,
+    ad_name: typeof r.entityName === 'string' ? r.entityName : undefined,
+    adset_id: typeof r.adsetId === 'string' ? r.adsetId : undefined,
+    date_start: date,
+    date_stop: typeof r.dateStop === 'string' && r.dateStop ? r.dateStop : date,
+    spend: typeof r.spend === 'number' ? r.spend : 0,
+    impressions: typeof r.impressions === 'number' ? r.impressions : 0,
+    clicks: typeof r.clicks === 'number' ? r.clicks : 0,
+    frequency: typeof r.frequency === 'number' ? r.frequency : undefined,
+    actions,
+    action_values: actionList(r.actionValues),
+    // cold-source reads thruplays off this list by the video_view type (the
+    // type Meta itself uses inside video_thruplay_watched_actions).
+    video_thruplay_watched_actions: thruplays > 0 ? [{ action_type: 'video_view', value: thruplays }] : [],
+  };
+}
+
+/** 180 days of ad-level daily rows, one ≤31-day window per request — their
+ *  functions stop at 300 seconds and a window past the cap is REFUSED, so the
+ *  slicing is the contract, not an optimization. A failed slice costs that
+ *  slice (failedSlices), never the audit — fetchColdAdDays' own posture. */
+export async function fetchTinkersAdDays(
+  auditId: string,
+  opts: { days?: number; sliceDays?: number; maxRows?: number; asOf?: string } = {},
+): Promise<{ adDays: RawAdDay[]; truncated: boolean; failedSlices: number }> {
+  const days = opts.days ?? 180;
+  const sliceDays = opts.sliceDays ?? 30;
+  const maxRows = opts.maxRows ?? 150_000;
+  const asOf = opts.asOf ?? new Date().toISOString().slice(0, 10);
+
+  const adDays: RawAdDay[] = [];
+  let truncated = false;
+  let failedSlices = 0;
+
+  for (let offset = 0; offset < days && !truncated; offset += sliceDays) {
+    const until = isoDaysAgo(asOf, offset);
+    const since = isoDaysAgo(asOf, Math.min(offset + sliceDays - 1, days));
+    try {
+      const raw = await getGeneration(`/api/generation/${auditId}/ad-days?since=${since}&until=${until}`);
+      const page = parseOrThrow(adDaysSchema, raw, 'ad-days');
+      if (!page.ok) throw new Error(`ad-days window refused: ${page.reason}`);
+      for (const row of page.rows) {
+        const mapped = toRawAdDay(row);
+        if (!mapped) continue;
+        if (adDays.length >= maxRows) {
+          truncated = true;
+          break;
+        }
+        adDays.push(mapped);
+      }
+    } catch (err) {
+      failedSlices += 1;
+      logger.warn({ err: seamError(err), auditId, since, until }, 'tinkers ad-day window failed (audit continues on partial window)');
+    }
+  }
+
+  if (truncated) {
+    logger.error({ auditId, rows: adDays.length, maxRows }, 'tinkers pull hit row cap — aggregates incomplete');
+  }
+  return { adDays, truncated, failedSlices };
+}
+
+/** Landing destinations from their creatives read — the same map
+ *  resolveDestinations built from live Graph creatives. Fail-soft: no
+ *  destinations degrades the landing section to unresolved, never the audit. */
+export async function fetchTinkersDestinations(
+  auditId: string,
+): Promise<Record<string, { market: string | null; path: string | null }>> {
+  const out: Record<string, { market: string | null; path: string | null }> = {};
+  try {
+    const raw = await getGeneration(`/api/generation/${auditId}/creatives`);
+    const page = parseOrThrow(creativesSchema, raw, 'creatives');
+    if (!page.ok) {
+      logger.warn({ auditId, reason: page.reason }, 'tinkers creatives read not ready (landing section degrades)');
+      return out;
+    }
+    for (const c of page.creatives) {
+      const url = c.landingUrl;
+      if (!url || !/^https?:\/\//.test(url)) continue;
+      try {
+        out[c.adId] = { market: null, path: new URL(url).pathname };
+      } catch {
+        /* malformed url — leave unresolved */
+      }
+    }
+  } catch (err) {
+    logger.warn({ err: seamError(err), auditId }, 'tinkers creatives read failed (landing section degrades)');
+  }
+  return out;
+}
+
+/** The top ads' words + signed media URLs from their store, for the creative
+ *  read. Fail-soft: an audit without media still runs — the section reports
+ *  those ads unresolved, which is its normal degradation. */
+export async function fetchTinkersStoreMedia(
+  auditId: string,
+  adIds: string[],
+): Promise<Map<string, StoreMediaCandidate> | null> {
+  if (adIds.length === 0) return null;
+  try {
+    const raw = await getGeneration(`/api/generation/${auditId}/creative-media?adIds=${adIds.join(',')}`);
+    const page = parseOrThrow(creativeMediaSchema, raw, 'creative-media');
+    if (!page.ok) {
+      logger.warn({ auditId, reason: page.reason }, 'tinkers creative-media not ready (creative read degrades)');
+      return null;
+    }
+    const out = new Map<string, StoreMediaCandidate>();
+    for (const ad of page.ads) {
+      out.set(ad.adId, {
+        body: ad.body ?? null,
+        title: ad.headline ?? null,
+        video_url: ad.videoUrl ?? null,
+        image_url: ad.imageUrl ?? null,
+        poster_url: ad.posterUrl ?? null,
+      });
+    }
+    return out;
+  } catch (err) {
+    logger.warn({ err: seamError(err), auditId }, 'tinkers creative-media read failed (creative read degrades)');
+    return null;
+  }
 }
 
 /**
@@ -211,6 +433,8 @@ const running = new Set<string>();
  */
 export async function runBridgedColdAudit(args: {
   organizationId: string;
+  /** The Tinkers audit row's id — the read capability AND the write-back key. */
+  auditId: string;
   maxCostUsd?: number;
   skipSections?: string[];
 }): Promise<BridgedColdAuditResult> {
@@ -228,32 +452,52 @@ export async function runBridgedColdAudit(args: {
   }
 }
 
+/** Top spenders over the last 30 days — the ads whose media is worth asking
+ *  Tinkers for. Mirrors rankTopAds' aggregation over the mapped raw rows. */
+export function topSpendingAdIds(adDays: RawAdDay[], asOf: string, cap = 12): string[] {
+  const cut30 = isoDaysAgo(asOf, 30);
+  const spendByAd = new Map<string, number>();
+  for (const r of adDays) {
+    const adId = r.ad_id ? String(r.ad_id) : '';
+    const date = (r.date_start ?? '').slice(0, 10);
+    if (!adId || !date || date < cut30) continue;
+    const spend = typeof r.spend === 'number' ? r.spend : parseFloat(String(r.spend ?? '0')) || 0;
+    spendByAd.set(adId, (spendByAd.get(adId) ?? 0) + spend);
+  }
+  return [...spendByAd.entries()]
+    .filter(([, spend]) => spend > 0)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, cap)
+    .map(([id]) => id);
+}
+
 async function runBridged(args: {
   organizationId: string;
+  auditId: string;
   maxCostUsd?: number;
   skipSections?: string[];
 }): Promise<BridgedColdAuditResult> {
-  const { organizationId } = args;
+  const { organizationId, auditId } = args;
 
-  const context = await fetchAuditContext(organizationId);
-  if (!context.ok) {
-    if (context.reason === 'already_complete') {
-      logger.info({ organizationId }, 'tinkers audit already complete — nothing to run');
-      return { status: 'skipped', reason: context.reason };
-    }
-    // No context means no audit: refuse loudly rather than run a blind one.
-    throw new Error(`tinkers audit context refused for org ${organizationId}: ${context.reason}`);
+  // The account read doubles as the audit's validity check: an unknown,
+  // revoked or expired audit id is their 404, and an org with no usable
+  // connection is an honest not-ready reason. No context means no audit —
+  // refuse loudly rather than run a blind one.
+  const accountRaw = await getGeneration(`/api/generation/${auditId}/account`);
+  const account = parseOrThrow(accountSchema, accountRaw, 'account');
+  if (!account.ok) {
+    throw new Error(`tinkers account read refused for audit ${auditId}: ${account.reason}`);
   }
 
-  const { auditId, accessToken, adAccountId } = context;
-  const meta = await fetchAccountMeta(accessToken, adAccountId);
+  const adAccountId = account.account.externalId;
   logger.info(
-    { organizationId, auditId, adAccountId, account: meta.name },
-    'bridged cold audit: context resolved, starting Graph pull',
+    { organizationId, auditId, adAccountId, account: account.account.name },
+    'bridged cold audit: account resolved, starting tinkers pull',
   );
 
-  const pull = await fetchColdAdDays(accessToken, adAccountId);
-  const destinations = await resolveDestinations(accessToken, pull.adDays);
+  const asOf = new Date().toISOString().slice(0, 10);
+  const pull = await fetchTinkersAdDays(auditId, { asOf });
+  const destinations = await fetchTinkersDestinations(auditId);
   const rows = buildColdRows({ adDays: pull.adDays, destinations });
   logger.info(
     {
@@ -264,11 +508,14 @@ async function runBridged(args: {
       truncated: pull.truncated,
       failedSlices: pull.failedSlices,
     },
-    'bridged cold audit: Graph pull mapped',
+    'bridged cold audit: tinkers pull mapped',
   );
   if (rows.rowCount === 0) {
     throw new Error(`account ${adAccountId} returned no ad-level delivery history — nothing to audit`);
   }
+
+  // The creative read's media: their store's signed URLs for the top spenders.
+  const storeMedia = await fetchTinkersStoreMedia(auditId, topSpendingAdIds(pull.adDays, asOf));
 
   // Reports are chained, never parallel: two in-flight posts can land out of
   // order, and a stale sections snapshot arriving last would undo real progress
@@ -312,14 +559,19 @@ async function runBridged(args: {
     onRowUpdate: (patch, { final }) => reportInOrder(patch, final),
     cold: {
       userId: organizationId,
-      accessToken,
+      // No credential crosses the seam — the tokenless path (see the header).
+      accessToken: null,
       adAccountId,
-      accountName: meta.name ?? context.accountName ?? null,
-      currency: meta.currency ?? context.currency ?? 'EUR',
+      accountName: account.account.name ?? null,
+      currency: account.account.currency ?? 'EUR',
       rows,
-      goalMetric: context.goalMetric ?? null,
-      goalValue: context.goalValue ?? null,
-      grossMarginPct: context.grossMarginPct ?? null,
+      // The trigger fires at Meta connect, BEFORE the funnel's goal step, so
+      // there is no stated goal to anchor on yet. The audit runs on its
+      // honest 1.0× breakeven default, exactly like a goal-less legacy lead.
+      goalMetric: null,
+      goalValue: null,
+      grossMarginPct: null,
+      storeMedia,
     },
   });
 
