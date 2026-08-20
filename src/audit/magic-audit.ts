@@ -26,6 +26,7 @@ import { buildAccountModel, mergeAccountModel, type AccountModel, type AccountMo
 import { coldBreakeven, buildColdKnowledge, type ColdRows } from './cold-source.js';
 import { runColdCreativeAnalysis, type OwnLibraryScrape } from './cold-creative.js';
 import type { StoreMediaCandidate } from './cold-creative-source.js';
+import { scrubSectionProse, scrubInsightProse } from './prose.js';
 
 /**
  * Magic Audit orchestrator (master-plan B1, expanded 2026-06-11: creative /
@@ -301,7 +302,14 @@ const SYNTH_SYSTEM =
 export function buildSynthSystem(clientKnowledge: string, dataCaveat: string | null): string {
   const parts = [SYNTH_SYSTEM];
   if (dataCaveat) {
-    parts.push(`DATA WINDOW CAUTION (state this in the section when it changes a read): ${dataCaveat}`);
+    // The caveat used to ride EVERY section prompt with "state this in the
+    // section", so the live report repeated "17 of 30 days carry data" in all
+    // of them. The page states it once, in the recognition strip.
+    parts.push(
+      `DATA WINDOW (context for your reading, the page states it once and the reader has already seen it): ${dataCaveat} ` +
+        `Do NOT restate the data window in this section. Let it shape how confidently you word a trend or an average, ` +
+        `and only name it where a specific claim would be wrong without it.`,
+    );
   }
   if (clientKnowledge.trim()) {
     parts.push(
@@ -323,7 +331,7 @@ export function buildSynthSystem(clientKnowledge: string, dataCaveat: string | n
 export function summarizeDataWindow(
   dates: Array<string | null | undefined>,
   windowDays = 30,
-): { daysWithData: number; caveat: string | null } {
+): { daysWithData: number; caveat: string | null; windowLabel: string } {
   const days = new Set<string>();
   for (const d of dates) if (d) days.add(String(d).slice(0, 10));
   const daysWithData = days.size;
@@ -331,7 +339,9 @@ export function summarizeDataWindow(
     daysWithData < Math.ceil(windowDays * 0.8)
       ? `only ${daysWithData} of the last ${windowDays} days have ad-level data rows — every "${windowDays}d" aggregate is really a ${daysWithData}-day read; qualify trends and averages accordingly.`
       : null;
-  return { daysWithData, caveat };
+  // The one place the reader sees it: the recognition strip at the top of the page.
+  const windowLabel = `${daysWithData} of the last ${windowDays} days carry data`;
+  return { daysWithData, caveat, windowLabel };
 }
 
 // ---------------------------------------------------------------------------
@@ -1726,6 +1736,7 @@ export async function runMagicAudit(
   }
   let dataCaveat: string | null = null;
   let daysWithData: number | null = null;
+  let dataWindowLabel: string | null = null;
   try {
     const dates = cold
       ? cold.rows.accFull30.map((r) => r.date)
@@ -1739,6 +1750,7 @@ export async function runMagicAudit(
     const win = summarizeDataWindow(dates);
     daysWithData = win.daysWithData;
     dataCaveat = win.caveat;
+    dataWindowLabel = win.windowLabel;
   } catch (err) {
     logger.warn({ err, code }, 'days-with-data preflight failed (audit continues)');
   }
@@ -1758,6 +1770,8 @@ export async function runMagicAudit(
   // "that's MY account" (UX review §2.1: recognition is the first magic beat).
   // Cold path derives it from the pre-pulled rows (no account_daily to read).
   const recognition = cold ? coldRecognition(cold, client.currency) : await quickRecognition(client.id, client.currency);
+  // The data window belongs to the page, once, next to the account it describes.
+  if (recognition && dataWindowLabel) recognition.data_window = dataWindowLabel;
 
   // Identity contract v2 (Dan ruling 2026-07-03): tenant_id (uuid) is the
   // canonical audit identity — clients.id for agency clients, auth users.id
@@ -1799,8 +1813,56 @@ export async function runMagicAudit(
     if (e) logger.error({ error: e, auditId }, 'magic_audits update failed');
     mirrorRow(patch, false);
   };
+  /**
+   * The prose gate every section passes on its way to the row: em-dashes become
+   * house punctuation deterministically, and a sentence that asserts a verdict
+   * with no number behind it ("your account is clean") buys ONE rewrite retry
+   * before it is stripped. Fail-soft: a scrub or a retry that goes wrong leaves
+   * the section exactly as it was, because a section is worth more than a dash.
+   */
+  const scrubbedForWriteBack = async (section: AuditSection): Promise<AuditSection> => {
+    try {
+      const first = scrubSectionProse(section);
+      if (first.banned.length === 0) return first.section;
+      logger.warn({ section: section.key, banned: first.banned }, 'audit prose carries filler — one rewrite retry');
+      let candidate = first.section;
+      if (!meter.exhausted()) {
+        const rewrite = await synthesizeJson<{ summary?: string; next_step?: string }>(
+          meter,
+          `${section.key}_prose_rewrite`,
+          synthSystem,
+          `This audit section's wording asserts a verdict without a number behind it (${first.banned.join('; ')}). ` +
+            `Rewrite ONLY the wording, using the section's own data. Every sentence must carry a figure from it. ` +
+            `Plain operator language, no em-dashes, no taglines, no metaphors, no "not X but Y".\n` +
+            `summary: ${JSON.stringify(candidate.summary ?? '')}\n` +
+            `next_step: ${JSON.stringify(candidate.next_step ?? '')}\n` +
+            `section data: ${JSON.stringify(candidate.data ?? {}).slice(0, 2000)}\n` +
+            `Schema: {"summary":"...","next_step":"..."}`,
+        ).catch((err) => {
+          logger.warn({ err, section: section.key }, 'prose rewrite failed (falling back to the strip)');
+          return null;
+        });
+        if (rewrite) {
+          candidate = {
+            ...candidate,
+            summary: typeof rewrite.summary === 'string' && rewrite.summary.trim() ? rewrite.summary : candidate.summary,
+            next_step: typeof rewrite.next_step === 'string' && rewrite.next_step.trim() ? rewrite.next_step : candidate.next_step,
+          };
+        }
+      }
+      // Second pass strips whatever survived the one retry.
+      const second = scrubSectionProse(candidate, { strip: true });
+      if (second.banned.length > 0) {
+        logger.warn({ section: section.key, banned: second.banned }, 'audit prose filler stripped after the rewrite retry');
+      }
+      return second.section;
+    } catch (err) {
+      logger.warn({ err, section: section.key }, 'prose scrub failed (section written unchanged)');
+      return section;
+    }
+  };
   const saveSection = async (section: AuditSection): Promise<void> => {
-    sections[section.key] = section;
+    sections[section.key] = await scrubbedForWriteBack(section);
     await updateRow({ sections, cost_usd: round2(meter.spentUsd) });
   };
 
@@ -2236,7 +2298,7 @@ export async function runMagicAudit(
         sections['creative_fatigue']?.data as { ads?: FatigueAd[] } | undefined,
         sections['spend_concentration']?.data as Record<string, never> | undefined,
       );
-      if (provisional.length) await updateRow({ lead_insights: provisional });
+      if (provisional.length) await updateRow({ lead_insights: provisional.map((i) => scrubInsightProse(i)) });
     } catch (err) {
       logger.warn({ err, code }, 'scorecard computation failed (audit continues)');
     }
@@ -2417,7 +2479,7 @@ export async function runMagicAudit(
   // B3 — rank the lead insights across everything that completed
   try {
     const insights = await rankLeadInsights(meter, client, sections, synthSystem);
-    if (insights) await updateRow({ lead_insights: insights });
+    if (insights) await updateRow({ lead_insights: insights.map((i) => scrubInsightProse(i)) });
   } catch (err) {
     logger.warn({ err }, 'lead-insight ranking failed (report still valid)');
   }

@@ -63,6 +63,13 @@ export interface PackAccountRow {
 export interface PackSection {
   summary: string;
   next_step: string;
+  /**
+   * Section payload. Every compute function in this file sets `data.signal`:
+   * false means the section ran clean and found nothing (a flat CPM trend, an
+   * empty fatigue list, a healthy cohort mix), so the page can give it a line
+   * instead of a full chapter. It is NOT an error and NOT a suppression: the
+   * numbers behind it are still here.
+   */
   data: Record<string, unknown>;
   warnings?: string[];
   /**
@@ -156,6 +163,7 @@ export function computeConcentration(rows30: PackAdRow[]): PackSection {
       top10_share_pct: top10,
       hhi,
       band,
+      signal: band !== 'healthy',
       top_ads: ads.slice(0, 10).map((a) => ({ ad_id: a.ad_id, ad_name: a.name, spend: Math.round(a.spend), share_pct: pct(a.spend, total) })),
     },
     warnings: warnings.length ? warnings : undefined,
@@ -628,6 +636,7 @@ export function computeCohorts(rows180: Array<Pick<PackAdRow, 'ad_id' | 'date' |
     data: {
       window_months: series.length,
       fresh_cohort_share_pct: r1(freshShare),
+      signal: freshShare < 40,
       series,
     },
     derivation:
@@ -665,7 +674,7 @@ export function computeCostTrend(accRows90: PackAccountRow[], currency = ''): Pa
     return {
       summary: `Not enough weekly history to read a cost trend (${series.length} weeks with impressions).`,
       next_step: `Revisit once 4+ weeks of delivery are synced.`,
-      data: { series },
+      data: { series, signal: false },
       warnings: ['Thin window — cost trend suppressed.'],
     };
   }
@@ -712,6 +721,7 @@ export function computeCostTrend(accRows90: PackAccountRow[], currency = ''): Pa
       cpm_extra_cost_recent: cpmDelta > 10 && extraCost > 0 ? extraCost : undefined,
       cpm_extra_cost_weeks: cpmDelta > 10 && extraCost > 0 ? recentWeeks : undefined,
       currency: currency || undefined,
+      signal: Math.abs(cpmDelta) > 10 || ctrDelta < -10,
     },
     derivation:
       `Daily account delivery is bucketed into calendar weeks; CPM = spend ÷ impressions × 1000 per week. ` +
@@ -855,7 +865,7 @@ export function computeConceptRoas(
     return {
       summary: `Not enough angle-tagged creative to read concept performance (${coverage}% of spend has an analyzed angle tag).`,
       next_step: `Run the creative-intelligence analyzer across the account's active ads, then re-audit — this report needs the Gemini angle tags.`,
-      data: { coverage_pct: coverage, angles: [] },
+      data: { coverage_pct: coverage, angles: [], signal: false },
       warnings: ['Thin angle coverage — concept read suppressed rather than guessed.'],
     };
   }
@@ -893,6 +903,7 @@ export function computeConceptRoas(
         coverage_pct: coverage,
         angles: angles.slice(0, 10).map((a) => ({ ...a, kpi: null })),
         discount_flag: false,
+        signal: false,
       },
       warnings: [
         `No ad-level result mapping — angle ranking suppressed rather than guessed.`,
@@ -944,6 +955,7 @@ export function computeConceptRoas(
       coverage_pct: coverage,
       angles: angles.slice(0, 10),
       discount_flag: discountFlag,
+      signal: discountFlag || !!underfunded,
     },
     warnings: warnings.length ? warnings : undefined,
     derivation:
@@ -1033,7 +1045,7 @@ export function computeOptimizationEvents(
     return {
       summary: `No ad sets with spend could be matched to a readable optimization config.`,
       next_step: `Check the ad-set config read — this report needs it.`,
-      data: { rows: [] },
+      data: { rows: [], signal: false },
       warnings: ['Ad-set config read returned nothing usable — report suppressed.'],
     };
   }
@@ -1058,6 +1070,7 @@ export function computeOptimizationEvents(
       misoptimized_spend_share_pct: pct(misSpend, totalSpend),
       misoptimized_spend_30d: Math.round(misSpend),
       currency: currency || undefined,
+      signal: xs > 0,
       rows: rows.slice(0, 15),
     },
     warnings: qs > 0 ? [`${qs} ad set(s) marked "?" — plausible-but-unusual configs we won't guess about.`] : undefined,

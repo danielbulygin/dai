@@ -96,7 +96,7 @@ describe('audit synthesis composition', () => {
   it('buildSynthSystem without knowledge or caveat is the base prompt only', () => {
     const s = buildSynthSystem('', null);
     expect(s).not.toContain('CLIENT CONTEXT');
-    expect(s).not.toContain('DATA WINDOW CAUTION');
+    expect(s).not.toContain('DATA WINDOW');
   });
 
   it('a thin data window produces the caveat; a full one does not', () => {
@@ -108,6 +108,18 @@ describe('audit synthesis composition', () => {
     expect(full.daysWithData).toBe(30);
     expect(full.caveat).toBeNull();
 
-    expect(buildSynthSystem('', thin.caveat)).toContain('DATA WINDOW CAUTION');
+    expect(thin.windowLabel).toBe('10 of the last 30 days carry data');
+    expect(full.windowLabel).toBe('30 of the last 30 days carry data');
+  });
+
+  it('the data window is context for the section, stated once on the page and never restated', () => {
+    const thin = summarizeDataWindow(Array.from({ length: 100 }, (_, i) => `2026-06-${String((i % 17) + 1).padStart(2, '0')}`));
+    const s = buildSynthSystem('', thin.caveat);
+    expect(s).toContain('DATA WINDOW');
+    expect(s).toContain('only 17 of the last 30 days');
+    // The old prompt said "state this in the section", which is why the live
+    // report repeated the 17-of-30 caveat in every single section.
+    expect(s).not.toContain('state this in the section');
+    expect(s).toContain('Do NOT restate the data window in this section');
   });
 });
