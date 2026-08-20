@@ -19,8 +19,10 @@ import type { PackAdRow, PackAccountRow } from './report-pack.js';
  *  - link_clicks = actions[link_click]
  *  - hook_rate   = video_view / impressions   (FRACTION, 4dp — as ad_daily stores it)
  *  - hold_rate   = video_thruplay / impressions (FRACTION, 4dp)
- * `results` is left 0 (ad_daily.results is null for most accounts; the engine
- * falls back to purchases||leads), matching warehouse behaviour.
+ * `results` is left 0 (ad_daily.results is null for most accounts; every consumer
+ * falls back through `resultOf` = results||purchases||leads, report-pack.ts),
+ * matching warehouse behaviour. `leads` therefore rides on BOTH the ad rows and
+ * the derived account rows: a consumer that cannot see it divides by nothing.
  *
  * KNOWN divergences from the warehouse (intentional — assert-tolerate these in
  * the R2 cold-vs-synced diff; full list in the build-3 handover):
@@ -251,6 +253,9 @@ export function buildColdRows(input: BuildColdRowsInput): ColdRows {
     purchases: a.purchases,
     purchase_value: a.purchase_value,
     results: a.results,
+    // `results` stays 0 here (warehouse parity); the weekday read needs the lead
+    // count to divide by, or it reports raw spend as a cost per result.
+    leads: a.leads,
   }));
 
   const accFull30 = accAll.filter((a) => a.date >= cut30);

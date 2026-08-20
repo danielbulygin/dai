@@ -1763,7 +1763,7 @@ export async function runMagicAudit(
     [packRows90, packRows180, packAccRows90, accFull30, landing30] = await Promise.all([
       pageAll<PackAdRow>('ad_daily', PACK_AD_COLS, (q) => q.eq('client_id', client.id).gte('date', daysAgoISO(90)), 250_000),
       pageAll<Pick<PackAdRow, 'ad_id' | 'date' | 'spend'>>('ad_daily', 'ad_id, date, spend', (q) => q.eq('client_id', client.id).gte('date', daysAgoISO(180)), 400_000),
-      pageAll<PackAccountRow>('account_daily', 'date, spend, impressions, link_clicks, purchases, purchase_value, results', (q) => q.eq('client_id', client.id).gte('date', daysAgoISO(90)), 200),
+      pageAll<PackAccountRow>('account_daily', 'date, spend, impressions, link_clicks, purchases, purchase_value, results, leads', (q) => q.eq('client_id', client.id).gte('date', daysAgoISO(90)), 200),
       pageAll<Record<string, unknown>>(
         'account_daily',
         'date, spend, impressions, clicks, link_clicks, content_views, add_to_carts, checkouts_initiated, purchases, purchase_value, leads, complete_registrations, results',

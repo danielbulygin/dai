@@ -51,6 +51,13 @@ export interface PackAccountRow {
   purchases: number;
   purchase_value: number;
   results: number;
+  /**
+   * Account-level leads (`account_daily.leads`, or the cold path's summed ad
+   * lead actions). Same reason as `PackAdRow.leads`: `results` is 0 or NULL on
+   * most lead-gen accounts, so without this the weekday read divides spend by
+   * nothing and reports raw spend as a cost per result.
+   */
+  leads?: number | null;
 }
 
 export interface PackSection {
@@ -74,6 +81,19 @@ const r2 = (v: number): number => Math.round(v * 100) / 100;
 const r1 = (v: number): number => Math.round(v * 10) / 10;
 const pct = (num: number, den: number): number => (den > 0 ? r1((num / den) * 100) : 0);
 const div = (num: number, den: number): number => (den > 0 ? num / den : 0);
+
+/**
+ * The result count one row actually carries: `results` when the sync mapped it,
+ * else purchases, else the lead actions. The cold/bridged path leaves `results`
+ * at 0 (matching `ad_daily.results`, NULL for most lead-gen accounts), so any
+ * cpr read that divides by `results` alone silently degrades into raw spend —
+ * the live lead-gen audit printed "cost per result 2,605" against a real 18.59
+ * cost per lead. 0 out means the account has no mapped result for this row at
+ * all, which callers SUPPRESS rather than plot as a zero.
+ */
+export function resultOf(row: { results?: number | null; purchases?: number | null; leads?: number | null }): number {
+  return row.results || row.purchases || row.leads || 0;
+}
 
 /** Whether this account's economics read as ROAS (purchase value present) or cost-per-result. */
 export function kpiMode(rows: Array<{ purchase_value: number; results: number }>): 'roas' | 'cpr' {
@@ -189,11 +209,19 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currenc
   const totalSpend = rows90.reduce((s, r) => s + (r.spend || 0), 0);
 
   const ads: FatigueAd[] = [];
+  let suppressedNoResults = 0;
   for (const [adId, list] of byAd.entries()) {
     const spend = list.reduce((s, r) => s + r.spend, 0);
     const days = [...new Set(list.map((r) => r.date))].sort();
     // Statistical floor: enough days AND enough money to say anything.
     if (days.length < 10 || spend < cappedFloor(200, totalSpend * 0.01, FATIGUE_FLOOR_CAP)) continue;
+    // A cpr-mode ad with no mapped result anywhere in the window has no trend to
+    // read: both halves rate 0.00, which files a 60-day ad as "evergreen" on flat
+    // nothing. Leave it out and report the count instead of plotting the zero.
+    if (mode === 'cpr' && list.reduce((s, r) => s + resultOf(r), 0) === 0) {
+      suppressedNoResults += 1;
+      continue;
+    }
 
     const sorted = [...list].sort((a, b) => a.date.localeCompare(b.date));
     const mid = Math.floor(sorted.length / 2);
@@ -201,7 +229,7 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currenc
       const sp = part.reduce((s, r) => s + r.spend, 0);
       if (mode === 'roas') return div(part.reduce((s, r) => s + r.purchase_value, 0), sp);
       // cost-per-result mode: LOWER is better, so invert into a "results per spend" rate for trend math
-      return div(part.reduce((s, r) => s + r.results, 0), sp);
+      return div(part.reduce((s, r) => s + resultOf(r), 0), sp);
     };
     const h1 = rate(sorted.slice(0, mid));
     const h2 = rate(sorted.slice(mid));
@@ -296,6 +324,11 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currenc
   }
 
   const warnings: string[] = [];
+  if (suppressedNoResults > 0) {
+    warnings.push(
+      `${suppressedNoResults} ad(s) with real spend carry no mapped result in the window (no purchases, no lead actions), so their trend is left out rather than shown as 0.00.`,
+    );
+  }
   const guarded = ads.filter((a) => a.low_frequency_acquisition_guard);
   if (guarded.length) {
     warnings.push(
@@ -318,6 +351,8 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currenc
       evergreen_spend_share_pct: evergreenShare,
       fatiguing_daily_burn: fatiguingDailyBurn,
       currency: currency || undefined,
+      ads_suppressed_no_results: suppressedNoResults || undefined,
+      signal: fatiguing.length > 0,
       ads: ads.slice(0, 20),
     },
     warnings: warnings.length ? warnings : undefined,
@@ -383,7 +418,7 @@ export function computeBudgetScatter(
     const a = byAd.get(r.ad_id) ?? { ad_id: r.ad_id, name: r.ad_name ?? r.ad_id, spend: 0, value: 0, results: 0, freqs: [] };
     a.spend += r.spend || 0;
     a.value += r.purchase_value || 0;
-    a.results += r.results || 0;
+    a.results += resultOf(r);
     if (r.ad_name) a.name = r.ad_name;
     if (typeof r.frequency === 'number' && r.frequency > 0) a.freqs.push(r.frequency);
     byAd.set(r.ad_id, a);
@@ -402,8 +437,12 @@ export function computeBudgetScatter(
   const floor = cappedFloor(100, total * 0.005, SCATTER_FLOOR_CAP);
   const all = [...byAd.values()];
   const plotted = all.filter((a) => a.spend >= floor).sort((a, b) => b.spend - a.spend);
+  // In cost-per-result mode a dot with no mapped result would sit at 0.00 and
+  // read as a free lead. Those ads get no dot, and the count says so.
+  const readable = mode === 'cpr' ? plotted.filter((a) => a.results > 0) : plotted;
+  const suppressedNoResults = plotted.length - readable.length;
 
-  const dots: ScatterDot[] = plotted.map((a) => {
+  const dots: ScatterDot[] = readable.map((a) => {
     const roas = mode === 'roas' ? r2(div(a.value, a.spend)) : null;
     const cpr = mode === 'cpr' ? r2(div(a.spend, a.results)) : null;
     const avgFreq = a.freqs.length ? r2(a.freqs.reduce((s, f) => s + f, 0) / a.freqs.length) : null;
@@ -447,6 +486,7 @@ export function computeBudgetScatter(
   const moveCount = dots.filter((d) => d.klass === 'move').length;
   const acqCount = dots.filter((d) => d.klass === 'acquisition').length;
   const dropped = all.length - plotted.length;
+  const cprValues = dots.map((d) => d.cpr_30d).filter((v): v is number => v != null).sort((x, y) => x - y);
 
   // Caption contrast — "your best ad gets £X, a fraction of what your worst spends".
   let contrast: string | null = null;
@@ -473,13 +513,22 @@ export function computeBudgetScatter(
     if (contrast) summaryParts.push(contrast);
   } else {
     summaryParts.push(`Each dot is one ad, placed by its last-30-day spend against its cost per result.`);
+    if (cprValues.length >= 2) {
+      summaryParts.push(
+        `Across the ${dots.length} plotted ads the cost per result runs from ${money(cprValues[0]!, currency)} to ${money(cprValues[cprValues.length - 1]!, currency)}.`,
+      );
+    }
   }
 
   const next_step = starvedBest
     ? `Shift budget toward the starved winners the chart circles — "${starvedBest.ad_name}" is earning well above the line on a small share of spend, so it has room to take more before it saturates.`
     : moveCount > 0
       ? `Move budget off the danger-zone ads and into the ones sitting high on the chart — the fatigue chapter has the deadline.`
-      : `Spend is broadly tracking return — keep feeding the ads sitting high-right and starve the low ones.`;
+      : mode === 'cpr'
+        ? cprValues.length >= 2
+          ? `Move budget from the ads near ${money(cprValues[cprValues.length - 1]!, currency)} per result toward the ones near ${money(cprValues[0]!, currency)}, one step at a time, and re-read the chart in two weeks.`
+          : `Keep the current split; there are too few plotted ads to move budget between on this chart alone.`
+        : `No ad on this chart is both clearly above ${breakevenWord} and starved of budget, and none is flagged past peak, so the current split stands. Re-read it next month.`;
 
   return {
     summary: summaryParts.join(' '),
@@ -497,8 +546,15 @@ export function computeBudgetScatter(
       acquisition_count: acqCount,
       starved_best_ad: starvedBest?.ad_name ?? undefined,
       contrast: contrast ?? undefined,
+      dots_suppressed_no_results: suppressedNoResults || undefined,
+      signal: moveCount > 0 || acqCount > 0 || !!starvedBest,
       dots: dots.slice(0, 40),
     },
+    warnings: suppressedNoResults > 0
+      ? [
+          `${suppressedNoResults} ad(s) that cleared the spend floor carry no mapped result, so they get no dot: a cost per result cannot be computed for them.`,
+        ]
+      : undefined,
     derivation:
       `We summed each ad's spend and revenue over the last 30 days and plotted spend against ROAS, sizing each dot by its average frequency. ` +
       `The colour is the SAME fatigue read from the chapter above — red = past-peak and still spending, blue = below breakeven but low-frequency (acquisition, not waste), ` +
@@ -679,15 +735,18 @@ export function computeDayOfWeek(accRows90: PackAccountRow[]): PackSection {
     const b = byDow.get(dow) ?? { spend: 0, value: 0, results: 0, days: 0 };
     b.spend += r.spend || 0;
     b.value += r.purchase_value || 0;
-    b.results += mode === 'roas' ? r.purchases || 0 : r.results || 0;
+    b.results += mode === 'roas' ? r.purchases || 0 : resultOf(r);
     b.days += 1;
     byDow.set(dow, b);
   }
+  // A weekday with no mapped result gets NO kpi. Dividing spend by `results || 1`
+  // used to return the weekday's raw spend under a "cost per result" label.
   const rows = [...byDow.entries()]
     .map(([dow, b]) => ({
       day: DOW[dow]!,
       spend: Math.round(b.spend),
-      kpi: mode === 'roas' ? r2(div(b.value, b.spend)) : r2(div(b.spend, b.results || 1)),
+      kpi: mode === 'roas' ? r2(div(b.value, b.spend)) : b.results > 0 ? r2(div(b.spend, b.results)) : null,
+      results: Math.round(b.results * 100) / 100,
       n_days: b.days,
     }))
     .sort((a, b) => DOW.indexOf(a.day) - DOW.indexOf(b.day));
@@ -697,29 +756,57 @@ export function computeDayOfWeek(accRows90: PackAccountRow[]): PackSection {
     return {
       summary: `Not enough history for a reliable day-of-week read (need 8+ of each weekday).`,
       next_step: `Revisit at the next audit once the window fills out.`,
-      data: { kpi_mode: mode, rows },
+      data: { kpi_mode: mode, rows, signal: false },
       warnings: ['Thin window — day-of-week pattern suppressed.'],
     };
   }
 
+  const readable = rows.filter((r): r is typeof r & { kpi: number } => r.kpi != null);
+  const suppressedDays = rows.length - readable.length;
+  const kpiLabel = mode === 'roas' ? 'Meta ROAS' : 'cost per result';
+  if (readable.length < 5) {
+    return {
+      summary:
+        `${readable.length} of the 7 weekdays carry a mapped result, so there is no honest weekday ${kpiLabel} to compare. ` +
+        `The spend split by weekday is still in the data.`,
+      next_step: `Fix the account's result mapping (no purchases and no lead actions land on ${suppressedDays} weekdays), then re-audit.`,
+      data: { kpi_mode: mode, kpi_label: kpiLabel, rows, days_suppressed_no_results: suppressedDays, signal: false },
+      warnings: [`No mapped result on ${suppressedDays} of 7 weekdays — weekday ${kpiLabel} suppressed rather than divided by nothing.`],
+    };
+  }
+
   const better = (a: { kpi: number }, b: { kpi: number }) => (mode === 'roas' ? b.kpi - a.kpi : a.kpi - b.kpi);
-  const ranked = [...rows].sort(better);
+  const ranked = [...readable].sort(better);
   const best = ranked[0]!;
   const worst = ranked[ranked.length - 1]!;
-  const kpiLabel = mode === 'roas' ? 'Meta ROAS' : 'cost per result';
   const gap = mode === 'roas' ? pct(best.kpi - worst.kpi, worst.kpi || 1) : pct(worst.kpi - best.kpi, best.kpi || 1);
 
   return {
     summary:
       `${best.day} is your strongest day (${kpiLabel} ${best.kpi}) and ${worst.day} the weakest (${worst.kpi}) — a ${r1(gap)}% gap, ` +
-      `measured across ~13 of each weekday. Daily granularity only — Meta doesn't give us clean hourly history, so this is day-of-week, not dayparting.`,
+      `measured across ~13 of each weekday. Daily granularity only — Meta doesn't give us clean hourly history, so this is day-of-week, not dayparting.` +
+      (suppressedDays > 0 ? ` ${suppressedDays} weekday(s) carry no mapped result and are left out of the comparison.` : ''),
     next_step:
       gap >= 25
         ? `Worth acting on: shift a slice of budget toward ${best.day}/${ranked[1]!.day} via a campaign schedule or manual weekly rhythm, and re-measure in 30 days.`
         : `The gap is modest — don't build schedule complexity for ${r1(gap)}%; just keep it on the watchlist.`,
-    data: { kpi_mode: mode, kpi_label: kpiLabel, rows, best_day: best.day, worst_day: worst.day, gap_pct: r1(gap) },
+    data: {
+      kpi_mode: mode,
+      kpi_label: kpiLabel,
+      rows,
+      best_day: best.day,
+      worst_day: worst.day,
+      gap_pct: r1(gap),
+      days_suppressed_no_results: suppressedDays || undefined,
+      signal: gap >= 25,
+    },
+    warnings: suppressedDays > 0
+      ? [`${suppressedDays} weekday(s) carry no mapped result, so they have no ${kpiLabel} and sit outside the best/worst comparison.`]
+      : undefined,
     derivation:
-      `90 days of account-level delivery grouped by weekday (~13 of each), ${kpiLabel} computed per weekday from the summed spend and results. ` +
+      `90 days of account-level delivery grouped by weekday (~13 of each), ${kpiLabel} computed per weekday from the summed spend and ` +
+      `that weekday's own results (purchases, or the lead actions when the account books leads). A weekday with no mapped result gets no ` +
+      `${kpiLabel} at all rather than showing its raw spend. ` +
       `Daily granularity only — Meta doesn't give us clean hourly history, so this is day-of-week, not dayparting. ` +
       `Gaps under 25% stay on the watchlist rather than becoming schedule advice.`,
   };
