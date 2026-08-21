@@ -719,31 +719,65 @@ export function classifyDestination(
   return { verdict: 'ok', reason: `HTTP ${status}` };
 }
 
+/** One destination's share of the mapped spend, and the ads behind it. */
+export interface DestinationRank {
+  destination: string;
+  spend: number;
+  spend_share_pct: number;
+  ads: number;
+  /** Meta ROAS in roas mode, cost per result in cpr mode, null when unreadable. */
+  kpi: number | null;
+  /** Every ad pointing here, biggest spender first. */
+  ad_ids: string[];
+  /** The mapped-spend denominator the share is taken against. */
+  covered_spend: number;
+}
+
+/**
+ * Spend by destination — the ONE resolution. The landing chapter groups by
+ * path, and the site walk groups the same rows by their full URL (a path
+ * cannot be fetched), so both read the same ranking rather than two that can
+ * disagree about which page the money is on.
+ */
+export function rankDestinationsBySpend(
+  rows: LandingAdRow[],
+  destOf: (row: LandingAdRow) => string | null,
+  mode: 'roas' | 'cpr',
+): DestinationRank[] {
+  const byDest = new Map<string, { spend: number; value: number; results: number; ads: Map<string, number> }>();
+  let covered = 0;
+  for (const r of rows) {
+    const key = destOf(r);
+    if (!key) continue;
+    covered += r.spend || 0;
+    const a = byDest.get(key) ?? { spend: 0, value: 0, results: 0, ads: new Map<string, number>() };
+    a.spend += r.spend || 0;
+    a.value += r.purchase_value || 0;
+    a.results += (mode === 'roas' ? r.purchases : r.purchases || r.leads) || 0;
+    a.ads.set(r.ad_id, (a.ads.get(r.ad_id) ?? 0) + (r.spend || 0));
+    byDest.set(key, a);
+  }
+  return [...byDest.entries()]
+    .map(([destination, a]) => ({
+      destination,
+      spend: Math.round(a.spend),
+      spend_share_pct: pct(a.spend, covered),
+      ads: a.ads.size,
+      kpi: mode === 'roas' ? (a.spend > 0 ? r2(div(a.value, a.spend)) : null) : a.results > 0 ? r2(div(a.spend, a.results)) : null,
+      ad_ids: [...a.ads.entries()].sort((x, y) => y[1] - x[1]).map(([id]) => id),
+      covered_spend: covered,
+    }))
+    .sort((a, b) => b.spend - a.spend);
+}
+
 export function computeLandingPages(rows: LandingAdRow[], checks: DeadUrlCheck[], currency: string, mode: 'roas' | 'cpr', uncheckedUrls = 0): PackSection {
   const total = rows.reduce((s, r) => s + (r.spend || 0), 0);
   const withPath = rows.filter((r) => r.landing_page_path);
   const covered = withPath.reduce((s, r) => s + (r.spend || 0), 0);
   const kpiLabel = mode === 'roas' ? 'Meta ROAS' : 'cost per result';
 
-  const byPath = new Map<string, { spend: number; value: number; results: number; ads: Set<string> }>();
-  for (const r of withPath) {
-    const p = r.landing_page_path!;
-    const a = byPath.get(p) ?? { spend: 0, value: 0, results: 0, ads: new Set<string>() };
-    a.spend += r.spend || 0;
-    a.value += r.purchase_value || 0;
-    a.results += (mode === 'roas' ? r.purchases : r.purchases || r.leads) || 0;
-    a.ads.add(r.ad_id);
-    byPath.set(p, a);
-  }
-  const paths = [...byPath.entries()]
-    .map(([path, a]) => ({
-      path,
-      spend: Math.round(a.spend),
-      spend_share_pct: pct(a.spend, covered),
-      ads: a.ads.size,
-      kpi: mode === 'roas' ? (a.spend > 0 ? r2(div(a.value, a.spend)) : null) : a.results > 0 ? r2(div(a.spend, a.results)) : null,
-    }))
-    .sort((a, b) => b.spend - a.spend)
+  const paths = rankDestinationsBySpend(rows, (r) => r.landing_page_path, mode)
+    .map(({ destination, spend, spend_share_pct, ads, kpi }) => ({ path: destination, spend, spend_share_pct, ads, kpi }))
     .slice(0, 10);
 
   if (paths.length === 0) {

@@ -20,6 +20,7 @@ import {
   computePlacementBreakdown, computeAudienceBreakdown, computeTargetingSplit, computeLearningLimited,
   computeSaturation, computeCreativeDiversity, computeCohortWave, computeWhatsWorking, computeLandingPages,
   computeAccountFacts, longestStillSpendingSpan, classifyDestination, computeAccountActivity,
+  rankDestinationsBySpend,
   type PlacementInsightRow, type DemoInsightRow, type GeoInsightRow, type TargetingSpecLite,
   type WeeklyReachRow, type LandingAdRow, type DeadUrlCheck, type ActivityEvent,
 } from './report-pack-extra.js';
@@ -31,6 +32,7 @@ import { coldBreakeven, buildColdKnowledge, type ColdRows, type OwnerInterview }
 import { runColdCreativeAnalysis, type OwnLibraryScrape } from './cold-creative.js';
 import type { StoreMediaCandidate } from './cold-creative-source.js';
 import { scrubSectionProse, scrubInsightProse, dedashDeep, dedash } from './prose.js';
+import { createPageFetch, runSiteWalk, type WalkAd, type WalkDestination } from './site-walk.js';
 
 /**
  * Magic Audit orchestrator (master-plan B1, expanded 2026-06-11: creative /
@@ -114,6 +116,9 @@ export interface ColdInjection {
   /** Tinkers media store creatives by provider ad id (the tokenless path's
    *  media + copy source for creative_analysis). */
   storeMedia?: Map<string, StoreMediaCandidate> | null;
+  /** ad id → its FULL landing url. `rows.landing30` carries the path only, and
+   *  a path cannot be fetched: the site walk needs the host too. */
+  landingUrls?: Record<string, string> | null;
 }
 
 /** Sections that read warehouse tables a stranger doesn't have.
@@ -190,6 +195,7 @@ const SECTION_ORDER: Array<Pick<AuditSection, 'key' | 'title' | 'status'>> = [
   { key: 'learning_limited', title: 'Learning Phase — is the structure starving Meta?', status: 'pending' },
   { key: 'targeting_split', title: 'Targeting — broad vs interests vs audiences', status: 'pending' },
   { key: 'landing_pages', title: 'Landing Pages — spend by destination + dead-URL check', status: 'pending' },
+  { key: 'message_match', title: 'Ad Promise vs Landing Page', status: 'pending' },
   { key: 'creative_analysis', title: 'Creative Performance & Angles', status: 'pending' },
   { key: 'funnel_read', title: 'Funnel Diagnosis', status: 'pending' },
   { key: 'account_facts', title: 'Did You Know — six months of account texture', status: 'pending' },
@@ -1273,9 +1279,10 @@ async function checkAdDestinations(
   clientCode: string,
   spendingAds: Array<{ ad_id: string; ad_name: string; spend: number }>,
   tokenOverride?: string,
-): Promise<{ checks: DeadUrlCheck[]; uncheckedUrls: number }> {
+): Promise<{ checks: DeadUrlCheck[]; uncheckedUrls: number; urlByAdId: Map<string, string> }> {
   const token = tokenOverride ?? metaTokenFor(clientCode);
-  if (!token || spendingAds.length === 0) return { checks: [], uncheckedUrls: 0 };
+  const urlByAdId = new Map<string, string>();
+  if (!token || spendingAds.length === 0) return { checks: [], uncheckedUrls: 0, urlByAdId };
   const byUrl = new Map<string, { ads: string[]; spend: number }>();
   type CreativeNode = {
     effective_status?: string;
@@ -1309,13 +1316,14 @@ async function checkAdDestinations(
         c?.object_story_spec?.video_data?.call_to_action?.value?.link;
       if (!url || !/^https?:\/\//.test(url)) continue;
       const clean = url.split('?')[0]!;
+      urlByAdId.set(ad.ad_id, clean);
       const agg = byUrl.get(clean) ?? { ads: [], spend: 0 };
       agg.ads.push(ad.ad_name);
       agg.spend += ad.spend;
       byUrl.set(clean, agg);
     }
   } catch {
-    return { checks: [], uncheckedUrls: 0 };
+    return { checks: [], uncheckedUrls: 0, urlByAdId };
   }
 
   // Highest-spend URLs first, so a cap overflow drops the cheapest tail.
@@ -1354,7 +1362,7 @@ async function checkAdDestinations(
     checks.push({ url, verdict, status, daily_burn: agg.spend / 30, ads: agg.ads.slice(0, 5), reason });
     await new Promise((r) => setTimeout(r, 300)); // gentle pacing — never burst a shop
   }
-  return { checks, uncheckedUrls };
+  return { checks, uncheckedUrls, urlByAdId };
 }
 
 /** How many surfaced ads get a preview link + thumbnail per audit (one batched
@@ -1753,6 +1761,10 @@ export function workLineFor(key: string, s: AuditSection): string | null {
         ? `Resolved every delivering ad's CURRENT destination from Meta and fetched all ${checks} unique URLs live`
         : `Ranked spend by landing destination`;
     }
+    case 'message_match': {
+      const page = d.page as { url?: string } | undefined;
+      return page?.url ? `Opened the landing page your top ad points at and read what it promises` : null;
+    }
     case 'account_facts':
       return `Pulled six months of account texture, the "did you know" facts`;
     case 'competitor_teardown':
@@ -2121,6 +2133,52 @@ export async function runMagicAudit(
     spendByAdset.set(String(r.adset_id), (spendByAdset.get(String(r.adset_id)) ?? 0) + (r.spend || 0));
   }
 
+  // Full landing URLs by ad, for the site walk. Seeded from the bridge's own
+  // creatives read on the tokenless path (their `/creatives` carries the url,
+  // ours resolves it live inside checkAdDestinations) — one map, both paths.
+  const landingUrlByAd = new Map<string, string>();
+  if (cold?.landingUrls) for (const [adId, url] of Object.entries(cold.landingUrls)) landingUrlByAd.set(adId, url);
+
+  /**
+   * The words of the top-spending ad pointing at a page. The cold path already
+   * holds them (the media store's copy); the warehouse path reads ONE creatives
+   * row rather than re-pulling the whole table.
+   */
+  const walkAdFor = async (adIds: string[], spendByAd: Map<string, number>): Promise<WalkAd | null> => {
+    for (const adId of adIds.slice(0, 5)) {
+      const spend30 = spendByAd.get(adId) ?? 0;
+      const adName = rows30.find((r) => r.ad_id === adId)?.ad_name ?? null;
+      const stored = cold?.storeMedia?.get(adId);
+      if (stored && (stored.body || stored.title)) {
+        return { ad_id: adId, ad_name: adName, body: stored.body ?? null, headline: stored.title ?? null, spend30 };
+      }
+      if (!cold) {
+        try {
+          const rows = await pageAll<{ ad_id: string; primary_text: string | null; headline: string | null }>(
+            'creatives',
+            'ad_id, primary_text, headline',
+            (q) => q.eq('client_id', client.id).eq('ad_id', adId),
+            10,
+          );
+          const row = rows.find((r) => r.primary_text || r.headline);
+          if (row) return { ad_id: adId, ad_name: adName, body: row.primary_text, headline: row.headline, spend30 };
+        } catch (err) {
+          logger.warn({ err, code, adId }, 'creative copy lookup for the site walk failed (walk continues wordless)');
+        }
+      }
+    }
+    const adId = adIds[0];
+    if (!adId) return null;
+    // No words is not no page: the walk still reads it and says so.
+    return {
+      ad_id: adId,
+      ad_name: rows30.find((r) => r.ad_id === adId)?.ad_name ?? null,
+      body: null,
+      headline: null,
+      spend30: spendByAd.get(adId) ?? 0,
+    };
+  };
+
   // Session-G shared state: sections later in the order reuse earlier reads.
   let savedScorecard: ScorecardEntry[] | null = null;
   let angleByAdIdShared: Map<string, string> | null = null;
@@ -2288,8 +2346,41 @@ export async function runMagicAudit(
       // ALL ads with spend in the window (Dan 2026-07-06) — the engine drops the
       // no-longer-delivering ones and dedupes by URL, so this stays cheap.
       const spendingAds = [...byAd.values()].filter((a) => a.spend > 0).sort((a, b) => b.spend - a.spend);
-      const { checks, uncheckedUrls } = await checkAdDestinations(code, spendingAds, coldToken);
+      const { checks, uncheckedUrls, urlByAdId } = await checkAdDestinations(code, spendingAds, coldToken);
+      // The site walk needs full URLs, and this is where they get resolved live.
+      for (const [adId, url] of urlByAdId) landingUrlByAd.set(adId, url);
       return computeLandingPages(adRows, checks, client.currency, auditKpiMode, uncheckedUrls);
+    },
+    // Runs AFTER landing_pages so it reads the SAME spend-by-destination
+    // resolution: one page, the one carrying the most money.
+    message_match: async () => {
+      const ranked = rankDestinationsBySpend(
+        landing30.map((r) => ({
+          ad_id: r.ad_id,
+          spend: r.spend || 0,
+          purchases: r.purchases || 0,
+          purchase_value: r.purchase_value || 0,
+          leads: r.leads || 0,
+          landing_page_path: r.landing_page_path,
+        })),
+        (r) => landingUrlByAd.get(r.ad_id) ?? null,
+        auditKpiMode,
+      );
+      const top = ranked[0];
+      const destination: WalkDestination | null = top
+        ? { url: top.destination, spend30: top.spend, spend_share_pct: top.spend_share_pct, ads_count: top.ads }
+        : null;
+      const spendByAd = new Map<string, number>();
+      for (const r of landing30) spendByAd.set(r.ad_id, (spendByAd.get(r.ad_id) ?? 0) + (r.spend || 0));
+      const ad = top ? await walkAdFor(top.ad_ids, spendByAd) : null;
+      return runSiteWalk({
+        currency: client.currency,
+        destination,
+        ad,
+        fetchPage: createPageFetch(),
+        synthesize: <T,>(label: string, user: string) => synthesizeJson<T>(meter, label, synthSystem, user),
+        log: (event, detail) => logger.warn({ ...detail, code, event }, 'site walk degraded (section skipped, audit continues)'),
+      });
     },
     creative_analysis: async () => {
       const s = await runCreativeAnalysis(code, meter, client, synthSystem);

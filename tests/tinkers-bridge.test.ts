@@ -297,7 +297,7 @@ describe('fetchTinkersAdDays', () => {
 });
 
 describe('fetchTinkersDestinations + fetchTinkersStoreMedia', () => {
-  it('maps landing urls to paths and skips what it cannot parse', async () => {
+  it('maps landing urls to paths AND full urls, and skips what it cannot parse', async () => {
     state.reads.creatives = {
       json: {
         ok: true,
@@ -308,8 +308,11 @@ describe('fetchTinkersDestinations + fetchTinkersStoreMedia', () => {
         ],
       },
     };
+    // The path feeds the landing chapter; the full url (query dropped, it is
+    // per-ad tracking) is what the site walk can actually fetch.
     await expect(fetchTinkersDestinations('aud_1')).resolves.toEqual({
-      ad_1: { market: null, path: '/products/hoodie' },
+      destinations: { ad_1: { market: null, path: '/products/hoodie' } },
+      landingUrls: { ad_1: 'https://shop.example/products/hoodie' },
     });
   });
 

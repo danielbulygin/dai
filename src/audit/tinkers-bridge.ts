@@ -358,24 +358,30 @@ export async function fetchTinkersLeadContext(auditId: string): Promise<TinkersL
 }
 
 /** Landing destinations from their creatives read — the same map
- *  resolveDestinations built from live Graph creatives. Fail-soft: no
+ *  resolveDestinations built from live Graph creatives, plus the FULL url per
+ *  ad, which the site walk needs (a path cannot be fetched). Fail-soft: no
  *  destinations degrades the landing section to unresolved, never the audit. */
-export async function fetchTinkersDestinations(
-  auditId: string,
-): Promise<Record<string, { market: string | null; path: string | null }>> {
-  const out: Record<string, { market: string | null; path: string | null }> = {};
+export async function fetchTinkersDestinations(auditId: string): Promise<{
+  destinations: Record<string, { market: string | null; path: string | null }>;
+  landingUrls: Record<string, string>;
+}> {
+  const destinations: Record<string, { market: string | null; path: string | null }> = {};
+  const landingUrls: Record<string, string> = {};
   try {
     const raw = await getGeneration(`/api/generation/${auditId}/creatives`);
     const page = parseOrThrow(creativesSchema, raw, 'creatives');
     if (!page.ok) {
       logger.warn({ auditId, reason: page.reason }, 'tinkers creatives read not ready (landing section degrades)');
-      return out;
+      return { destinations, landingUrls };
     }
     for (const c of page.creatives) {
       const url = c.landingUrl;
       if (!url || !/^https?:\/\//.test(url)) continue;
       try {
-        out[c.adId] = { market: null, path: new URL(url).pathname };
+        const parsed = new URL(url);
+        destinations[c.adId] = { market: null, path: parsed.pathname };
+        // Query strings are per-ad tracking, never the page.
+        landingUrls[c.adId] = `${parsed.origin}${parsed.pathname}`;
       } catch {
         /* malformed url — leave unresolved */
       }
@@ -383,7 +389,7 @@ export async function fetchTinkersDestinations(
   } catch (err) {
     logger.warn({ err: seamError(err), auditId }, 'tinkers creatives read failed (landing section degrades)');
   }
-  return out;
+  return { destinations, landingUrls };
 }
 
 /** The top ads' words + signed media URLs from their store, for the creative
@@ -604,7 +610,7 @@ async function runBridged(args: {
 
   const asOf = new Date().toISOString().slice(0, 10);
   const pull = await fetchTinkersAdDays(auditId, { asOf });
-  const destinations = await fetchTinkersDestinations(auditId);
+  const { destinations, landingUrls } = await fetchTinkersDestinations(auditId);
   const rows = buildColdRows({ adDays: pull.adDays, destinations });
   logger.info(
     {
@@ -683,6 +689,7 @@ async function runBridged(args: {
       grossMarginPct: leadContext?.grossMarginPct ?? null,
       interview: leadContext?.interview ?? null,
       storeMedia,
+      landingUrls,
     },
   });
 

@@ -212,6 +212,54 @@ ships on Tinkers' schedule and an audit that died because it could not read an
 optional answer would be a worse report than one that honestly says no target
 was given.
 
+## The site walk (section key `message_match`)
+
+The audit knew where the money went and what the ads said, and never opened the
+page the money lands on. It does now: ONE page, the top destination by spend
+(resolved by the same `rankDestinationsBySpend` the landing chapter uses, so the
+two can never disagree about which page carries the money), and one question,
+does the top ad's promise appear on it?
+
+`data` shape, for the renderer:
+
+```json
+{ "window_days": 30, "currency": "USD",
+  "verdict": "matched | partial | mismatch | inconclusive",
+  "evidence_quote": "Life cover from 12 USD a month",
+  "page": { "url": "...", "final_url": "...", "http_status": 200,
+            "spend_30d": 5577, "spend_share_pct": 61.2, "ads_pointing_here": 7,
+            "headline": "...", "page_title": "...", "offer_sentence": "...",
+            "primary_cta": "Start my free quote",
+            "social_proof": true, "social_proof_evidence": "Rated 4.8 out of 5 by 1,204 families" },
+  "ad": { "ad_id": "...", "ad_name": "...", "spend_30d": 1204, "words": "..." },
+  "checks": [{ "promise": "code SAVE20", "found_on_page": false,
+               "page_evidence": null, "source": "deterministic | read" }],
+  "signal": true }
+```
+
+The rules that make it safe to print:
+
+- **One page, one fetch** (plus at most one redirect). No crawling.
+- **Guarded**: https only, public hosts only, standard ports only, a byte cap, a
+  timeout, no auth headers, and a user agent that says who we are. A URL that
+  fails any of these is refused before the request leaves.
+- **Every verdict stronger than `inconclusive` carries a verbatim page quote**,
+  checked against the page's own text. For a kept promise it is where the page
+  keeps it; for a mismatch it is what the page says instead. A quote the page
+  does not carry is dropped, so a model claim we cannot verify can never become
+  a finding, and an unverifiable claim never becomes evidence of absence either.
+- **The string search beats the model** on the same promise: whether a page
+  prints SAVE20 is a search, not a judgment.
+- **`inconclusive` is never alarmed**: no warning, `signal: false`, no next step.
+- **Contained**: a blocked, slow, script-only or broken page stores the section
+  `status: "skipped"` with a reason in plain words, and the landing chapter above
+  keeps today's wording exactly. The walk is time-capped and cannot fail an audit.
+
+Full URLs reach it differently on the two paths and land in one map: the bridge
+takes them from Tinkers' `/creatives` answer (`landingUrls`, query dropped), and
+the warehouse path uses the ones `checkAdDestinations` already resolves live from
+each ad's creative.
+
 ## Two rules the report page depends on
 
 **A quiet section carries no next step.** `data.signal === false` is a section
