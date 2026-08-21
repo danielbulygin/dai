@@ -62,7 +62,12 @@ export interface PackAccountRow {
 
 export interface PackSection {
   summary: string;
-  next_step: string;
+  /**
+   * OPTIONAL, and absent on purpose when the section found nothing: the page
+   * reads a next step as an action worth taking, so a quiet section carrying
+   * one renders as a finding. A quiet row is its summary and nothing else.
+   */
+  next_step?: string;
   /**
    * Section payload. Every compute function in this file sets `data.signal`:
    * false means the section ran clean and found nothing (a flat CPM trend, an
@@ -545,6 +550,9 @@ export function computeBudgetScatter(
   const acqCount = dots.filter((d) => d.klass === 'acquisition').length;
   const dropped = all.length - plotted.length;
   const cprValues = dots.map((d) => d.cpr_30d).filter((v): v is number => v != null).sort((x, y) => x - y);
+  const spreadRatio =
+    cprValues.length >= 2 && cprValues[0]! > 0 ? r2(cprValues[cprValues.length - 1]! / cprValues[0]!) : null;
+  const wideSpread = spreadRatio != null && spreadRatio >= 1.5;
 
   // Caption contrast — "your best ad gets £X, a fraction of what your worst spends".
   let contrast: string | null = null;
@@ -628,7 +636,12 @@ export function computeBudgetScatter(
       starved_best_ad: starvedBest?.ad_name ?? undefined,
       contrast: contrast ?? undefined,
       dots_suppressed_no_results: suppressedNoResults || undefined,
-      signal: moveCount > 0 || acqCount > 0 || !!starvedBest,
+      spread_ratio: spreadRatio ?? undefined,
+      // A wide spread IS a finding: with the dearest plotted ad costing half
+      // again what the cheapest does, there is money to move whatever the
+      // fatigue classes say. The chart used to post signal false under a next
+      // step that told the reader exactly which way to move it.
+      signal: moveCount > 0 || acqCount > 0 || !!starvedBest || wideSpread,
       dots: dots.slice(0, 40),
     },
     warnings: suppressedNoResults > 0
@@ -709,14 +722,22 @@ export function computeCohorts(rows180: Array<Pick<PackAdRow, 'ad_id' | 'date' |
         ? `a modest refresh rhythm — most budget still sits on older launches`
         : `an account living off old creative — recent launches barely take budget, which is exactly how a fatigue cliff builds`;
 
+  // A quiet cadence has no next step: the one thing worth saying (keep going,
+  // and check the old cohorts are evergreen) belongs in the same sentence as
+  // the number, not in an action row the page renders as a finding.
+  const quiet = freshShare >= 40;
   return {
     summary:
       `Of this month's spend, ${r1(freshShare)}% goes to creatives launched in the last ~2 months — ${read}. ` +
+      (quiet
+        ? `Keep this launch cadence, and use the fatigue report to confirm the older cohorts still earning budget are evergreen rather than decaying. `
+        : '') +
       `The stacked view shows each month's spend split by WHEN its creatives first launched (launch month approximated by first spend day in the ${series.length}-month window).`,
-    next_step:
-      freshShare >= 40
-        ? `Keep the launch cadence — and use the fatigue report to make sure the old cohorts still earning budget are evergreen, not decaying.`
-        : `Set a monthly launch quota and track this chart month over month — the fresh-cohort share should climb toward 30–40% without touching proven evergreens.`,
+    ...(quiet
+      ? {}
+      : {
+          next_step: `Set a monthly launch quota and track this chart month over month — the fresh-cohort share should climb toward 30–40% without touching proven evergreens.`,
+        }),
     data: {
       window_months: series.length,
       fresh_cohort_share_pct: r1(freshShare),

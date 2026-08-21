@@ -30,7 +30,7 @@ import {
 import { coldBreakeven, buildColdKnowledge, type ColdRows } from './cold-source.js';
 import { runColdCreativeAnalysis, type OwnLibraryScrape } from './cold-creative.js';
 import type { StoreMediaCandidate } from './cold-creative-source.js';
-import { scrubSectionProse, scrubInsightProse, dedashDeep } from './prose.js';
+import { scrubSectionProse, scrubInsightProse, dedashDeep, dedash } from './prose.js';
 
 /**
  * Magic Audit orchestrator (master-plan B1, expanded 2026-06-11: creative /
@@ -1645,14 +1645,39 @@ async function upsertAccountModel(clientCode: string, auditId: string, model: Ac
   if (error) throw new Error(`account_models upsert failed: ${error.message}`);
 }
 
+/**
+ * A quiet section must actually be quiet.
+ *
+ * `data.signal === false` is the section's own statement that it found nothing
+ * worth acting on, and the report page reads a `next_step` as an action worth
+ * taking: a section carrying both renders as loud and the quiet ledger never
+ * appears. Live proof (2026-08-21): budget_scatter posted signal false next to
+ * "Move budget from the ads near 40 USD per result toward the ones near 17 USD".
+ *
+ * The fix runs in the write path rather than in each compute function, so one
+ * rule covers every section and a future one cannot forget it. Dropping the
+ * line is the honest direction: a section that believes it has a finding says
+ * so with `signal: true`, and the ones that keep a "nothing urgent, keep the
+ * cadence" line were never carrying a next step, only filler shaped like one.
+ */
+export function enforceQuietSection<T extends AuditSection>(section: T): T {
+  const data = section.data;
+  const quiet =
+    typeof data === 'object' && data !== null && !Array.isArray(data) &&
+    (data as Record<string, unknown>).signal === false;
+  if (!quiet || typeof section.next_step !== 'string') return section;
+  const { next_step: _dropped, ...rest } = section;
+  return rest as T;
+}
+
 /** One honest work-receipt line per finished section — real numbers, no theater. */
-function workLineFor(key: string, s: AuditSection): string | null {
+export function workLineFor(key: string, s: AuditSection): string | null {
   if (s.status !== 'complete') return null;
   const d = (s.data ?? {}) as Record<string, unknown>;
   switch (key) {
     case 'dataset_health': {
       const pixels = (d.pixels as unknown[] | undefined)?.length ?? 0;
-      return pixels ? `Checked ${pixels} pixel dataset${pixels > 1 ? 's' : ''} — events, CAPI split, match keys` : null;
+      return pixels ? `Checked ${pixels} pixel dataset${pixels > 1 ? 's' : ''}: events, CAPI split, match keys` : null;
     }
     case 'account_structure': {
       const n = (d.campaigns as unknown[] | undefined)?.length ?? 0;
@@ -1687,14 +1712,14 @@ function workLineFor(key: string, s: AuditSection): string | null {
     case 'creative_analysis':
       // Cold path: we watched the actual downloaded creatives with Gemini.
       if (typeof d.creatives_analyzed === 'number' && d.creatives_analyzed > 0) {
-        return `Watched the actual creative on ${d.creatives_analyzed} top ads — hooks, formats, casting`;
+        return `Watched the actual creative on ${d.creatives_analyzed} top ads: hooks, formats, casting`;
       }
       return typeof d.ads_with_spend === 'number' ? `Read the copy + transcripts of the top spenders (${d.ads_with_spend} ads in market)` : null;
     case 'funnel_read':
       return `Walked the funnel stage by stage (30 days)`;
     case 'placement_breakdown': {
       const n = (d.platforms as unknown[] | undefined)?.length ?? 0;
-      return n ? `Split spend across ${n} platforms and their placements — Audience Network checked` : null;
+      return n ? `Split spend across ${n} platforms and their placements, Audience Network checked` : null;
     }
     case 'audience_breakdown':
       return `Broke delivery down by age, gender and country`;
@@ -1705,7 +1730,7 @@ function workLineFor(key: string, s: AuditSection): string | null {
     case 'creative_diversity':
       return typeof d.angles === 'number' && d.angles > 0 ? `Measured portfolio concentration across ${d.angles} creative angles` : null;
     case 'whats_working':
-      return `Assembled the protect list — what NOT to touch`;
+      return `Assembled the protect list: what NOT to touch`;
     case 'learning_limited': {
       // data.rows is display-capped at 15 — the honest population count is
       // assessed_adsets (count-scope debt 2026-07-04: the work log said "15"
@@ -1724,7 +1749,7 @@ function workLineFor(key: string, s: AuditSection): string | null {
         : `Ranked spend by landing destination`;
     }
     case 'account_facts':
-      return `Pulled six months of account texture — the "did you know" facts`;
+      return `Pulled six months of account texture, the "did you know" facts`;
     case 'competitor_teardown':
       return `Scanned the public Ads Library footprint`;
     default:
@@ -1980,7 +2005,7 @@ export async function runMagicAudit(
     }
   };
   const saveSection = async (section: AuditSection): Promise<void> => {
-    sections[section.key] = await scrubbedForWriteBack(section);
+    sections[section.key] = enforceQuietSection(await scrubbedForWriteBack(section));
     await updateRow({ sections, cost_usd: round2(meter.spentUsd) });
   };
 
@@ -1989,7 +2014,10 @@ export async function runMagicAudit(
   const workLog: Array<{ at: string; line: string }> = [];
   const logWork = async (line: string | null): Promise<void> => {
     if (!line) return;
-    workLog.push({ at: new Date().toISOString(), line });
+    // The work log is customer-facing text like any section string, so it goes
+    // through the same dash gate. A literal we own is fixed at the source; this
+    // catches the interpolated ones and anything a future line brings with it.
+    workLog.push({ at: new Date().toISOString(), line: dedash(line) });
     await updateRow({ work_log: workLog });
   };
 
@@ -2405,7 +2433,7 @@ export async function runMagicAudit(
           if (correction?.material) {
             hooksEntry.correction = { corrected_value: correction.corrected_pct, note: correction.note };
             await logWork(
-              `Checked ${correction.forced_share_pct}% of impressions on forced-view placements — corrected the hook rate ${correction.reported_pct}% → ${correction.corrected_pct}%`,
+              `Checked ${correction.forced_share_pct}% of impressions on forced-view placements, corrected the hook rate ${correction.reported_pct}% → ${correction.corrected_pct}%`,
             );
             logger.info({ code, correction }, 'hook-rate correction applied (rewarded video)');
           }
@@ -2508,7 +2536,7 @@ export async function runMagicAudit(
       };
       const model = buildAccountModel(inputs);
       await upsertAccountModel(code, auditId, model);
-      await logWork(`Wrote down what we understood about your business (${model.facts.length} facts) — check the "correct us" section`);
+      await logWork(`Wrote down what we understood about your business (${model.facts.length} facts), check the "correct us" section`);
       logger.info({ code, facts: model.facts.length, businessModel: model.business_model }, 'account model written');
     } catch (err) {
       logger.warn({ err, code }, 'account model write failed (audit continues)');

@@ -189,6 +189,23 @@ same audit with and without the option and asserts the sequence of writes to
 Nothing else in `magic-audit.ts` was touched: no section, no prompt, no cost
 meter, no ordering.
 
+## Two rules the report page depends on
+
+**A quiet section carries no next step.** `data.signal === false` is a section
+stating it found nothing worth acting on, and the page reads a `next_step` as an
+action worth taking, so a section carrying both renders as a finding with no
+finding in it (live, 2026-08-21: budget_scatter posted `signal: false` beside
+"Move budget from the ads near 40 USD per result toward the ones near 17 USD").
+`enforceQuietSection` drops the line in the ONE write path every section passes
+through, so no compute function can forget the rule. The other direction is
+fixed at the source: a wide cost-per-result spread across the plotted ads (the
+dearest at least 1.5x the cheapest, reported as `data.spread_ratio`) IS a
+signal, whatever the fatigue classes say.
+
+**The work log passes the same dash gate as the sections.** Every `work_log`
+line now goes through `dedash`, and the literal lines we own were rewritten with
+house punctuation. Nothing customer-facing leaves here with an em-dash in it.
+
 ## The lens the report is read through
 
 Every audit classifies the account's own 30-day event mix ONCE
