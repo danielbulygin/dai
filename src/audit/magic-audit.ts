@@ -1864,7 +1864,7 @@ async function quickRecognition(clientId: string, currency: string): Promise<Rec
  * page's only chance to say "these figures end on 20 Jul" before the reader
  * starts believing they are about this week.
  */
-function coldRecognition(cold: ColdInjection, currency: string): RecognitionRead | null {
+export function coldRecognition(cold: ColdInjection, currency: string): RecognitionRead | null {
   const rows = cold.rows.packAccRows90;
   if (rows.length === 0) return null;
   const spend = rows.reduce((s, r) => s + num(r.spend), 0);
