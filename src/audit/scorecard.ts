@@ -209,7 +209,7 @@ export function buildScorecard(inp: ScorecardInputs): ScorecardEntry[] {
       key: 'concentration', dimension: 'Budget concentration', value: r1(v), unit: '% of spend in top 3 ads',
       band,
       position:
-        band === 'weak' ? `Budget concentration — key-man risk (top 3 ads = ${r1(v)}% of spend)`
+        band === 'weak' ? `Budget concentration — one ad carries the account (top 3 ads = ${r1(v)}% of spend)`
         : band === 'middle' ? `Budget concentration — elevated (${r1(v)}% in the top 3)`
         : `Budget concentration — healthy spread (${r1(v)}% in the top 3)`,
       lever: 'How much of the account dies if the hero ad fatigues.',

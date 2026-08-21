@@ -108,13 +108,31 @@ export function resultOf(row: { results?: number | null; purchases?: number | nu
 }
 
 /** Whether this account's economics read as ROAS (purchase value present) or cost-per-result. */
+/**
+ * The ONE cost word a report is allowed to use, decided from the lens and
+ * nowhere else. Null when the lens cannot pick one, and then nothing is
+ * rewritten: on an account recording both leads and purchases, or neither,
+ * there is no single word that is true.
+ *
+ * The live read said "CPL" on one chip, "Meta CPL" in an insight and "cost per
+ * result" in three chapter labels, all about the same number. A reader
+ * counting metrics counted three.
+ */
+export function costWordForLens(
+  lens: 'lead_gen' | 'ecommerce' | 'mixed' | 'unknown' | null | undefined,
+): string | null {
+  if (lens === 'lead_gen') return 'cost per lead';
+  if (lens === 'ecommerce') return 'Meta CPA';
+  return null;
+}
+
 export function kpiMode(rows: Array<{ purchase_value: number; results: number }>): 'roas' | 'cpr' {
   const value = rows.reduce((s, r) => s + (r.purchase_value || 0), 0);
   return value > 0 ? 'roas' : 'cpr';
 }
 
 // ---------------------------------------------------------------------------
-// 1. Spend concentration / key-man risk
+// 1. Spend concentration: how much of the account rides on one ad
 // ---------------------------------------------------------------------------
 
 export function computeConcentration(rows30: PackAdRow[]): PackSection {
@@ -139,7 +157,7 @@ export function computeConcentration(rows30: PackAdRow[]): PackSection {
   const band = top3 >= 60 ? 'high' : top3 >= 40 ? 'elevated' : 'healthy';
   const bandLine =
     band === 'high'
-      ? `Top-3 concentration above 60% is key-man risk territory — if the #1 ad fatigues, most of the account goes with it.`
+      ? `Above 60% in the top 3 means one ad carries the account: if the #1 ad fatigues, most of the account goes with it.`
       : band === 'elevated'
         ? `40–60% in the top 3 is workable but worth watching — most healthy accounts at this spend sit under 40%.`
         : `Under 40% in the top 3 is a healthy spread.`;
@@ -157,12 +175,17 @@ export function computeConcentration(rows30: PackAdRow[]): PackSection {
     summary:
       `Your top ad takes ${top1}% of the last 30 days' spend; the top 3 take ${top3}% and the top 10 take ${top10}% ` +
       `(${ads.length} ads spent anything at all). ${bandLine}`,
-    next_step:
-      band === 'high'
-        ? `Get 2–3 genuinely different concepts live this month so the account isn't riding one creative. Start from what the top ad does well — don't clone it, vary the angle.`
-        : band === 'elevated'
-          ? `Keep at least one new concept entering test every other week so the top 3 never become the whole account.`
-          : `Nothing urgent — keep the testing cadence that produced this spread.`,
+    // A healthy spread is this chapter reading clean (signal false below), so
+    // it carries no action row: "keep the cadence that produced this" asks for
+    // nothing the account is not already doing.
+    ...(band === 'healthy'
+      ? {}
+      : {
+          next_step:
+            band === 'high'
+              ? `Get 2–3 genuinely different concepts live this month so the account isn't riding one creative. Start from what the top ad does well, and vary the angle rather than cloning it.`
+              : `Keep at least one new concept entering test every other week so the top 3 never become the whole account.`,
+        }),
     data: {
       window_days: 30,
       total_spend: Math.round(total),
@@ -187,7 +210,7 @@ export function computeConcentration(rows30: PackAdRow[]): PackSection {
     derivation:
       `Summed each ad's spend across the last 30 days (${ads.length} ads spent anything), ` +
       `ranked them, and took the top-1/3/10 share of the total. The bands come from what we see across accounts: ` +
-      `top-3 under 40% = healthy spread, 40–60% = elevated, over 60% = key-man risk.`,
+      `top-3 under 40% = healthy spread, 40–60% = elevated, over 60% = one ad carries the account.`,
   };
 }
 
@@ -962,7 +985,35 @@ export function computeBudgetScatter(
 // 3. Creative cohorts by launch month (does the account live off old creative?)
 // ---------------------------------------------------------------------------
 
-export function computeCohorts(rows180: Array<Pick<PackAdRow, 'ad_id' | 'date' | 'spend'>>): PackSection {
+/**
+ * The fatigue chapter's rows, so the cadence read cannot praise a refresh
+ * rhythm the account's biggest line in the budget is not getting. The live
+ * report graded "a healthy refresh rhythm" in this chapter while the letter
+ * above it said the top creative was aging.
+ */
+export interface FatigueReadForCohorts {
+  ads?: Array<{ ad_name?: string; spend_30d?: number; spend?: number; class?: string }>;
+}
+
+/** The biggest current spender, when the fatigue chapter says it is on the way down. */
+export function agingTopSpender(
+  fatigue: FatigueReadForCohorts | undefined,
+): { ad_name: string; verdict: 'fatiguing' | 'declining' } | null {
+  const ads = (fatigue?.ads ?? []).filter((a) => typeof a.ad_name === 'string' && a.ad_name.length > 0);
+  if (ads.length === 0) return null;
+  const spendOf = (a: { spend_30d?: number; spend?: number }): number =>
+    typeof a.spend_30d === 'number' ? a.spend_30d : (a.spend ?? 0);
+  const top = [...ads].sort((a, b) => spendOf(b) - spendOf(a))[0]!;
+  if (spendOf(top) <= 0) return null;
+  if (top.class === 'fatiguing') return { ad_name: top.ad_name!, verdict: 'fatiguing' };
+  if (top.class === 'declining_unconfirmed') return { ad_name: top.ad_name!, verdict: 'declining' };
+  return null;
+}
+
+export function computeCohorts(
+  rows180: Array<Pick<PackAdRow, 'ad_id' | 'date' | 'spend'>>,
+  fatigue?: FatigueReadForCohorts,
+): PackSection {
   const firstSeen = new Map<string, string>();
   for (const r of rows180) {
     const cur = firstSeen.get(r.ad_id);
@@ -1003,12 +1054,18 @@ export function computeCohorts(rows180: Array<Pick<PackAdRow, 'ad_id' | 'date' |
     const prevM = months.length > 1 ? months[months.length - 2]! : lastM;
     freshShare = last.cohorts.filter((c) => c.cohort === lastM || c.cohort === prevM).reduce((s, c) => s + c.share_pct, 0);
   }
+  // A share is a claim about the portfolio, not about the ad carrying the
+  // money. Praising the rhythm while the biggest spender is on the way down is
+  // the report contradicting itself in two chapters.
+  const aging = agingTopSpender(fatigue);
   const read =
     freshShare >= 40
-      ? `a healthy refresh rhythm — new work earns budget quickly`
+      ? aging
+        ? `the launch cadence is there, but the ad carrying the most spend right now, "${aging.ad_name}", is on the fatigue chapter's ${aging.verdict} list, so the fresh work is not yet reaching the biggest line in the budget`
+        : `a healthy refresh rhythm, and new work earns budget quickly`
       : freshShare >= 15
-        ? `a modest refresh rhythm — most budget still sits on older launches`
-        : `an account living off old creative — recent launches barely take budget, which is exactly how a fatigue cliff builds`;
+        ? `a modest refresh rhythm, and most budget still sits on older launches`
+        : `an account living off old creative: recent launches barely take budget, which is exactly how a fatigue cliff builds`;
 
   // A quiet cadence has no next step: the one thing worth saying (keep going,
   // and check the old cohorts are evergreen) belongs in the same sentence as
@@ -1047,9 +1104,11 @@ export function computeCohorts(rows180: Array<Pick<PackAdRow, 'ad_id' | 'date' |
 
   return {
     summary:
-      `Of this month's spend, ${r1(freshShare)}% goes to creatives launched in the last ~2 months — ${read}. ` +
+      `Of this month's spend, ${r1(freshShare)}% goes to creatives launched in the last ~2 months: ${read}. ` +
       (quiet
-        ? `Keep this launch cadence, and use the fatigue report to confirm the older cohorts still earning budget are evergreen rather than decaying. `
+        ? aging
+          ? `The fatigue chapter has the replacement deadline for it. `
+          : `Keep this launch cadence, and use the fatigue report to confirm the older cohorts still earning budget are evergreen rather than decaying. `
         : '') +
       `The stacked view shows each month's spend split by WHEN its creatives first launched (launch month approximated by first spend day in the ${series.length}-month window).`,
     ...(quiet
@@ -1062,7 +1121,12 @@ export function computeCohorts(rows180: Array<Pick<PackAdRow, 'ad_id' | 'date' |
       window_too_short: false,
       days_covered: daysCovered,
       fresh_cohort_share_pct: r1(freshShare),
-      signal: freshShare < 40,
+      aging_top_spender: aging?.ad_name,
+      // A cadence that is not reaching the biggest spender is a finding worth
+      // reading even though the ask (and the deadline) belong to the fatigue
+      // chapter, so the chapter is not filed as clean while its own sentence
+      // names an aging top spender.
+      signal: freshShare < 40 || !!aging,
       series,
     },
     derivation: baseDerivation,
@@ -1197,12 +1261,13 @@ export function computeCostTrend(accRows90: PackAccountRow[], currency = ''): Pa
               : undefined;
 
   return {
+    // ONE basis in the prose: the thirds averages. The chart's own endpoints
+    // are a different comparison of the same series, and quoting both in one
+    // paragraph read as a contradiction (+6.8% and +23% about one CPM). They
+    // stay on the wire below for the chart label, which says what it is.
     summary:
       `Over the last ${series.length} weeks: ${read}.${quantified}${ctrCaveat} ` +
-      `(Account level, ${basisWord}. The chart's own first and last week move ` +
-      `${cpmChartDelta == null ? 'no readable amount' : `${cpmChartDelta >= 0 ? '+' : ''}${cpmChartDelta}%`} on CPM` +
-      `${ctrChartDelta == null ? '' : ` and ${ctrChartDelta >= 0 ? '+' : ''}${ctrChartDelta}% on link CTR`}, ` +
-      `which is the same series read end to end rather than averaged.)`,
+      `(Account level, ${basisWord}, and every percentage in this chapter is that same comparison.)`,
     ...(next_step ? { next_step } : {}),
     data: {
       series,
@@ -1669,8 +1734,8 @@ export function buildProvisionalInsights(
     out.push({
       headline: `Your top 3 ads carry ${conc.top3_share_pct}% of all spend`,
       detail: hero
-        ? `"${hero.ad_name}" alone takes ${hero.share_pct}% — if it fatigues, most of the account goes with it. Concentration this high is a key-man risk, not a strategy.`
-        : `Concentration this high is a key-man risk, not a strategy.`,
+        ? `"${hero.ad_name}" alone takes ${hero.share_pct}%. If it fatigues, most of the account goes with it: at this level one ad carries the account, which is not a strategy.`
+        : `At this level one ad carries the account, which is not a strategy.`,
       severity: 'risk',
       section: 'spend_concentration',
       provisional: true,

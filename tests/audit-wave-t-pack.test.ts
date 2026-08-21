@@ -280,7 +280,11 @@ describe('the auction chapter tells one story about its own chart (T3)', () => {
     const d = s.data as { delta_first_weeks: number; delta_last_weeks: number; weeks: number };
     expect(s.summary).toContain(`averaging the first ${d.delta_first_weeks} weeks against the last ${d.delta_last_weeks}`);
     expect(s.summary).toContain(`Over the last ${d.weeks} weeks`);
-    expect(s.summary).toContain("The chart's own first and last week");
+    // ONE basis in the sentences. The chart's own endpoints are a different
+    // comparison of the same series: they stay on the wire for the chart label
+    // and out of the prose, because side by side they read as a contradiction.
+    expect(s.summary).toContain('every percentage in this chapter is that same comparison');
+    expect(s.summary).not.toContain("The chart's own first and last week");
   });
 
   it('every CTR level it quotes is named as a weekly average, with the when', () => {
