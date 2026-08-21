@@ -1,5 +1,7 @@
 import type { PackAdRow } from './report-pack.js';
 import type { LibraryAd } from './library-triage.js';
+import type { ColdAdSpan } from './cold-source.js';
+import { shortDay, type AuditWindow } from './audit-window.js';
 
 /**
  * Cold-path creative analysis — the PURE half (cold-creative.ts is the impure
@@ -99,6 +101,93 @@ export function rankTopAds(rows30: PackAdRow[], cap = 10): TopAdsSummary {
     top12_spend_share_pct: total > 0 ? Math.round((top12Spend / total) * 100) : 0,
     video_spend_share_pct: total > 0 ? Math.round((videoSpend / total) * 100) : 0,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Earned before, not running now (the six-month read)
+// ---------------------------------------------------------------------------
+
+/**
+ * An ad that put real money through the auction earlier in the six-month read
+ * and has spent nothing inside the core window. Ranking only the core window
+ * made these invisible, and on an account that stopped spending they are the
+ * whole creative story: the ads that DID work, with the dates they worked on.
+ */
+export interface RetiredEarner {
+  ad_id: string;
+  ad_name: string;
+  spend: number;
+  leads: number;
+  purchases: number;
+  purchase_value: number;
+  /** Its own cost per lead over its whole run, or null when it made none. */
+  cpl: number | null;
+  /** Its own return over its whole run, or null when the account has no revenue. */
+  roas: number | null;
+  first_spend_date: string | null;
+  last_spend_date: string | null;
+  /** Days from its last spending day to the window's own last day. */
+  days_since_spend: number | null;
+  spend_days: number;
+}
+
+export interface RetiredEarnerRead {
+  /** Every ad that qualifies, not just the ones listed. */
+  count: number;
+  /** What all of them spent together. */
+  spend: number;
+  /** The listed ones, biggest spender first. */
+  ads: RetiredEarner[];
+}
+
+/** An ad under this share of the six-month spend is noise, not a finding. */
+const RETIRED_SHARE_FLOOR_PCT = 1;
+
+const dayGap = (from: string, to: string): number =>
+  Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000);
+
+export function readRetiredEarners(
+  ads: ColdAdSpan[],
+  opts: { anchorDate: string; cap?: number },
+): RetiredEarnerRead {
+  const cap = opts.cap ?? 6;
+  const sixMonthSpend = ads.reduce((sum, a) => sum + a.spend, 0);
+  const floor = (sixMonthSpend * RETIRED_SHARE_FLOOR_PCT) / 100;
+  const retired = ads
+    .filter((a) => a.spend_core <= 0 && a.spend > floor)
+    .sort((x, y) => y.spend - x.spend);
+  return {
+    count: retired.length,
+    spend: round2(retired.reduce((sum, a) => sum + a.spend, 0)),
+    ads: retired.slice(0, cap).map((a) => ({
+      ad_id: a.ad_id,
+      ad_name: a.ad_name ?? a.ad_id,
+      spend: round2(a.spend),
+      leads: a.leads,
+      purchases: a.purchases,
+      purchase_value: round2(a.purchase_value),
+      cpl: a.leads > 0 && a.spend > 0 ? round2(a.spend / a.leads) : null,
+      roas: a.purchase_value > 0 && a.spend > 0 ? round2(a.purchase_value / a.spend) : null,
+      first_spend_date: a.first_spend_date,
+      last_spend_date: a.last_spend_date,
+      days_since_spend: a.last_spend_date ? dayGap(a.last_spend_date, opts.anchorDate) : null,
+      spend_days: a.spend_days,
+    })),
+  };
+}
+
+/**
+ * The words the facts carry about this category, so the synthesis cannot
+ * present a retired ad as one that is live. Named in the report as what it is.
+ */
+export function retiredEarnerNote(read: RetiredEarnerRead, window: AuditWindow, currency: string): string {
+  const unit = currency ? ` ${currency}` : '';
+  const end = shortDay(window.anchorDate);
+  return (
+    `${read.count} ad${read.count === 1 ? '' : 's'} earned before and are not running now: they spent ` +
+    `${Math.round(read.spend)}${unit} together earlier in the six months we can read, and nothing in the 30 days ending ${end}. ` +
+    `Report them as past performance with the dates they ran, never as ads in market today.`
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -353,6 +442,10 @@ export function buildColdCreativeFacts(args: {
   unresolved: UnresolvedAd[];
   /** The fatigue chapter's rows, so a "cheap" winner cannot hide its decay. */
   fatigueRows?: FatigueDecayRow[];
+  /** Which days the core window covers. Absent on the warehouse path. */
+  window?: AuditWindow | null;
+  /** Ads that earned earlier in the six months and are not running now. */
+  retired?: RetiredEarnerRead | null;
 }): Record<string, unknown> {
   const readByAd = new Map(args.reads.map((r) => [r.ad_id, r]));
   const decayByName = decayIndex(args.fatigueRows ?? []);
@@ -362,7 +455,25 @@ export function buildColdCreativeFacts(args: {
   return {
     account: args.accountName,
     currency: args.currency,
-    window: 'last 30 days',
+    window: args.window?.anchored
+      ? `the 30 days ending ${shortDay(args.window.anchorDate)}, the account's last active month`
+      : 'last 30 days',
+    ...(args.window?.anchored
+      ? {
+          account_not_spending_since: args.window.lastSpendDate,
+          window_note: `This account last spent on ${shortDay(args.window.anchorDate)}. Every figure about the top ads reads the 30 days ending there.`,
+        }
+      : {}),
+    ...(args.retired && args.retired.count > 0
+      ? {
+          earned_before_not_running_now: {
+            note: args.window ? retiredEarnerNote(args.retired, args.window, args.currency) : undefined,
+            ads_count: args.retired.count,
+            total_spend: Math.round(args.retired.spend),
+            ads: args.retired.ads,
+          },
+        }
+      : {}),
     kpi: leadGen ? 'cost per lead (this account records leads, not purchases)' : 'Meta ROAS',
     // How many creatives were actually WATCHED, so a claim about the creative
     // can be scoped to them instead of to "every ad" (live report error).

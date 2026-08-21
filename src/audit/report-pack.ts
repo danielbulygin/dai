@@ -185,7 +185,7 @@ export function computeConcentration(rows30: PackAdRow[]): PackSection {
     },
     warnings: warnings.length ? warnings : undefined,
     derivation:
-      `Summed each ad's spend over the last 30 days of delivery data (${ads.length} ads spent anything), ` +
+      `Summed each ad's spend across the last 30 days (${ads.length} ads spent anything), ` +
       `ranked them, and took the top-1/3/10 share of the total. The bands come from what we see across accounts: ` +
       `top-3 under 40% = healthy spread, 40–60% = elevated, over 60% = key-man risk.`,
   };

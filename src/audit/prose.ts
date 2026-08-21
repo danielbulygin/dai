@@ -72,22 +72,40 @@ const isPlainObject = (value: unknown): value is Record<string, unknown> => {
 
 const DEEP_DEPTH_CAP = 12;
 
-function walk(value: unknown, keyName: string | undefined, depth: number): unknown {
+function walk(
+  value: unknown,
+  keyName: string | undefined,
+  depth: number,
+  rewrite: (text: string) => string,
+): unknown {
   if (depth > DEEP_DEPTH_CAP) return value;
   if (typeof value === 'string') {
     if (keyName && IDENTIFIER_KEYS.has(keyName)) return value;
     if (isUrlish(value)) return value;
-    return dedash(value);
+    return rewrite(value);
   }
   // An array's items inherit their parent key, so `gaps: string[]` is prose and
   // an array under an identifier key stays untouched.
-  if (Array.isArray(value)) return value.map((item) => walk(item, keyName, depth + 1));
+  if (Array.isArray(value)) return value.map((item) => walk(item, keyName, depth + 1, rewrite));
   if (isPlainObject(value)) {
     const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value)) out[k] = walk(v, k, depth + 1);
+    for (const [k, v] of Object.entries(value)) out[k] = walk(v, k, depth + 1, rewrite);
     return out;
   }
   return value;
+}
+
+/**
+ * Apply ONE string rewrite to every prose string at any depth, on the same
+ * terms dedashDeep uses: identifiers and URLs untouched, non-mutating, and a
+ * throw costs the rewrite rather than the section.
+ */
+export function mapDeepStrings<T>(value: T, rewrite: (text: string) => string): T {
+  try {
+    return walk(value, undefined, 0, rewrite) as T;
+  } catch {
+    return value;
+  }
 }
 
 /**
@@ -100,12 +118,7 @@ function walk(value: unknown, keyName: string | undefined, depth: number): unkno
  * data would leave a field asserting half a thing.
  */
 export function dedashDeep<T>(value: T): T {
-  try {
-    return walk(value, undefined, 0) as T;
-  } catch {
-    // A scrub may never cost us a section.
-    return value;
-  }
+  return mapDeepStrings(value, dedash);
 }
 
 /** Which banned phrases the text still contains (labels, in the listed order). */

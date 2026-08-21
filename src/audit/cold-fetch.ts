@@ -1,5 +1,6 @@
 import { logger } from '../utils/logger.js';
 import type { RawAdDay } from './cold-source.js';
+import { SIX_MONTH_DAYS } from './audit-window.js';
 
 /**
  * Cold-path Graph fetcher — the IMPURE half of the cold audit (cold-source.ts
@@ -10,7 +11,7 @@ import type { RawAdDay } from './cold-source.js';
  * Design notes:
  * - The synchronous insights API rejects long ranges at ad level on big
  *   accounts (the warehouse uses async report jobs for backfills). Strangers
- *   are typically small, but we still CHUNK the 180d window into 30d slices —
+ *   are typically small, but we still CHUNK the six-month window into ≤31-day slices,
  *   a failed slice degrades that slice only (daysCovered/caveat stay honest),
  *   it never kills the audit.
  * - Row cap mirrors the synced pack's honesty rule: if we truncate, we SAY so
@@ -56,8 +57,8 @@ export interface ColdPullResult {
 }
 
 export interface ColdFetchOptions {
-  days?: number; // default 180 (cohort coverage)
-  sliceDays?: number; // default 30
+  days?: number; // default SIX_MONTH_DAYS (cohort + creative-inventory coverage)
+  sliceDays?: number; // default 31
   maxRows?: number; // default 150_000
   asOf?: string; // YYYY-MM-DD, default today (UTC) — explicit for tests
 }
@@ -90,8 +91,8 @@ export async function fetchColdAdDays(
   adAccountId: string,
   opts: ColdFetchOptions = {},
 ): Promise<ColdPullResult> {
-  const days = opts.days ?? 180;
-  const sliceDays = opts.sliceDays ?? 30;
+  const days = opts.days ?? SIX_MONTH_DAYS;
+  const sliceDays = opts.sliceDays ?? 31;
   const maxRows = opts.maxRows ?? 150_000;
   const asOf = opts.asOf ?? new Date().toISOString().slice(0, 10);
 

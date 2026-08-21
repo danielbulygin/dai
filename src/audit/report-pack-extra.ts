@@ -421,8 +421,8 @@ export function computeLearningLimited(
       (inactiveSpenders > 0
         ? ` — ${inactiveSpenders} ad set${inactiveSpenders === 1 ? '' : 's'} that spent but ${inactiveSpenders === 1 ? 'is' : 'are'} no longer active ${inactiveSpenders === 1 ? 'is' : 'are'} judged in the optimization report, not here`
         : '') +
-      `. Per ad set: its optimization-type events (purchases, or leads on lead-gen accounts) from the last 30 days of ` +
-      `ad-level delivery, averaged to a weekly rate and compared against Meta's documented ~50-conversions-per-week ` +
+      `. Per ad set: its optimization-type events (purchases, or leads on lead-gen accounts) over the last 30 days, ` +
+      `read from ad-level delivery and averaged to a weekly rate and compared against Meta's documented ~50-conversions-per-week ` +
       `learning-phase exit bar. The table shows the top 15 by spend; the counts cover all assessed ad sets. ` +
       `The event count is our closest proxy for the set's true optimization event — treat borderline rows as directional.`,
   };
@@ -885,7 +885,7 @@ export function computeLandingPages(rows: LandingAdRow[], checks: DeadUrlCheck[]
     },
     warnings: warnings.length ? warnings : undefined,
     derivation:
-      `Spend per destination path from the last 30 days of ad-level delivery (${pct(covered, total)}% of spend has a mapped ` +
+      `Spend per destination path over the last 30 days, read from ad-level delivery (${pct(covered, total)}% of spend has a mapped ` +
       `destination). The dead-check does NOT trust stored URLs (they go stale on dynamic creatives — proven 2026-07-01): EVERY ` +
       `currently-delivering ad with spend has its CURRENT destination resolved live from its Meta creative at audit time, then each ` +
       `unique URL is fetched and read (soft-404 aware — an HTTP-200 "not found" page counts as dead). Rate-limited or blocked ` +

@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { env } from '../env.js';
 import { logger } from '../utils/logger.js';
 import { buildColdRows, type RawAdDay } from './cold-source.js';
+import { SIX_MONTH_DAYS } from './audit-window.js';
 import type { StoreMediaCandidate } from './cold-creative-source.js';
 import { runMagicAudit } from './magic-audit.js';
 
@@ -250,16 +251,21 @@ export function toRawAdDay(row: unknown): RawAdDay | null {
   };
 }
 
-/** 180 days of ad-level daily rows, one ≤31-day window per request — their
+/** Six months of ad-level daily rows, one ≤31-day window per request — their
  *  functions stop at 300 seconds and a window past the cap is REFUSED, so the
  *  slicing is the contract, not an optimization. A failed slice costs that
- *  slice (failedSlices), never the audit — fetchColdAdDays' own posture. */
+ *  slice (failedSlices), never the audit — fetchColdAdDays' own posture.
+ *
+ *  SIX_MONTH_DAYS in 31-day slices is still six requests, so the wider pull
+ *  costs the same round trips as the old 180/30 tiling did. It is ONE pull:
+ *  every window the audit reads (the anchored 30 and 90 days, the six-month
+ *  cohorts, the creative inventory) is a filter over these rows. */
 export async function fetchTinkersAdDays(
   auditId: string,
   opts: { days?: number; sliceDays?: number; maxRows?: number; asOf?: string } = {},
 ): Promise<{ adDays: RawAdDay[]; truncated: boolean; failedSlices: number }> {
-  const days = opts.days ?? 180;
-  const sliceDays = opts.sliceDays ?? 30;
+  const days = opts.days ?? SIX_MONTH_DAYS;
+  const sliceDays = opts.sliceDays ?? 31;
   const maxRows = opts.maxRows ?? 150_000;
   const asOf = opts.asOf ?? new Date().toISOString().slice(0, 10);
 
@@ -547,15 +553,17 @@ export async function runBridgedColdAudit(args: {
   }
 }
 
-/** Top spenders over the last 30 days — the ads whose media is worth asking
- *  Tinkers for. Mirrors rankTopAds' aggregation over the mapped raw rows. */
-export function topSpendingAdIds(adDays: RawAdDay[], asOf: string, cap = 12): string[] {
-  const cut30 = isoDaysAgo(asOf, 30);
+/** Top spenders over the audit's CORE window — the ads whose media is worth
+ *  asking Tinkers for. `since` is the window's first day, which on a dormant
+ *  account is not 30 days before today: asking for the media of the last
+ *  calendar month would ask for nothing. Mirrors rankTopAds' aggregation over
+ *  the mapped raw rows. */
+export function topSpendingAdIds(adDays: RawAdDay[], since: string, cap = 12): string[] {
   const spendByAd = new Map<string, number>();
   for (const r of adDays) {
     const adId = r.ad_id ? String(r.ad_id) : '';
     const date = (r.date_start ?? '').slice(0, 10);
-    if (!adId || !date || date < cut30) continue;
+    if (!adId || !date || date < since) continue;
     const spend = typeof r.spend === 'number' ? r.spend : parseFloat(String(r.spend ?? '0')) || 0;
     spendByAd.set(adId, (spendByAd.get(adId) ?? 0) + spend);
   }
@@ -618,6 +626,11 @@ async function runBridged(args: {
       auditId,
       rowCount: rows.rowCount,
       daysCovered: rows.daysCovered,
+      adsInSixMonths: rows.sixMonthAds.length,
+      lastSpendDate: rows.window.lastSpendDate,
+      windowEnd: rows.window.anchorDate,
+      windowAnchored: rows.window.anchored,
+      daysSinceLastSpend: rows.window.daysSinceLastSpend,
       truncated: pull.truncated,
       failedSlices: pull.failedSlices,
     },
@@ -628,7 +641,10 @@ async function runBridged(args: {
   }
 
   // The creative read's media: their store's signed URLs for the top spenders.
-  const storeMedia = await fetchTinkersStoreMedia(auditId, topSpendingAdIds(pull.adDays, asOf));
+  const storeMedia = await fetchTinkersStoreMedia(
+    auditId,
+    topSpendingAdIds(pull.adDays, rows.window.coreStart),
+  );
 
   // Reports are chained, never parallel: two in-flight posts can land out of
   // order, and a stale sections snapshot arriving last would undo real progress

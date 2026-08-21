@@ -59,7 +59,14 @@ vi.mock('../src/utils/logger.js', () => {
 // The audit machinery is stubbed down to the two things this file is about:
 // what the bridge reads and what leaves the wire for each patch.
 vi.mock('../src/audit/cold-source.js', () => ({
-  buildColdRows: () => ({ packRows90: [], packRows180: [], packAccRows90: [], accFull30: [], landing30: [], rowCount: 7, daysCovered: 3 }),
+  buildColdRows: () => ({
+    packRows90: [], packRows180: [], packAccRows90: [], accFull30: [], landing30: [],
+    rowCount: 7, daysCovered: 3, adNames: {}, sixMonthAds: [],
+    window: {
+      asOf: '2026-08-20', lastSpendDate: '2026-08-19', anchorDate: '2026-08-20', anchored: false,
+      daysSinceLastSpend: 1, coreStart: '2026-07-21', ninetyStart: '2026-05-22', sixMonthStart: '2026-02-18',
+    },
+  }),
 }));
 
 vi.mock('../src/audit/magic-audit.js', () => ({
@@ -393,14 +400,23 @@ describe('fetchTinkersLeadContext — what the owner told us, contained', () => 
 });
 
 describe('topSpendingAdIds', () => {
-  it('ranks by 30d spend and ignores older rows', () => {
+  it('ranks by spend inside the core window and ignores rows before it', () => {
     const rows = [
       { ad_id: 'old', date_start: '2026-05-01', spend: 999 },
       { ad_id: 'small', date_start: '2026-08-10', spend: 1 },
       { ad_id: 'big', date_start: '2026-08-10', spend: 50 },
       { ad_id: 'big', date_start: '2026-08-11', spend: 50 },
     ];
-    expect(topSpendingAdIds(rows, '2026-08-20', 2)).toEqual(['big', 'small']);
+    expect(topSpendingAdIds(rows, '2026-07-21', 2)).toEqual(['big', 'small']);
+  });
+
+  it('asks for the media of the ads in a DORMANT account\'s own last month', () => {
+    const rows = [
+      { ad_id: 'ran-in-may', date_start: '2026-05-20', spend: 400 },
+      { ad_id: 'ran-in-february', date_start: '2026-02-20', spend: 900 },
+    ];
+    // The core window of an account whose last spending day was 2026-05-20.
+    expect(topSpendingAdIds(rows, '2026-04-20', 2)).toEqual(['ran-in-may']);
   });
 });
 

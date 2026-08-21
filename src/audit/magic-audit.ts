@@ -32,7 +32,11 @@ import { coldBreakeven, buildColdKnowledge, type ColdRows, type OwnerInterview }
 import { runColdCreativeAnalysis, type OwnLibraryScrape } from './cold-creative.js';
 import { annotateWinnerDecay, decayIndex, type FatigueDecayRow } from './cold-creative-source.js';
 import type { StoreMediaCandidate } from './cold-creative-source.js';
-import { scrubSectionProse, scrubInsightProse, dedashDeep, dedash } from './prose.js';
+import { scrubSectionProse, scrubInsightProse, dedashDeep, dedash, mapDeepStrings } from './prose.js';
+import {
+  anchoredWindowBrief, anchoredWindowNote, anchorWindowWords, resolveAuditWindow, shortDay,
+  type AuditWindow,
+} from './audit-window.js';
 import { createPageFetch, runSiteWalk, type WalkAd, type WalkDestination } from './site-walk.js';
 
 /**
@@ -393,9 +397,17 @@ export function lensBrief(lens: AccountLensRead): string {
   );
 }
 
-export function buildSynthSystem(clientKnowledge: string, dataCaveat: string | null, lens?: AccountLensRead | null): string {
+export function buildSynthSystem(
+  clientKnowledge: string,
+  dataCaveat: string | null,
+  lens?: AccountLensRead | null,
+  windowBrief?: string | null,
+): string {
   const parts = [SYNTH_SYSTEM, SYNTH_HONESTY_RULES];
   if (lens) parts.push(lensBrief(lens));
+  // Before the data-window caveat: which days these numbers cover decides
+  // whether a sentence about them is true at all.
+  if (windowBrief) parts.push(windowBrief);
   if (dataCaveat) {
     // The caveat used to ride EVERY section prompt with "state this in the
     // section", so the live report repeated "17 of 30 days carry data" in all
@@ -426,16 +438,20 @@ export function buildSynthSystem(clientKnowledge: string, dataCaveat: string | n
 export function summarizeDataWindow(
   dates: Array<string | null | undefined>,
   windowDays = 30,
+  windowEnd?: string | null,
 ): { daysWithData: number; caveat: string | null; windowLabel: string } {
   const days = new Set<string>();
   for (const d of dates) if (d) days.add(String(d).slice(0, 10));
   const daysWithData = days.size;
+  // An anchored window is named by the day it ends on. "The last 30 days" would
+  // be a second, wrong claim about the same rows.
+  const windowNoun = windowEnd ? `the ${windowDays} days ending ${shortDay(windowEnd)}` : `the last ${windowDays} days`;
   const caveat =
     daysWithData < Math.ceil(windowDays * 0.8)
-      ? `only ${daysWithData} of the last ${windowDays} days have ad-level data rows — every "${windowDays}d" aggregate is really a ${daysWithData}-day read; qualify trends and averages accordingly.`
+      ? `only ${daysWithData} of ${windowNoun} have ad-level data rows — every "${windowDays}d" aggregate is really a ${daysWithData}-day read; qualify trends and averages accordingly.`
       : null;
   // The one place the reader sees it: the recognition strip at the top of the page.
-  const windowLabel = `${daysWithData} of the last ${windowDays} days carry data`;
+  const windowLabel = `${daysWithData} of ${windowNoun} carry data`;
   return { daysWithData, caveat, windowLabel };
 }
 
@@ -479,6 +495,13 @@ async function pageAll<T>(
 
 const daysAgoISO = (days: number): string => {
   const d = new Date();
+  d.setUTCDate(d.getUTCDate() - days);
+  return d.toISOString().slice(0, 10);
+};
+
+/** Days before a GIVEN day — the window's own end, not the clock's. */
+const shiftISO = (from: string, days: number): string => {
+  const d = new Date(`${from}T00:00:00Z`);
   d.setUTCDate(d.getUTCDate() - days);
   return d.toISOString().slice(0, 10);
 };
@@ -1831,13 +1854,30 @@ async function quickRecognition(clientId: string, currency: string): Promise<Rec
   }
 }
 
-/** Cold-path recognition — same shape as quickRecognition, from the pre-pulled rows. */
+/**
+ * Cold-path recognition — same shape as quickRecognition, from the pre-pulled
+ * rows, plus the window this report was read over. The window fields are the
+ * page's only chance to say "these figures end on 20 Jul" before the reader
+ * starts believing they are about this week.
+ */
 function coldRecognition(cold: ColdInjection, currency: string): RecognitionRead | null {
   const rows = cold.rows.packAccRows90;
   if (rows.length === 0) return null;
   const spend = rows.reduce((s, r) => s + num(r.spend), 0);
+  const w = cold.rows.window;
+  const note = anchoredWindowNote(w);
   return {
-    recognition: { window_days: 90, days_covered: rows.length, spend_90d: Math.round(spend), currency },
+    recognition: {
+      window_days: 90,
+      days_covered: rows.length,
+      spend_90d: Math.round(spend),
+      currency,
+      last_spend_date: w.lastSpendDate,
+      window_start: w.coreStart,
+      window_end: w.anchorDate,
+      window_anchored: w.anchored,
+      ...(note ? { window_note: note } : {}),
+    },
     totals30: aggregateDaily(cold.rows.accFull30 as unknown as Array<Record<string, unknown>>),
   };
 }
@@ -2194,6 +2234,22 @@ export async function runMagicAudit(
   // knowledge bundle, not this param.
   const { grossMarginPct, breakevenRoas } = coldBreakeven(cold?.grossMarginPct);
 
+  /**
+   * THE WINDOW. On the cold and bridged paths it comes off the pull itself, so
+   * a dormant account's 30-day verdicts read the 30 days it actually ran (see
+   * audit-window.ts). The warehouse path stays on the calendar: its 30-day
+   * account rows are fetched by a 30-day query, so anchoring only the ad-level
+   * half would leave the funnel and the concentration read on different days.
+   */
+  const auditWindow: AuditWindow =
+    cold?.rows.window ?? resolveAuditWindow({ asOf: new Date().toISOString().slice(0, 10), lastSpendDate: null });
+  /** The core window's first day, in the form every row filter takes. */
+  const coreCutISO = auditWindow.coreStart;
+  const windowBrief = anchoredWindowBrief(auditWindow);
+  /** The one rewrite that keeps a finished sentence honest about its window. */
+  const anchorWords = <T,>(value: T): T =>
+    auditWindow.anchored ? mapDeepStrings(value, (text) => anchorWindowWords(text, auditWindow)) : value;
+
   // Phase B (context layer): assemble this client's knowledge bundle ONCE
   // (targets/KPI config + client-scoped learnings + the intelligence file) and
   // the days-with-data preflight; every synthesis call sees both via the
@@ -2232,7 +2288,7 @@ export async function runMagicAudit(
             (q) => q.eq('client_id', client.id).gte('date', daysAgoISO(30)),
           )
         ).map((r) => r.date);
-    const win = summarizeDataWindow(dates);
+    const win = summarizeDataWindow(dates, 30, auditWindow.anchored ? auditWindow.anchorDate : null);
     daysWithData = win.daysWithData;
     dataCaveat = win.caveat;
     dataWindowLabel = win.windowLabel;
@@ -2259,9 +2315,19 @@ export async function runMagicAudit(
 
   // `let` — the pack pulls below can append a truncation caveat, after which
   // the synth system is rebuilt (runners read it at call time via closure).
-  let synthSystem = buildSynthSystem(clientKnowledge, dataCaveat, lensRead);
+  let synthSystem = buildSynthSystem(clientKnowledge, dataCaveat, lensRead, windowBrief);
   logger.info(
-    { code, knowledgeChars: clientKnowledge.length, daysWithData, thinWindow: !!dataCaveat, lens: lensRead?.lens ?? null },
+    {
+      code,
+      knowledgeChars: clientKnowledge.length,
+      daysWithData,
+      thinWindow: !!dataCaveat,
+      lens: lensRead?.lens ?? null,
+      lastSpendDate: auditWindow.lastSpendDate,
+      windowEnd: auditWindow.anchorDate,
+      windowAnchored: auditWindow.anchored,
+      daysSinceLastSpend: auditWindow.daysSinceLastSpend,
+    },
     'audit client context assembled',
   );
 
@@ -2333,7 +2399,7 @@ export async function runMagicAudit(
       // The deep pass catches the strings the model writes into nested fields
       // (biggest_leak.read, winners[].why, gaps[], key_stat): the rendered page
       // is grepped for em-dashes, so a clean summary is not enough.
-      if (first.banned.length === 0) return dedashDeep(first.section);
+      if (first.banned.length === 0) return anchorWords(dedashDeep(first.section));
       logger.warn({ section: section.key, banned: first.banned }, 'audit prose carries filler — one rewrite retry');
       let candidate = first.section;
       if (!meter.exhausted()) {
@@ -2365,7 +2431,7 @@ export async function runMagicAudit(
       if (second.banned.length > 0) {
         logger.warn({ section: section.key, banned: second.banned }, 'audit prose filler stripped after the rewrite retry');
       }
-      return dedashDeep(second.section);
+      return anchorWords(dedashDeep(second.section));
     } catch (err) {
       logger.warn({ err, section: section.key }, 'prose scrub failed (section written unchanged)');
       return section;
@@ -2384,7 +2450,7 @@ export async function runMagicAudit(
     // The work log is customer-facing text like any section string, so it goes
     // through the same dash gate. A literal we own is fixed at the source; this
     // catches the interpolated ones and anything a future line brings with it.
-    workLog.push({ at: new Date().toISOString(), line: dedash(line) });
+    workLog.push({ at: new Date().toISOString(), line: anchorWords(dedash(line)) });
     await updateRow({ work_log: workLog });
   };
 
@@ -2449,25 +2515,28 @@ export async function runMagicAudit(
       dataCaveat = [dataCaveat, 'the ad-level pull hit its row cap — 90d aggregates may be incomplete for this very large account; say so when citing them.']
         .filter(Boolean)
         .join(' ');
-      synthSystem = buildSynthSystem(clientKnowledge, dataCaveat, lensRead);
+      synthSystem = buildSynthSystem(clientKnowledge, dataCaveat, lensRead, windowBrief);
       logger.error({ code, rows90: packRows90.length, rows180: packRows180.length }, 'report-pack pull hit row cap — aggregates incomplete');
     }
   } catch (err) {
     logger.warn({ err, code }, 'report-pack shared pulls failed (fast sections degrade)');
   }
-  const rows30 = packRows90.filter((r) => r.date >= daysAgoISO(30));
+  const rows30 = packRows90.filter((r) => r.date >= coreCutISO && r.date <= auditWindow.anchorDate);
   const accountTotals30 = accFull30.length > 0 ? aggregateDaily(accFull30) : null;
 
   // The recognition strip gets its ads count the moment we know it (seconds in).
+  // What the whole pull covers, not just the core window: the six-month read is
+  // where an ad that earned earlier and stopped still exists.
+  const adsReadAll = new Set(packRows180.map((r) => r.ad_id)).size || new Set(packRows90.map((r) => r.ad_id)).size;
+  const daysReadAll = new Set(packRows180.map((r) => r.date)).size || new Set(packRows90.map((r) => r.date)).size;
   {
     const adsCount = new Set(packRows90.map((r) => r.ad_id)).size;
-    const daysCount = new Set(packRows90.map((r) => r.date)).size;
     if (recognition && adsCount > 0) {
       await updateRow({ recognition: { ...recognition, ads_count: adsCount } });
     }
     await logWork(
-      adsCount > 0
-        ? `Read ${adsCount} ads × ${daysCount} days of ad-level delivery history`
+      adsReadAll > 0
+        ? `Read ${adsReadAll} ads × ${daysReadAll} days of ad-level delivery history`
         : `Read the account's delivery history`,
     );
   }
@@ -2716,11 +2785,11 @@ export async function runMagicAudit(
       }, client.currency);
     },
     learning_limited: async () => {
-      // Weekly optimization-event rate per ad set from the last 28 days.
-      const cut = daysAgoISO(28);
+      // Weekly optimization-event rate per ad set over the window's last 28 days.
+      const cut = shiftISO(auditWindow.anchorDate, 28);
       const weekly = new Map<string, number>();
       for (const r of packRows90) {
-        if (!r.adset_id || r.date < cut) continue;
+        if (!r.adset_id || r.date < cut || r.date > auditWindow.anchorDate) continue;
         const events = auditKpiMode === 'roas' ? r.purchases || 0 : r.purchases || r.leads || 0;
         weekly.set(String(r.adset_id), (weekly.get(String(r.adset_id)) ?? 0) + events / 4);
       }
@@ -2969,7 +3038,7 @@ export async function runMagicAudit(
 
       // The scorecard's position and next-step lines are read by the customer
       // like any section string, and they were bypassing the dash gate.
-      if (scorecard.length) await updateRow({ scorecard: dedashDeep(scorecard) });
+      if (scorecard.length) await updateRow({ scorecard: anchorWords(dedashDeep(scorecard)) });
       savedScorecard = scorecard; // later sections (whats_working) read it
       logger.info({ code, dimensions: scorecard.map((e) => `${e.key}:${e.band}`) }, 'scorecard computed');
 
@@ -2981,7 +3050,9 @@ export async function runMagicAudit(
         sections['creative_fatigue']?.data as { ads?: FatigueAd[] } | undefined,
         sections['spend_concentration']?.data as Record<string, never> | undefined,
       );
-      if (provisional.length) await updateRow({ lead_insights: provisional.map((i) => scrubInsightProse(i)) });
+      if (provisional.length) {
+        await updateRow({ lead_insights: provisional.map((i) => anchorWords(scrubInsightProse(i))) });
+      }
     } catch (err) {
       logger.warn({ err, code }, 'scorecard computation failed (audit continues)');
     }
@@ -3093,6 +3164,8 @@ export async function runMagicAudit(
               accountName: client.name,
               currency: client.currency,
               rows30,
+              window: auditWindow,
+              sixMonthAds: cold.rows.sixMonthAds,
               getOwnLibrary,
               synthesize: <T,>(label: string, user: string) => synthesizeJson<T>(meter, label, synthSystem, user),
             }),
@@ -3208,7 +3281,7 @@ export async function runMagicAudit(
         : null,
     };
     const insights = await rankLeadInsights(meter, client, sections, synthSystem, guardrails);
-    if (insights) await updateRow({ lead_insights: insights.map((i) => scrubInsightProse(i)) });
+    if (insights) await updateRow({ lead_insights: insights.map((i) => anchorWords(scrubInsightProse(i))) });
   } catch (err) {
     logger.warn({ err }, 'lead-insight ranking failed (report still valid)');
   }

@@ -4,10 +4,12 @@ import type { PackAdRow } from './report-pack.js';
 import type { LibraryAd } from './library-triage.js';
 import {
   rankTopAds, extractLibraryMedia, matchLibraryMedia, pickMedia,
-  buildColdCreativeFacts, fallbackWinners,
+  buildColdCreativeFacts, fallbackWinners, readRetiredEarners,
   type GraphCreativeLite, type CreativeRead, type UnresolvedAd, type ResolvedMedia, type StoreMediaCandidate,
-  annotateWinnerDecay, decayIndex, type FatigueDecayRow,
+  annotateWinnerDecay, decayIndex, type FatigueDecayRow, type RetiredEarnerRead,
 } from './cold-creative-source.js';
+import type { ColdAdSpan } from './cold-source.js';
+import { shortDay, type AuditWindow } from './audit-window.js';
 
 /**
  * Cold-path creative analysis — the IMPURE half (cold-creative-source.ts holds
@@ -342,8 +344,13 @@ export interface ColdCreativeArgs {
   accessToken: string | null;
   accountName: string;
   currency: string;
-  /** 30d ad-level rows (cold pack rows filtered upstream). */
+  /** Core-window ad-level rows (cold pack rows filtered upstream). */
   rows30: PackAdRow[];
+  /** Which days that core window covers, and whether it is anchored. */
+  window: AuditWindow;
+  /** Per-ad totals over the whole six-month read — the inventory the winners
+   *  are ranked out of, and the only place a retired earner still exists. */
+  sixMonthAds?: ColdAdSpan[];
   /** Memoized own-Ads-Library scrape (shared with competitor_teardown). */
   getOwnLibrary: () => Promise<OwnLibraryScrape>;
   /** The orchestrator's Opus synthesizeJson, bound to meter + synth system. */
@@ -379,8 +386,19 @@ const withTimeout = async <T>(p: Promise<T>, ms: number, what: string): Promise<
  */
 export async function runColdCreativeAnalysis(args: ColdCreativeArgs): Promise<Partial<AuditSection>> {
   const summary = rankTopAds(args.rows30, MAX_CREATIVES);
+  // The inventory read covers the whole six months. An ad that earned earlier
+  // and stopped is reported as exactly that, rather than dropping out of the
+  // report because it did not spend in the core window.
+  const retired: RetiredEarnerRead | null = args.sixMonthAds?.length
+    ? readRetiredEarners(args.sixMonthAds, { anchorDate: args.window.anchorDate })
+    : null;
   if (summary.ads.length === 0) {
-    return { status: 'error', error: 'no ads with spend in the last 30 days' };
+    return {
+      status: 'error',
+      error: args.window.anchored
+        ? `no ads with spend in the 30 days ending ${shortDay(args.window.anchorDate)}`
+        : 'no ads with spend in the last 30 days',
+    };
   }
   const sectionWarnings: string[] = [];
 
@@ -527,6 +545,8 @@ export async function runColdCreativeAnalysis(args: ColdCreativeArgs): Promise<P
     reads,
     unresolved,
     fatigueRows: args.fatigueRows,
+    window: args.window,
+    retired,
   });
   const decayByName = decayIndex(args.fatigueRows ?? []);
   const synth = await args.synthesize<CreativeSynthesis>(
@@ -541,6 +561,10 @@ export async function runColdCreativeAnalysis(args: ColdCreativeArgs): Promise<P
       `things and the last report treated them as one.\n` +
       `A winner whose cost_per_lead_decay_pct is 25 or more is not simply cheap: state its cost_per_lead_first_half and its ` +
       `cost_per_lead_last_14 in the same sentence.\n` +
+      `An "earned_before_not_running_now" block, when present, holds ads that spent real money EARLIER in the six months ` +
+      `and nothing in the window the top_ads cover. Give them their own short paragraph in the summary or a gap line: name ` +
+      `what they spent and the dates they ran, and never write about them as ads in market today. When top_ads themselves ` +
+      `stopped spending (see window_note), say so plainly rather than writing about the account in the present tense.\n` +
       `SCOPE: every claim about creative, copy, hooks, casting or format covers ONLY the ads in top_ads, and a claim ` +
       `about what was WATCHED covers only the creatives_watched count. Say "the ${'${'}facts.creatives_watched${'}'} creatives we watched" or ` +
       `"the top ${'${'}facts.top_ads_in_facts${'}'} ads by spend", never "every ad" or "all your creative". Quote no field names in a sentence.\n` +
@@ -554,6 +578,17 @@ export async function runColdCreativeAnalysis(args: ColdCreativeArgs): Promise<P
 
   const baseData = {
     total_spend_30d: Math.round(summary.total_spend),
+    window_end: args.window.anchorDate,
+    window_anchored: args.window.anchored,
+    ...(retired && retired.count > 0
+      ? {
+          earned_before: {
+            ads_count: retired.count,
+            total_spend: Math.round(retired.spend),
+            ads: retired.ads,
+          },
+        }
+      : {}),
     ads_with_spend: summary.ads_with_spend,
     top12_spend_share_pct: summary.top12_spend_share_pct,
     video_spend_share_pct: summary.video_spend_share_pct,
@@ -570,7 +605,10 @@ export async function runColdCreativeAnalysis(args: ColdCreativeArgs): Promise<P
       status: 'complete',
       summary:
         `${summary.ads_with_spend} ads spent in the last 30 days; top 12 carry ${summary.top12_spend_share_pct}% of spend. ` +
-        `Watched ${reads.length} of the top ${summary.ads.length} creatives (cost cap reached before narrative synthesis).`,
+        `Watched ${reads.length} of the top ${summary.ads.length} creatives (cost cap reached before narrative synthesis).` +
+        (retired && retired.count > 0
+          ? ` A further ${retired.count} ads earned earlier in the six months we can read and are not running now.`
+          : ''),
       data: { ...baseData, winners: annotateWinnerDecay(fallbackWinners(summary, reads, 4, args.currency), decayByName, args.currency), angle_patterns: [], gaps: [] },
       warnings: sectionWarnings,
     };

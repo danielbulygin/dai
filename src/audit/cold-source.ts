@@ -1,4 +1,5 @@
 import type { PackAdRow, PackAccountRow } from './report-pack.js';
+import { type AuditWindow, lastSpendDateOf, resolveAuditWindow } from './audit-window.js';
 
 /**
  * Cold-path data source — turns a live Meta Graph `level=ad, time_increment=1`
@@ -91,8 +92,31 @@ export interface ColdAccountFullRow {
   landing_page_views: number;
 }
 
+/**
+ * One ad's whole six-month story: what it spent, what it returned, and the
+ * first and last day it spent anything. `spend_core` is the slice of that
+ * inside the audit's core window, so a reader can tell an ad that is running
+ * now from one that earned earlier and stopped.
+ */
+export interface ColdAdSpan {
+  ad_id: string;
+  ad_name: string | null;
+  spend: number;
+  /** Spend inside the core (30-day) window. Zero means it is not running now. */
+  spend_core: number;
+  impressions: number;
+  purchases: number;
+  purchase_value: number;
+  leads: number;
+  first_spend_date: string | null;
+  last_spend_date: string | null;
+  /** Distinct days it spent anything across the six months. */
+  spend_days: number;
+}
+
 export interface ColdRows {
   packRows90: PackAdRow[];
+  /** The six-month read (ending today, on the calendar) — cohorts and texture. */
   packRows180: Array<Pick<PackAdRow, 'ad_id' | 'date' | 'spend'>>;
   packAccRows90: PackAccountRow[];
   accFull30: ColdAccountFullRow[];
@@ -101,14 +125,24 @@ export interface ColdRows {
   rowCount: number;
   /** Distinct days covered in the window (drives the thin-window caveat). */
   daysCovered: number;
+  /** Which days every window in this report covers, and why. */
+  window: AuditWindow;
+  /** ad_id → name across the WHOLE six-month pull, so an ad that stopped
+   *  spending months ago still has a name to be reported under. */
+  adNames: Record<string, string>;
+  /** Per-ad six-month totals — the creative inventory, ranked by the callers. */
+  sixMonthAds: ColdAdSpan[];
 }
 
 export interface BuildColdRowsInput {
   adDays: RawAdDay[];
   /** ad_id → resolved current landing destination (from live creative reads). */
   destinations?: Record<string, { market: string | null; path: string | null }>;
-  /** Window anchor (YYYY-MM-DD). Defaults to today (UTC). Explicit for tests. */
+  /** The calendar day of the run (YYYY-MM-DD). Defaults to today (UTC). */
   asOf?: string;
+  /** How stale the last spending day may be before the 30/90-day windows
+   *  anchor to it. Explicit for tests; the default lives in audit-window. */
+  graceDays?: number;
 }
 
 const numOf = (v: unknown): number => {
@@ -125,12 +159,6 @@ function actionVal(actions: RawAction[] | undefined, types: string[]): number {
   }
   return 0;
 }
-
-const cutISO = (asOf: string, days: number): string => {
-  const d = new Date(`${asOf}T00:00:00Z`);
-  d.setUTCDate(d.getUTCDate() - days);
-  return d.toISOString().slice(0, 10);
-};
 
 const round4 = (v: number): number => Math.round(v * 10_000) / 10_000;
 
@@ -188,15 +216,17 @@ function normalize(raw: RawAdDay): Norm | null {
 }
 
 /**
- * Build the cold-path row set from a Graph ad-level daily pull. Windows (30/90/
- * 180d) are computed off `asOf`; the caller should pull ≥180d for full cohort
- * coverage (sections degrade honestly on a shorter pull).
+ * Build the cold-path row set from a Graph ad-level daily pull. The caller
+ * should pull SIX_MONTH_DAYS of history; sections degrade honestly on less.
+ *
+ * The 30-day and 90-day windows END on the account's own last spending day
+ * (see audit-window.ts) so a dormant account gets read over the days it
+ * actually ran instead of over an empty recent month. An account that spent
+ * inside the grace window is windowed exactly as it always was. The six-month
+ * read stays on the calendar, because it exists to place creative in time.
  */
 export function buildColdRows(input: BuildColdRowsInput): ColdRows {
   const asOf = input.asOf ?? new Date().toISOString().slice(0, 10);
-  const cut30 = cutISO(asOf, 30);
-  const cut90 = cutISO(asOf, 90);
-  const cut180 = cutISO(asOf, 180);
   const dest = input.destinations ?? {};
 
   const norm: Norm[] = [];
@@ -205,8 +235,23 @@ export function buildColdRows(input: BuildColdRowsInput): ColdRows {
     if (n) norm.push(n);
   }
 
+  const window = resolveAuditWindow({
+    asOf,
+    lastSpendDate: lastSpendDateOf(norm),
+    graceDays: input.graceDays,
+  });
+  const { anchorDate } = window;
+  const cut30 = window.coreStart;
+  const cut90 = window.ninetyStart;
+  const cut180 = window.sixMonthStart;
+  // A window that ends at the anchor must also END there: an impressions-only
+  // row after the last spending day would otherwise sit inside a "30 days
+  // ending 20 Jul" read.
+  const inCore = (date: string): boolean => date >= cut30 && date <= anchorDate;
+  const inNinety = (date: string): boolean => date >= cut90 && date <= anchorDate;
+
   const packRows90: PackAdRow[] = norm
-    .filter((n) => n.date >= cut90)
+    .filter((n) => inNinety(n.date))
     .map((n) => ({
       ad_id: n.ad_id,
       ad_name: n.ad_name,
@@ -227,10 +272,43 @@ export function buildColdRows(input: BuildColdRowsInput): ColdRows {
     .filter((n) => n.date >= cut180)
     .map((n) => ({ ad_id: n.ad_id, date: n.date, spend: n.spend }));
 
+  // The whole six-month inventory, one row per ad. Cheap (ads, not ad-days)
+  // and it is the only place an ad that stopped spending before the core
+  // window still exists as something the report can name.
+  const spanByAd = new Map<string, ColdAdSpan>();
+  const spendDaysByAd = new Map<string, Set<string>>();
+  const adNames: Record<string, string> = {};
+  for (const n of norm) {
+    if (n.ad_name) adNames[n.ad_id] = n.ad_name;
+    if (n.date < cut180) continue;
+    const a = spanByAd.get(n.ad_id) ?? {
+      ad_id: n.ad_id, ad_name: n.ad_name, spend: 0, spend_core: 0, impressions: 0,
+      purchases: 0, purchase_value: 0, leads: 0,
+      first_spend_date: null, last_spend_date: null, spend_days: 0,
+    };
+    if (n.ad_name) a.ad_name = n.ad_name;
+    a.spend += n.spend;
+    if (inCore(n.date)) a.spend_core += n.spend;
+    a.impressions += n.impressions;
+    a.purchases += n.purchases;
+    a.purchase_value += n.purchase_value;
+    a.leads += n.leads;
+    if (n.spend > 0) {
+      if (a.first_spend_date === null || n.date < a.first_spend_date) a.first_spend_date = n.date;
+      if (a.last_spend_date === null || n.date > a.last_spend_date) a.last_spend_date = n.date;
+      const days = spendDaysByAd.get(n.ad_id) ?? new Set<string>();
+      days.add(n.date);
+      spendDaysByAd.set(n.ad_id, days);
+    }
+    spanByAd.set(n.ad_id, a);
+  }
+  for (const [adId, span] of spanByAd) span.spend_days = spendDaysByAd.get(adId)?.size ?? 0;
+  const sixMonthAds = [...spanByAd.values()].sort((a, b) => b.spend - a.spend);
+
   // Account-daily = ad-level aggregated per date.
   const accByDate = new Map<string, ColdAccountFullRow>();
   for (const n of norm) {
-    if (n.date < cut90) continue;
+    if (!inNinety(n.date)) continue;
     const a = accByDate.get(n.date) ?? {
       date: n.date, spend: 0, impressions: 0, clicks: 0, link_clicks: 0, content_views: 0,
       add_to_carts: 0, checkouts_initiated: 0, purchases: 0, purchase_value: 0, leads: 0,
@@ -265,12 +343,12 @@ export function buildColdRows(input: BuildColdRowsInput): ColdRows {
     leads: a.leads,
   }));
 
-  const accFull30 = accAll.filter((a) => a.date >= cut30);
+  const accFull30 = accAll.filter((a) => inCore(a.date));
 
   // landing30 = ad-level 30d aggregate + resolved destination.
   const landByAd = new Map<string, ColdLandingRow>();
   for (const n of norm) {
-    if (n.date < cut30) continue;
+    if (!inCore(n.date)) continue;
     const d = dest[n.ad_id];
     const a = landByAd.get(n.ad_id) ?? {
       ad_id: n.ad_id, spend: 0, purchases: 0, purchase_value: 0, leads: 0,
@@ -290,7 +368,10 @@ export function buildColdRows(input: BuildColdRowsInput): ColdRows {
     accFull30,
     landing30: [...landByAd.values()],
     rowCount: norm.length,
-    daysCovered: new Set(norm.filter((n) => n.date >= cut30).map((n) => n.date)).size,
+    daysCovered: new Set(norm.filter((n) => inCore(n.date)).map((n) => n.date)).size,
+    window,
+    adNames,
+    sixMonthAds,
   };
 }
 

@@ -37,14 +37,14 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('fetchColdAdDays', () => {
-  it('tiles 180d into 6 contiguous 30d slices (no gap, no overlap)', async () => {
+  it('tiles six months into 6 contiguous ≤31d slices (no gap, no overlap)', async () => {
     await fetchColdAdDays('tok', 'act_1', { asOf: ASOF });
     const ranges = calls
       .filter((u) => u.includes('/insights'))
       .map((u) => JSON.parse(decodeURIComponent(u.match(/time_range=([^&]+)/)![1]!)) as { since: string; until: string });
     expect(ranges).toHaveLength(6);
     expect(ranges[0]!.until).toBe(ASOF);
-    expect(ranges[5]!.since).toBe('2026-01-05'); // asOf - 179d
+    expect(ranges[5]!.since).toBe('2026-01-01'); // asOf - 183d, the six-month floor
     for (let i = 1; i < ranges.length; i++) {
       const prevSince = new Date(`${ranges[i - 1]!.since}T00:00:00Z`).getTime();
       const thisUntil = new Date(`${ranges[i]!.until}T00:00:00Z`).getTime();
