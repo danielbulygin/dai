@@ -13,6 +13,7 @@ import {
   computeConceptRoas, computeOptimizationEvents, buildProvisionalInsights, computeHookCorrection, kpiMode,
   mergeAdPreviews,
   type PackAdRow, type PackAccountRow, type AdsetConfigLite, type FatigueAd, type PlacementHookRow, type AdPreview,
+  type ScatterLens,
 } from './report-pack.js';
 import { buildScorecard, buildComparisonSection, type ScorecardInputs, type ScorecardEntry } from './scorecard.js';
 import {
@@ -22,7 +23,10 @@ import {
   type PlacementInsightRow, type DemoInsightRow, type GeoInsightRow, type TargetingSpecLite,
   type WeeklyReachRow, type LandingAdRow, type DeadUrlCheck, type ActivityEvent,
 } from './report-pack-extra.js';
-import { buildAccountModel, mergeAccountModel, type AccountModel, type AccountModelInputs } from './account-model.js';
+import {
+  buildAccountModel, mergeAccountModel, readAccountLens,
+  type AccountModel, type AccountModelInputs, type AccountLensRead,
+} from './account-model.js';
 import { coldBreakeven, buildColdKnowledge, type ColdRows } from './cold-source.js';
 import { runColdCreativeAnalysis, type OwnLibraryScrape } from './cold-creative.js';
 import type { StoreMediaCandidate } from './cold-creative-source.js';
@@ -47,13 +51,17 @@ import { scrubSectionProse, scrubInsightProse, dedashDeep } from './prose.js';
 export interface AuditSection {
   key: string;
   title: string;
-  status: 'pending' | 'running' | 'complete' | 'error' | 'planned';
+  /** `skipped` = we refuse to judge this one on this account (see skip_reason);
+   *  the page renders nothing for it, unlike an `error`, which is a failure. */
+  status: 'pending' | 'running' | 'complete' | 'error' | 'planned' | 'skipped';
   summary?: string;
   /** A labelled "Next step:" — standard element of every report (Francis's #1 theme). */
   next_step?: string;
   data?: unknown;
   warnings?: string[];
   error?: string;
+  /** One line: why this section refused to run on this account. */
+  skip_reason?: string;
   completed_at?: string;
 }
 
@@ -119,6 +127,28 @@ const COLD_SKIP_SECTIONS = ['dataset_health', 'account_structure', 'concept_roas
  *  metaTokenFor('') falls back to the AGENCY token, and probing a stranger's
  *  account with our own credential is the one call this path must never make. */
 const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Sections that need ONE conversion grammar before they can say anything: the
+ * scatter's whole vertical axis is either a return or a cost per result, and the
+ * concept read ranks angles by the same number. On an account that records BOTH
+ * leads and purchase revenue, or neither, they refuse instead of picking a
+ * grammar for the customer. Everything else (CPM trend, concentration, day of
+ * week, cohorts, saturation) reads identically in either grammar and keeps
+ * running: a skip is for a judgment we cannot make, never a chapter we can.
+ */
+export const LENS_DEPENDENT_SECTIONS = ['budget_scatter', 'concept_roas'];
+
+/** The one line a lens-dependent section carries when the lens cannot carry it. */
+export function lensSkipReason(lens: AccountLensRead['lens']): string | null {
+  if (lens === 'mixed') {
+    return 'This account records both leads and purchase revenue in the same window, so we cannot tell which of the two this section should judge. Tell us which one is the business and it runs.';
+  }
+  if (lens === 'unknown') {
+    return 'This account recorded no purchases and no leads in the window, so there is no cost per result and no return to rank ads by.';
+  }
+  return null;
+}
 
 const TOKENLESS_SKIP_SECTIONS = [
   'placement_breakdown', 'audience_breakdown', 'saturation', 'optimization_events',
@@ -299,8 +329,39 @@ const SYNTH_SYSTEM =
  * "below breakeven" without the client's real target is an overreach — every
  * synthesis now sees the same client context (progress doc §5 #3, #5, #6).
  */
-export function buildSynthSystem(clientKnowledge: string, dataCaveat: string | null): string {
+/**
+ * The lens, in the words the synthesis must keep. A lead-gen account has no
+ * ROAS, no revenue and no breakeven, and a model handed an e-com brief invents
+ * all three (the live report that apologised about a ROAS the account never
+ * had). So the grammar is stated as a rule, not as context.
+ */
+export function lensBrief(lens: AccountLensRead): string {
+  const head = `ACCOUNT LENS (the grammar this account is read in): ${lens.read_as} Evidence: ${lens.evidence}.`;
+  if (lens.lens === 'lead_gen') {
+    return (
+      `${head} Judge everything on cost per lead and lead volume. Do NOT write ROAS, revenue, breakeven, ` +
+      `purchases, carts or checkouts about this account: it records none of them, and a metric it does not ` +
+      `have is not a finding.`
+    );
+  }
+  if (lens.lens === 'ecommerce') {
+    return `${head} Judge on Meta ROAS and Meta CPA against the breakeven line you were given, and label every metric with its source.`;
+  }
+  if (lens.lens === 'mixed') {
+    return (
+      `${head} Both grammars are live here, so every number names which conversion it belongs to (a lead or a ` +
+      `purchase) in the same sentence. Never add the two together, and never present one as the account's result.`
+    );
+  }
+  return (
+    `${head} With no conversion recorded, cost per link click is the only cost you may cite. State plainly that ` +
+    `the conversion is either happening off platform or not being reported, and never imply a conversion rate.`
+  );
+}
+
+export function buildSynthSystem(clientKnowledge: string, dataCaveat: string | null, lens?: AccountLensRead | null): string {
   const parts = [SYNTH_SYSTEM];
+  if (lens) parts.push(lensBrief(lens));
   if (dataCaveat) {
     // The caveat used to ride EVERY section prompt with "state this in the
     // section", so the live report repeated "17 of 30 days carry data" in all
@@ -1503,26 +1564,58 @@ async function fetchAngleByAdId(clientId: string, adIds: Set<string>): Promise<M
   return angleByAd;
 }
 
+/** The columns the recognition strip AND the lens read need, in one query. */
+const RECOGNITION_COLS =
+  'date, spend, impressions, clicks, link_clicks, content_views, add_to_carts, checkouts_initiated, purchases, purchase_value, leads, complete_registrations, results';
+
+interface RecognitionRead {
+  recognition: Record<string, unknown>;
+  /** 30d account-level event totals, from the same rows — the lens input. */
+  totals30: Record<string, number>;
+}
+
+/** aggregateDaily's loose totals → the typed shape the classifier takes. */
+function lensTotalsOf(t: Record<string, number>): AccountModelInputs['totals30'] {
+  return {
+    spend: t.spend ?? 0,
+    impressions: t.impressions ?? 0,
+    purchases: t.purchases ?? 0,
+    purchase_value: t.purchase_value ?? 0,
+    leads: t.leads ?? 0,
+    complete_registrations: t.complete_registrations ?? 0,
+    add_to_carts: t.add_to_carts ?? 0,
+    checkouts_initiated: t.checkouts_initiated ?? 0,
+    content_views: t.content_views ?? 0,
+  };
+}
+
 /** Instant recognition strip — one cheap account_daily query, lands with the row insert. */
-async function quickRecognition(clientId: string, currency: string): Promise<Record<string, unknown> | null> {
+async function quickRecognition(clientId: string, currency: string): Promise<RecognitionRead | null> {
   try {
-    const rows = await pageAll<{ date: string; spend: number }>(
-      'account_daily', 'date, spend', (q) => q.eq('client_id', clientId).gte('date', daysAgoISO(90)), 200,
+    const rows = await pageAll<Record<string, unknown>>(
+      'account_daily', RECOGNITION_COLS, (q) => q.eq('client_id', clientId).gte('date', daysAgoISO(90)), 200,
     );
     if (rows.length === 0) return null;
     const spend = rows.reduce((s, r) => s + num(r.spend), 0);
-    return { window_days: 90, days_covered: rows.length, spend_90d: Math.round(spend), currency };
+    const cut30 = daysAgoISO(30);
+    return {
+      recognition: { window_days: 90, days_covered: rows.length, spend_90d: Math.round(spend), currency },
+      totals30: aggregateDaily(rows.filter((r) => String(r.date) >= cut30)),
+    };
   } catch {
     return null;
   }
 }
 
 /** Cold-path recognition — same shape as quickRecognition, from the pre-pulled rows. */
-function coldRecognition(cold: ColdInjection, currency: string): Record<string, unknown> | null {
+function coldRecognition(cold: ColdInjection, currency: string): RecognitionRead | null {
   const rows = cold.rows.packAccRows90;
   if (rows.length === 0) return null;
   const spend = rows.reduce((s, r) => s + num(r.spend), 0);
-  return { window_days: 90, days_covered: rows.length, spend_90d: Math.round(spend), currency };
+  return {
+    recognition: { window_days: 90, days_covered: rows.length, spend_90d: Math.round(spend), currency },
+    totals30: aggregateDaily(cold.rows.accFull30 as unknown as Array<Record<string, unknown>>),
+  };
 }
 
 /** Upsert the Account Model — human_stated facts survive re-inference (merge rule). */
@@ -1754,24 +1847,46 @@ export async function runMagicAudit(
   } catch (err) {
     logger.warn({ err, code }, 'days-with-data preflight failed (audit continues)');
   }
+  // Recognition strip — seeded AT insert so the very first paint already says
+  // "that's MY account" (UX review §2.1: recognition is the first magic beat).
+  // Cold path derives it from the pre-pulled rows (no account_daily to read).
+  const recognitionRead = cold ? coldRecognition(cold, client.currency) : await quickRecognition(client.id, client.currency);
+  const recognition = recognitionRead?.recognition ?? null;
+  // THE LENS. One classification from the account's own 30d event mix, stated on
+  // the page (read_as) and enforced below on the sections that need a conversion
+  // grammar. A recognition read that FAILED leaves it null, which skips nothing:
+  // "we could not read the account" is not the same claim as "the account is
+  // ambiguous", and only the second one may cost the reader a section.
+  const lensRead = recognitionRead ? readAccountLens(lensTotalsOf(recognitionRead.totals30)) : null;
+  // The data window belongs to the page, once, next to the account it describes.
+  if (recognition && dataWindowLabel) recognition.data_window = dataWindowLabel;
+  if (recognition && lensRead) {
+    recognition.lens = lensRead.lens;
+    recognition.read_as = lensRead.read_as;
+  }
+
   // `let` — the pack pulls below can append a truncation caveat, after which
   // the synth system is rebuilt (runners read it at call time via closure).
-  let synthSystem = buildSynthSystem(clientKnowledge, dataCaveat);
+  let synthSystem = buildSynthSystem(clientKnowledge, dataCaveat, lensRead);
   logger.info(
-    { code, knowledgeChars: clientKnowledge.length, daysWithData, thinWindow: !!dataCaveat },
+    { code, knowledgeChars: clientKnowledge.length, daysWithData, thinWindow: !!dataCaveat, lens: lensRead?.lens ?? null },
     'audit client context assembled',
   );
 
   const token = randomBytes(16).toString('hex');
   const sections: Record<string, AuditSection> = {};
-  for (const s of SECTION_ORDER) sections[s.key] = { ...s, status: skip.has(s.key) ? 'planned' : s.status };
-
-  // Recognition strip — seeded AT insert so the very first paint already says
-  // "that's MY account" (UX review §2.1: recognition is the first magic beat).
-  // Cold path derives it from the pre-pulled rows (no account_daily to read).
-  const recognition = cold ? coldRecognition(cold, client.currency) : await quickRecognition(client.id, client.currency);
-  // The data window belongs to the page, once, next to the account it describes.
-  if (recognition && dataWindowLabel) recognition.data_window = dataWindowLabel;
+  // The lens refusals, decided once so they land with the row insert.
+  const lensSkips = new Map<string, string>();
+  {
+    const reason = lensRead ? lensSkipReason(lensRead.lens) : null;
+    if (reason) for (const k of LENS_DEPENDENT_SECTIONS) if (!skip.has(k)) lensSkips.set(k, reason);
+  }
+  for (const s of SECTION_ORDER) {
+    const skipReason = lensSkips.get(s.key);
+    sections[s.key] = skipReason
+      ? { ...s, status: 'skipped', skip_reason: skipReason }
+      : { ...s, status: skip.has(s.key) ? 'planned' : s.status };
+  }
 
   // Identity contract v2 (Dan ruling 2026-07-03): tenant_id (uuid) is the
   // canonical audit identity — clients.id for agency clients, auth users.id
@@ -1939,7 +2054,7 @@ export async function runMagicAudit(
       dataCaveat = [dataCaveat, 'the ad-level pull hit its row cap — 90d aggregates may be incomplete for this very large account; say so when citing them.']
         .filter(Boolean)
         .join(' ');
-      synthSystem = buildSynthSystem(clientKnowledge, dataCaveat);
+      synthSystem = buildSynthSystem(clientKnowledge, dataCaveat, lensRead);
       logger.error({ code, rows90: packRows90.length, rows180: packRows180.length }, 'report-pack pull hit row cap — aggregates incomplete');
     }
   } catch (err) {
@@ -1979,6 +2094,16 @@ export async function runMagicAudit(
     return angleByAdIdShared;
   };
   const auditKpiMode = kpiMode(rows30);
+  // The scatter's words: on a lead-gen account a dot is a cost per LEAD, and the
+  // line it is read against is the owner's own stated target when they gave one
+  // (never our estimate, never a borrowed 1.0x).
+  const scatterLens: ScatterLens = {
+    resultNoun: lensRead?.lens === 'lead_gen' ? 'lead' : undefined,
+    costTarget:
+      cold?.goalValue != null && typeof cold.goalMetric === 'string' && /^(cpl|cpa|cost_per_lead|cost_per_result)$/i.test(cold.goalMetric)
+        ? { metric: cold.goalMetric.toLowerCase(), value: cold.goalValue }
+        : null,
+  };
 
   // ONE own-page Ads Library scrape per audit, memoized: competitor_teardown
   // (own_footprint mode) and the cold creative_analysis media fallback both
@@ -2008,7 +2133,7 @@ export async function runMagicAudit(
     // the scatter never re-tallies money the fatigue chapter already counted.
     budget_scatter: async () => {
       const fatAds = (sections['creative_fatigue']?.data as { ads?: FatigueAd[] } | undefined)?.ads ?? [];
-      return computeBudgetScatter(rows30, fatAds, breakevenRoas, client.currency, grossMarginPct);
+      return computeBudgetScatter(rows30, fatAds, breakevenRoas, client.currency, grossMarginPct, scatterLens);
     },
     creative_cohorts: async () => {
       const s = computeCohorts(packRows180);
@@ -2397,7 +2522,7 @@ export async function runMagicAudit(
   // "still cooking" state covers it like any other late section.
   let coldCreativePromise: Promise<void> | null = null;
   for (const def of SECTION_ORDER) {
-    if (skip.has(def.key)) continue;
+    if (skip.has(def.key) || lensSkips.has(def.key)) continue;
     if (cold && def.key === 'creative_analysis') {
       await saveSection({ ...sections[def.key]!, status: 'running' });
       coldCreativePromise = (async () => {

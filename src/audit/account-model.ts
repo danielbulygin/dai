@@ -144,6 +144,87 @@ export function classifyBusinessModel(t: AccountModelInputs['totals30']): {
   };
 }
 
+/**
+ * The LENS the whole report is read through, plus the one line that STATES it
+ * on the page. Same classification as the Account Model's business-model fact
+ * (classifyBusinessModel), narrowed to the four cases the report's grammar
+ * actually branches on:
+ *  - ecommerce: purchases with revenue, so ROAS and a breakeven line mean
+ *    something;
+ *  - lead_gen: leads and no purchase revenue, so every judgment is a cost per
+ *    lead, and the words ROAS, revenue and breakeven do not belong on the page;
+ *  - mixed: both, in volume. We do not know which one is the business, so the
+ *    sections that need ONE conversion grammar refuse instead of picking;
+ *  - unknown: no conversion recorded at all.
+ *
+ * The lens is stated in the recognition strip because a reader who disagrees
+ * with it can then say so, and every downstream number is only as right as the
+ * lens is. Plain words, the account's own counts, no em-dashes.
+ */
+export type AccountLens = 'ecommerce' | 'lead_gen' | 'mixed' | 'unknown';
+
+export interface AccountLensRead {
+  lens: AccountLens;
+  /** One sentence for the page: the lens plus the counts behind it. */
+  read_as: string;
+  /** The classifier's own evidence line, for the log and the account model. */
+  evidence: string;
+  confidence: number;
+}
+
+const countWord = (n: number): string => (n > 0 ? n.toLocaleString('en-US') : 'zero');
+
+export function readAccountLens(t: AccountModelInputs['totals30']): AccountLensRead {
+  const bm = classifyBusinessModel(t);
+  const purchases = t.purchases ?? 0;
+  const leads = t.leads ?? 0;
+  const carry = { evidence: bm.evidence, confidence: bm.confidence };
+  const window = 'in the last 30 days';
+
+  if (bm.model === 'lead_gen') {
+    return {
+      lens: 'lead_gen',
+      read_as: `Read as: lead generation. Inferred from ${countWord(leads)} lead events and ${countWord(purchases)} purchases ${window}.`,
+      ...carry,
+    };
+  }
+  if (bm.model === 'ecommerce') {
+    return {
+      lens: 'ecommerce',
+      read_as:
+        `Read as: e-commerce. Inferred from ${countWord(purchases)} purchases with revenue and ` +
+        `${countWord(t.add_to_carts ?? 0)} add-to-cart events ${window}.`,
+      ...carry,
+    };
+  }
+  // The BFM shape (purchases with revenue, no cart or checkout events) still
+  // has purchase revenue, so ROAS is the right grammar to read it in.
+  if (bm.model.startsWith('purchase-based')) {
+    return {
+      lens: 'ecommerce',
+      read_as:
+        `Read as: purchase based, with no add-to-cart or checkout events ${window} ` +
+        `(an app, a subscription, or a checkout that happens off your own site). ` +
+        `Inferred from ${countWord(purchases)} purchases with revenue.`,
+      ...carry,
+    };
+  }
+  if (bm.model.startsWith('mixed')) {
+    return {
+      lens: 'mixed',
+      read_as:
+        `Read as: leads and purchases together. Inferred from ${countWord(leads)} lead events and ` +
+        `${countWord(purchases)} purchases with revenue ${window}.`,
+      ...carry,
+    };
+  }
+  return {
+    lens: 'unknown',
+    read_as: `Read as: no conversion recorded. Inferred from ${countWord(purchases)} purchases and ${countWord(leads)} lead events ${window}.`,
+    ...carry,
+  };
+}
+
 export function buildAccountModel(inp: AccountModelInputs): AccountModel {
   const t = inp.totals30;
   const facts: AccountFact[] = [];

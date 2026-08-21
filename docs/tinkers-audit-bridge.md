@@ -189,6 +189,39 @@ same audit with and without the option and asserts the sequence of writes to
 Nothing else in `magic-audit.ts` was touched: no section, no prompt, no cost
 meter, no ordering.
 
+## The lens the report is read through
+
+Every audit classifies the account's own 30-day event mix ONCE
+(`readAccountLens`, `src/audit/account-model.ts`) and both states and enforces
+that reading:
+
+- **Stated.** The recognition payload carries two new keys the report page can
+  render at the top: `lens` (`ecommerce` | `lead_gen` | `mixed` | `unknown`,
+  the machine value) and `read_as` (the sentence, e.g. `Read as: lead
+  generation. Inferred from 482 lead events and zero purchases in the last 30
+  days.`). A reader who disagrees with the lens can only say so if we print it.
+- **Enforced in the words.** On an account with no purchase revenue the budget
+  scatter plots cost per result, not ROAS: `data.y_axis` is
+  `cost_per_result`, `data.y_axis_label` reads `Cost per lead` where the lens
+  says lead-gen, `breakeven_roas`/`gross_margin_pct` are absent, and the line
+  every dot is read against is `cpr_line` with `cpr_line_source`
+  (`owner_target` when the owner stated one, else `account_average`). No
+  section prose on such an account contains the words ROAS or breakeven.
+- **Enforced in the prompts.** `buildSynthSystem` carries a lens brief, so a
+  synthesis on a lead-gen account is told in rules, not in context, that the
+  account records no ROAS, revenue, carts or checkouts.
+- **Refused where it cannot be read.** `mixed` (leads AND purchase revenue) and
+  `unknown` (neither) store the sections that need ONE conversion grammar
+  (`budget_scatter`, `concept_roas`) as `status: "skipped"` with a one-line
+  `skip_reason`. **The report page renders nothing for a skipped section** —
+  it is not an error and not a gap in the work, it is a judgment we decline to
+  make on this account. Sections that read the same in either grammar (CPM
+  trend, concentration, day of week, cohorts, saturation, funnel) always run.
+
+A recognition read that FAILED leaves the lens null, and a null lens skips
+nothing: "we could not read the account" is not the same claim as "the account
+is ambiguous", and only the second may cost the reader a section.
+
 ## Env
 
 | Var | Purpose |

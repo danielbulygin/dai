@@ -411,12 +411,33 @@ export interface ScatterDot {
 /** A dot needs enough spend to be worth reading — noise dots pollute the field. */
 export const SCATTER_FLOOR_CAP = 1_000;
 
+/** A cost target the OWNER stated. Cited as theirs, never as our estimate. */
+export interface CostTarget {
+  /** The metric they named (cpl, cpa). Decides the noun, never the math. */
+  metric: string;
+  value: number;
+}
+
+/**
+ * The account's own conversion grammar, for the words and the derived labels.
+ * An account with no purchase revenue has no ROAS and no breakeven line, so
+ * "good" can only mean cheaper than the owner's stated target or than the
+ * account's own average cost per result. Both optional: without either, the
+ * chart states the spread and claims no winner.
+ */
+export interface ScatterLens {
+  /** What one result is called here: 'lead' on a lead-gen account. */
+  resultNoun?: string;
+  costTarget?: CostTarget | null;
+}
+
 export function computeBudgetScatter(
   rows30: PackAdRow[],
   fatigueAds: Array<Pick<FatigueAd, 'ad_id' | 'class' | 'low_frequency_acquisition_guard'>>,
   breakevenRoas = 1.0,
   currency = '',
   grossMarginPct: number | null = null,
+  lens: ScatterLens = {},
 ): PackSection & { data: { dots: ScatterDot[] } & Record<string, unknown> } {
   const mode = kpiMode(rows30);
   const byAd = new Map<string, { ad_id: string; name: string; spend: number; value: number; results: number; freqs: number[] }>();
@@ -467,27 +488,56 @@ export function computeBudgetScatter(
     };
   });
 
-  // Starved winner: a strong ROAS ad taking a small share of budget. Only a
-  // ROAS-mode read (cost-per-result "strength" needs the client's target, done
-  // in the render). Gold-ring the ones clearly above breakeven AND under the
-  // median spend share — then name the single best for the caption contrast.
+  // What one result is called here, and what "good" is measured against. On a
+  // cost-per-result account the line is the owner's own stated target, else the
+  // account's own average. There is no breakeven and no 1.0x line to borrow.
+  const resultNoun = lens.resultNoun?.trim() || 'result';
+  const costTarget = lens.costTarget ?? null;
+  const plottedResults = readable.reduce((s, a) => s + a.results, 0);
+  const plottedSpend = readable.reduce((s, a) => s + a.spend, 0);
+  const cprAverage = mode === 'cpr' && plottedResults > 0 ? r2(div(plottedSpend, plottedResults)) : null;
+  const cprLine = mode === 'cpr' ? (costTarget?.value ?? cprAverage) : null;
+  const cprLineSource: 'owner_target' | 'account_average' | null =
+    mode !== 'cpr' || cprLine == null ? null : costTarget ? 'owner_target' : 'account_average';
+  const cprLineWord =
+    cprLine == null
+      ? `the account's own spread`
+      : cprLineSource === 'owner_target'
+        ? `your stated target of ${money(cprLine, currency)} per ${resultNoun}`
+        : `this account's own average of ${money(cprLine, currency)} per ${resultNoun}`;
+
+  // Starved winner: an ad doing clearly better than the line on a small share of
+  // budget. In ROAS mode "clearly better" is 2x the breakeven line; in cost-per-
+  // result mode it is 25% under the line, and an average needs 4 plotted ads
+  // behind it before it can call anything starved.
   const shares = dots.map((d) => d.spend_share_pct).sort((x, y) => x - y);
   const medianShare = shares.length ? shares[Math.floor(shares.length / 2)]! : 0;
   let starvedBest: ScatterDot | null = null;
-  if (mode === 'roas') {
-    for (const d of dots) {
-      if (d.klass === 'move' || d.klass === 'acquisition') continue; // a laggard isn't "starved"
-      if (d.roas_30d != null && d.roas_30d >= breakevenRoas * 2 && d.spend_share_pct <= medianShare) {
+  const cprLineIsReadable = cprLine != null && (cprLineSource === 'owner_target' || dots.length >= 4);
+  for (const d of dots) {
+    if (d.klass === 'move' || d.klass === 'acquisition') continue; // a laggard isn't "starved"
+    if (d.spend_share_pct > medianShare) continue;
+    if (mode === 'roas') {
+      if (d.roas_30d != null && d.roas_30d >= breakevenRoas * 2) {
         d.starved = true;
         if (!starvedBest || (d.roas_30d ?? 0) > (starvedBest.roas_30d ?? 0)) starvedBest = d;
       }
+    } else if (cprLineIsReadable && d.cpr_30d != null && d.cpr_30d <= cprLine! * 0.75) {
+      d.starved = true;
+      if (!starvedBest || (d.cpr_30d ?? Infinity) < (starvedBest.cpr_30d ?? Infinity)) starvedBest = d;
     }
   }
 
-  // The heaviest laggard — the most budget sitting on a below-breakeven / moving
-  // ad — is the honest contrast to the starved winner.
+  // The heaviest laggard — the most budget sitting on an ad doing worse than the
+  // line, or already flagged as moving — is the honest contrast to the winner.
   const laggards = dots
-    .filter((d) => d.klass === 'move' || d.klass === 'acquisition' || (d.roas_30d != null && d.roas_30d < breakevenRoas))
+    .filter((d) =>
+      d.klass === 'move' ||
+      d.klass === 'acquisition' ||
+      (mode === 'roas'
+        ? d.roas_30d != null && d.roas_30d < breakevenRoas
+        : cprLineIsReadable && d.cpr_30d != null && d.cpr_30d >= cprLine! * 1.25),
+    )
     .sort((a, b) => b.spend_30d - a.spend_30d);
   const heaviestLaggard = laggards[0] ?? null;
 
@@ -500,11 +550,17 @@ export function computeBudgetScatter(
   let contrast: string | null = null;
   if (starvedBest && heaviestLaggard && starvedBest.ad_id !== heaviestLaggard.ad_id && starvedBest.spend_30d > 0) {
     const ratio = heaviestLaggard.spend_30d / starvedBest.spend_30d;
-    if (ratio >= 1.5) {
+    const ratioWord = `roughly ${ratio >= 10 ? Math.round(ratio) : ratio.toFixed(1)}× the budget on the weaker ad`;
+    if (ratio >= 1.5 && mode === 'roas') {
       contrast =
         `"${starvedBest.ad_name}" returns ${starvedBest.roas_30d}× on ${money(starvedBest.spend_30d, currency)} of spend, ` +
         `while "${heaviestLaggard.ad_name}" is ${heaviestLaggard.roas_30d != null ? `at ${heaviestLaggard.roas_30d}×` : 'below breakeven'} on ` +
-        `${money(heaviestLaggard.spend_30d, currency)} — roughly ${ratio >= 10 ? Math.round(ratio) : ratio.toFixed(1)}× the budget on the weaker ad.`;
+        `${money(heaviestLaggard.spend_30d, currency)} — ${ratioWord}.`;
+    } else if (ratio >= 1.5) {
+      contrast =
+        `"${starvedBest.ad_name}" buys a ${resultNoun} for ${money(starvedBest.cpr_30d ?? 0, currency)} on ${money(starvedBest.spend_30d, currency)} of spend, ` +
+        `while "${heaviestLaggard.ad_name}" pays ${money(heaviestLaggard.cpr_30d ?? 0, currency)} per ${resultNoun} on ` +
+        `${money(heaviestLaggard.spend_30d, currency)} — ${ratioWord}.`;
     }
   }
 
@@ -514,27 +570,34 @@ export function computeBudgetScatter(
     summaryParts.push(
       `Each dot is one ad, placed by its last-30-day spend (left→right) against its ROAS (bottom→top); the dashed line is ${breakevenWord}.`,
     );
-    if (moveCount > 0)
-      summaryParts.push(`${moveCount} ad${moveCount === 1 ? '' : 's'} sit in the danger zone — past peak and still spending (the same ${moveCount === 1 ? 'one' : 'ones'} flagged in the fatigue chapter).`);
-    if (acqCount > 0)
-      summaryParts.push(`${acqCount} below-breakeven ad${acqCount === 1 ? '' : 's'} run at low frequency — that reads as acquisition, not waste, so ${acqCount === 1 ? "it's" : "they're"} marked separately.`);
-    if (contrast) summaryParts.push(contrast);
   } else {
-    summaryParts.push(`Each dot is one ad, placed by its last-30-day spend against its cost per result.`);
+    summaryParts.push(
+      `Each dot is one ad, placed by its last-30-day spend (left→right) against its cost per ${resultNoun} (bottom→top, lower is better)` +
+        (cprLine != null ? `; the dashed line is ${cprLineWord}` : '') + `.`,
+    );
     if (cprValues.length >= 2) {
       summaryParts.push(
-        `Across the ${dots.length} plotted ads the cost per result runs from ${money(cprValues[0]!, currency)} to ${money(cprValues[cprValues.length - 1]!, currency)}.`,
+        `Across the ${dots.length} plotted ads the cost per ${resultNoun} runs from ${money(cprValues[0]!, currency)} to ${money(cprValues[cprValues.length - 1]!, currency)}.`,
       );
     }
   }
+  // Fatigue-driven, so it holds in either grammar: the colour is the trend, not
+  // the return. The acquisition guard is a ROAS-mode read and stays there.
+  if (moveCount > 0)
+    summaryParts.push(`${moveCount} ad${moveCount === 1 ? '' : 's'} sit in the danger zone — past peak and still spending (the same ${moveCount === 1 ? 'one' : 'ones'} flagged in the fatigue chapter).`);
+  if (mode === 'roas' && acqCount > 0)
+    summaryParts.push(`${acqCount} below-breakeven ad${acqCount === 1 ? '' : 's'} run at low frequency — that reads as acquisition, not waste, so ${acqCount === 1 ? "it's" : "they're"} marked separately.`);
+  if (contrast) summaryParts.push(contrast);
 
   const next_step = starvedBest
-    ? `Shift budget toward the starved winners the chart circles — "${starvedBest.ad_name}" is earning well above the line on a small share of spend, so it has room to take more before it saturates.`
+    ? mode === 'roas'
+      ? `Shift budget toward the starved winners the chart circles — "${starvedBest.ad_name}" is earning well above the line on a small share of spend, so it has room to take more before it saturates.`
+      : `Shift budget toward the ads the chart circles — "${starvedBest.ad_name}" is buying a ${resultNoun} for ${money(starvedBest.cpr_30d ?? 0, currency)} against ${cprLineWord}, on a small share of spend.`
     : moveCount > 0
       ? `Move budget off the danger-zone ads and into the ones sitting high on the chart — the fatigue chapter has the deadline.`
       : mode === 'cpr'
         ? cprValues.length >= 2
-          ? `Move budget from the ads near ${money(cprValues[cprValues.length - 1]!, currency)} per result toward the ones near ${money(cprValues[0]!, currency)}, one step at a time, and re-read the chart in two weeks.`
+          ? `Move budget from the ads near ${money(cprValues[cprValues.length - 1]!, currency)} per ${resultNoun} toward the ones near ${money(cprValues[0]!, currency)}, one step at a time, and re-read the chart in two weeks.`
           : `Keep the current split; there are too few plotted ads to move budget between on this chart alone.`
         : `No ad on this chart is both clearly above ${breakevenWord} and starved of budget, and none is flagged past peak, so the current split stands. Re-read it next month.`;
 
@@ -544,8 +607,18 @@ export function computeBudgetScatter(
     data: {
       window_days: 30,
       kpi_mode: mode,
-      breakeven_roas: breakevenRoas,
-      gross_margin_pct: grossMarginPct ?? undefined,
+      // The y axis in words, so a renderer never has to guess which grammar
+      // this account is in — and a purchase axis is never labelled on an
+      // account that records no purchase revenue.
+      y_axis: mode === 'roas' ? 'roas' : 'cost_per_result',
+      y_axis_label: mode === 'roas' ? 'ROAS' : `Cost per ${resultNoun}`,
+      result_noun: mode === 'cpr' ? resultNoun : undefined,
+      breakeven_roas: mode === 'roas' ? breakevenRoas : undefined,
+      gross_margin_pct: mode === 'roas' ? (grossMarginPct ?? undefined) : undefined,
+      cpr_average: cprAverage ?? undefined,
+      cpr_target: mode === 'cpr' && costTarget ? { metric: costTarget.metric, value: costTarget.value, source: 'owner' } : undefined,
+      cpr_line: cprLine ?? undefined,
+      cpr_line_source: cprLineSource ?? undefined,
       currency: currency || undefined,
       total_spend: Math.round(total),
       ads_plotted: dots.length,
@@ -560,16 +633,27 @@ export function computeBudgetScatter(
     },
     warnings: suppressedNoResults > 0
       ? [
-          `${suppressedNoResults} ad(s) that cleared the spend floor carry no mapped result, so they get no dot: a cost per result cannot be computed for them.`,
+          `${suppressedNoResults} ad(s) that cleared the spend floor carry no mapped result, so they get no dot: a cost per ${resultNoun} cannot be computed for them.`,
         ]
       : undefined,
     derivation:
-      `We summed each ad's spend and revenue over the last 30 days and plotted spend against ROAS, sizing each dot by its average frequency. ` +
-      `The colour is the SAME fatigue read from the chapter above — red = past-peak and still spending, blue = below breakeven but low-frequency (acquisition, not waste), ` +
-      `olive = evergreen. Gold rings mark ads earning well above ${breakevenWord} on a small slice of budget. ` +
-      (grossMarginPct != null && breakevenRoas > 1.0
-        ? `The dashed line is ${breakevenRoas}× — your breakeven at the ${grossMarginPct}% gross margin you gave us.`
-        : `The dashed line is 1.0× — the honest default when we don't know your gross margin; your true breakeven sits higher, so dots just above the line may already be underwater after product cost.`),
+      mode === 'roas'
+        ? `We summed each ad's spend and revenue over the last 30 days and plotted spend against ROAS, sizing each dot by its average frequency. ` +
+          `The colour is the SAME fatigue read from the chapter above — red = past-peak and still spending, blue = below breakeven but low-frequency (acquisition, not waste), ` +
+          `olive = evergreen. Gold rings mark ads earning well above ${breakevenWord} on a small slice of budget. ` +
+          (grossMarginPct != null && breakevenRoas > 1.0
+            ? `The dashed line is ${breakevenRoas}× — your breakeven at the ${grossMarginPct}% gross margin you gave us.`
+            : `The dashed line is 1.0× — the honest default when we don't know your gross margin; your true breakeven sits higher, so dots just above the line may already be underwater after product cost.`)
+        : `We summed each ad's spend and its recorded results over the last 30 days and plotted spend against cost per ${resultNoun}, sizing each dot by its average frequency. ` +
+          `The colour is the SAME fatigue read from the chapter above — red = past-peak and still spending, olive = evergreen. ` +
+          // The line is never borrowed: this account's number is what it pays
+          // for a result, so it is read against the owner's own target or the
+          // account's own average, and against nothing else.
+          (cprLine == null
+            ? `No target was given and there are too few plotted ads to average one, so the chart states the spread and calls no winner.`
+            : cprLineSource === 'owner_target'
+              ? `Every dot is read against your stated target of ${money(cprLine, currency)} per ${resultNoun}, and gold rings mark the ads at least 25% under it on a small slice of budget.`
+              : `Every dot is read against this account's own average of ${money(cprLine, currency)} per ${resultNoun}, and gold rings mark the ads at least 25% under it on a small slice of budget.`),
   };
 }
 
