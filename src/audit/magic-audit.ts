@@ -12,8 +12,9 @@ import {
   computeConcentration, computeFatigue, computeBudgetScatter, computeCohorts, computeCostTrend, computeDayOfWeek,
   computeConceptRoas, computeOptimizationEvents, buildProvisionalInsights, computeHookCorrection, kpiMode,
   mergeAdPreviews,
+  costWordForLens,
   type PackAdRow, type PackAccountRow, type AdsetConfigLite, type FatigueAd, type PlacementHookRow, type AdPreview,
-  type ScatterLens,
+  type ScatterLens, type FatigueReadForCohorts,
 } from './report-pack.js';
 import { buildScorecard, buildComparisonSection, type ScorecardInputs, type ScorecardEntry } from './scorecard.js';
 import {
@@ -35,7 +36,7 @@ import {
   type FatigueDecayRow, type RetiredEarnerRead,
 } from './cold-creative-source.js';
 import type { StoreMediaCandidate } from './cold-creative-source.js';
-import { scrubSectionProse, scrubInsightProse, dedashDeep, dedash, mapDeepStrings } from './prose.js';
+import { scrubSectionProse, scrubInsightProse, dedashDeep, dedash, mapDeepStrings, oneCostWordDeep } from './prose.js';
 import {
   anchoredWindowBrief, anchoredWindowNote, anchorWindowWords, resolveAuditWindow, shortDay,
   type AuditWindow,
@@ -187,7 +188,7 @@ export interface LeadInsight {
 const SECTION_ORDER: Array<Pick<AuditSection, 'key' | 'title' | 'status'>> = [
   { key: 'dataset_health', title: 'Data Foundation — pixel, CAPI & match quality', status: 'pending' },
   { key: 'account_structure', title: 'Account Structure & Spend Concentration', status: 'pending' },
-  { key: 'spend_concentration', title: 'Budget Concentration & Key-Man Risk', status: 'pending' },
+  { key: 'spend_concentration', title: 'Budget Concentration: how much rides on one ad', status: 'pending' },
   { key: 'creative_fatigue', title: 'Creative Fatigue & Runway', status: 'pending' },
   { key: 'budget_scatter', title: 'Budget — spend vs return per ad', status: 'pending' },
   { key: 'creative_cohorts', title: 'Creative Cohorts — living off old creative?', status: 'pending' },
@@ -383,11 +384,18 @@ export function lensBrief(lens: AccountLensRead): string {
     return (
       `${head} Judge everything on cost per lead and lead volume. Do NOT write ROAS, revenue, breakeven, ` +
       `purchases, carts or checkouts about this account: it records none of them, and a metric it does not ` +
-      `have is not a finding.`
+      `have is not a finding. ` +
+      `COST WORD: this report's one word for that number is "cost per lead". Never write "CPL", "Meta CPL", ` +
+      `"cost per result", "cost per acquisition" or "cost per conversion" anywhere: three words for one metric ` +
+      `reads as three metrics.`
     );
   }
   if (lens.lens === 'ecommerce') {
-    return `${head} Judge on Meta ROAS and Meta CPA against the breakeven line you were given, and label every metric with its source.`;
+    return (
+      `${head} Judge on Meta ROAS and Meta CPA against the breakeven line you were given, and label every metric ` +
+      `with its source. COST WORD: this report's one word for a cost per purchase is "Meta CPA". Never write ` +
+      `"CPA" alone, "cost per result", "cost per acquisition" or "cost per conversion".`
+    );
   }
   if (lens.lens === 'mixed') {
     return (
@@ -1938,6 +1946,39 @@ export function enforceQuietSection<T extends AuditSection>(section: T): T {
   return rest as T;
 }
 
+/**
+ * One chapter owns the homepage advice.
+ *
+ * The landing chapter can see that the homepage takes real budget. The
+ * ad-promise chapter has read the ad AND the page, so it knows which line is
+ * missing from it. Both spoke on the live report, and the reader got "move the
+ * traffic off the homepage" next to "put this promise on the homepage" and had
+ * to pick. The sharper read wins; the landing chapter points at it instead of
+ * arguing with it.
+ *
+ * Only the homepage branch defers. A dead URL is a different finding and keeps
+ * its own action row, and a walk that came back inconclusive owns nothing.
+ */
+export function deferHomepageAdvice<T extends AuditSection>(
+  landing: T,
+  messageMatch: AuditSection | undefined,
+): T {
+  const data = landing.data;
+  const ownsHomepage =
+    typeof data === 'object' && data !== null && !Array.isArray(data) &&
+    (data as Record<string, unknown>).homepage_advice === true;
+  if (!ownsHomepage || typeof landing.next_step !== 'string') return landing;
+  const walk = messageMatch?.status === 'complete' ? (messageMatch.data as Record<string, unknown> | undefined) : undefined;
+  const verdict = typeof walk?.verdict === 'string' ? walk.verdict : null;
+  if (!verdict || verdict === 'inconclusive') return landing;
+  const { next_step: _deferred, ...rest } = landing;
+  return {
+    ...rest,
+    summary: `${landing.summary ?? ''} The homepage line itself is read against the top ad's own promise in the "Ad Promise vs Landing Page" chapter, which owns that call.`.trim(),
+    data: { ...(data as Record<string, unknown>), homepage_advice_deferred_to: 'message_match' },
+  } as T;
+}
+
 /** One honest work-receipt line per finished section — real numbers, no theater. */
 export function workLineFor(key: string, s: AuditSection): string | null {
   if (s.status !== 'complete') return null;
@@ -1955,8 +1996,15 @@ export function workLineFor(key: string, s: AuditSection): string | null {
       return typeof d.ads_with_spend === 'number' ? `Measured spend concentration across ${d.ads_with_spend} active ads` : null;
     case 'creative_fatigue':
       return typeof d.assessed_ads === 'number' ? `Ran 90-day fatigue trends on ${d.assessed_ads} ads` : null;
-    case 'budget_scatter':
-      return typeof d.ads_plotted === 'number' && d.ads_plotted > 0 ? `Plotted spend against return for ${d.ads_plotted} ads` : null;
+    case 'budget_scatter': {
+      // A lead-gen account has no return: the chart's own y axis has the word.
+      if (typeof d.ads_plotted !== 'number' || d.ads_plotted <= 0) return null;
+      const axis =
+        d.y_axis === 'cost_per_result' || d.kpi_mode === 'cpr'
+          ? `cost per ${typeof d.result_noun === 'string' && d.result_noun.length > 0 ? d.result_noun : 'result'}`
+          : 'return';
+      return `Plotted spend against ${axis} for ${d.ads_plotted} ads`;
+    }
     case 'creative_cohorts':
       return typeof d.window_months === 'number' ? `Rebuilt ${d.window_months} months of creative launch cohorts` : null;
     case 'cost_trends': {
@@ -2105,7 +2153,7 @@ export function buildInsightRules(g: InsightGuardrails): string {
       `The cost-trend chapter already measured the auction over ${a.weeks ?? 'the'} weeks: CPM ${a.cpm_delta_pct ?? 'unmeasured'}%, ` +
         `link CTR ${a.ctr_delta_pct ?? 'unmeasured'}%` +
         (a.ctr_first != null && a.ctr_last != null
-          ? ` (weekly averages: ${a.ctr_first}% in the first week of that window, ${a.ctr_last}% in the last)`
+          ? ` (weekly averages: ${a.ctr_first}% over the first third of that window, ${a.ctr_last}% over the last third)`
           : '') +
         `. Use those figures and do not recompute them, and call a weekly average a weekly average rather than "now". ` +
         `A CTR this account HELD earlier is a recovery target, so frame a "double the CTR" opportunity as getting back to ` +
@@ -2316,6 +2364,18 @@ export async function runMagicAudit(
     recognition.lens = lensRead.lens;
     recognition.read_as = lensRead.read_as;
   }
+  /**
+   * The ONE cost word this report may use, decided from the lens once. Null on
+   * an account whose lens cannot pick one, and then nothing is rewritten.
+   */
+  const auditCostWord = costWordForLens(lensRead?.lens ?? null);
+  /**
+   * The last rewrite every finished customer-facing string gets: the window it
+   * covers, then the one cost word. Both are deterministic and idempotent, and
+   * both are a no-op on an account they are not true about, so a live e-com
+   * report comes out byte-identical to before.
+   */
+  const houseWords = <T,>(value: T): T => oneCostWordDeep(anchorWords(value), auditCostWord);
 
   // `let` — the pack pulls below can append a truncation caveat, after which
   // the synth system is rebuilt (runners read it at call time via closure).
@@ -2403,7 +2463,7 @@ export async function runMagicAudit(
       // The deep pass catches the strings the model writes into nested fields
       // (biggest_leak.read, winners[].why, gaps[], key_stat): the rendered page
       // is grepped for em-dashes, so a clean summary is not enough.
-      if (first.banned.length === 0) return anchorWords(dedashDeep(first.section));
+      if (first.banned.length === 0) return houseWords(dedashDeep(first.section));
       logger.warn({ section: section.key, banned: first.banned }, 'audit prose carries filler — one rewrite retry');
       let candidate = first.section;
       if (!meter.exhausted()) {
@@ -2435,7 +2495,7 @@ export async function runMagicAudit(
       if (second.banned.length > 0) {
         logger.warn({ section: section.key, banned: second.banned }, 'audit prose filler stripped after the rewrite retry');
       }
-      return anchorWords(dedashDeep(second.section));
+      return houseWords(dedashDeep(second.section));
     } catch (err) {
       logger.warn({ err, section: section.key }, 'prose scrub failed (section written unchanged)');
       return section;
@@ -2454,7 +2514,7 @@ export async function runMagicAudit(
     // The work log is customer-facing text like any section string, so it goes
     // through the same dash gate. A literal we own is fixed at the source; this
     // catches the interpolated ones and anything a future line brings with it.
-    workLog.push({ at: new Date().toISOString(), line: anchorWords(dedash(line)) });
+    workLog.push({ at: new Date().toISOString(), line: houseWords(dedash(line)) });
     await updateRow({ work_log: workLog });
   };
 
@@ -2720,7 +2780,10 @@ export async function runMagicAudit(
       return computeBudgetScatter(rows30, fatAds, breakevenRoas, client.currency, grossMarginPct, scatterLens);
     },
     creative_cohorts: async () => {
-      const s = computeCohorts(packRows180);
+      // Runs after creative_fatigue in SECTION_ORDER, so the cadence read can
+      // check whether the ad carrying the most spend is one that chapter has
+      // already called declining, instead of praising a rhythm it is not in.
+      const s = computeCohorts(packRows180, sections['creative_fatigue']?.data as FatigueReadForCohorts | undefined);
       // Second cohort view (design batch 4): absolute monthly cohorts over time.
       s.data.cohort_wave = computeCohortWave(packRows180);
       return s;
@@ -3050,7 +3113,7 @@ export async function runMagicAudit(
 
       // The scorecard's position and next-step lines are read by the customer
       // like any section string, and they were bypassing the dash gate.
-      if (scorecard.length) await updateRow({ scorecard: anchorWords(dedashDeep(scorecard)) });
+      if (scorecard.length) await updateRow({ scorecard: houseWords(dedashDeep(scorecard)) });
       savedScorecard = scorecard; // later sections (whats_working) read it
       logger.info({ code, dimensions: scorecard.map((e) => `${e.key}:${e.band}`) }, 'scorecard computed');
 
@@ -3063,7 +3126,7 @@ export async function runMagicAudit(
         sections['spend_concentration']?.data as Record<string, never> | undefined,
       );
       if (provisional.length) {
-        await updateRow({ lead_insights: provisional.map((i) => anchorWords(scrubInsightProse(i))) });
+        await updateRow({ lead_insights: provisional.map((i) => houseWords(scrubInsightProse(i))) });
       }
     } catch (err) {
       logger.warn({ err, code }, 'scorecard computation failed (audit continues)');
@@ -3236,6 +3299,15 @@ export async function runMagicAudit(
       await computeAndSaveScorecard();
       await enrichAdPreviewsSafely();
     }
+    // The ad-promise chapter has just read the page, so the landing chapter can
+    // hand it the homepage call rather than giving a second opinion on it.
+    if (def.key === 'message_match') {
+      const landing = sections['landing_pages'];
+      if (landing) {
+        const deferred = deferHomepageAdvice(landing, sections['message_match']);
+        if (deferred !== landing) await saveSection(deferred);
+      }
+    }
     // All deterministic evidence is in after the ad-set config read — write
     // the Account Model here so the "correct us" section renders early too.
     if (def.key === 'optimization_events') await writeAccountModelSafely();
@@ -3296,7 +3368,7 @@ export async function runMagicAudit(
     const insights = await rankLeadInsights(meter, client, sections, synthSystem, guardrails);
     if (insights) {
       insightsPublished = insights.length;
-      await updateRow({ lead_insights: insights.map((i) => anchorWords(scrubInsightProse(i))) });
+      await updateRow({ lead_insights: insights.map((i) => houseWords(scrubInsightProse(i))) });
     }
   } catch (err) {
     logger.warn({ err }, 'lead-insight ranking failed (report still valid)');
@@ -3340,7 +3412,7 @@ export async function runMagicAudit(
           ...recognition,
           ...((rowState.recognition as object) ?? {}),
           ...(connection ? { connection } : {}),
-          ...(work.length ? { work: anchorWords(work) } : {}),
+          ...(work.length ? { work: houseWords(work) } : {}),
         },
       });
     }

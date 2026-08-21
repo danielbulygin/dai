@@ -121,6 +121,40 @@ export function dedashDeep<T>(value: T): T {
   return mapDeepStrings(value, dedash);
 }
 
+/**
+ * Every wording one cost metric came out as. The live report carried "CPL" on
+ * a creative chip, "Meta CPL" in the top insight and "cost per result" in three
+ * chapter labels, all of them the same number: spend over leads.
+ *
+ * Ordered longest-first so "Meta CPL" is matched whole rather than as "CPL".
+ */
+const COST_WORD_VARIANTS =
+  /\b(?:Meta\s+CPL|Meta\s+CPA|Meta\s+cost per lead|cost per acquisition|cost per conversion|cost per result|CPL|CPA)\b/g;
+
+/**
+ * Rewrite every variant into the ONE word this report uses (see
+ * `costWordForLens`). A null word means the lens could not pick one, and then
+ * nothing is touched: on an account recording both leads and purchases there is
+ * no single word that would be true.
+ *
+ * Pure, idempotent, and capitalisation-aware at a sentence start.
+ */
+export function unifyCostWord(text: string, costWord: string | null): string {
+  if (!costWord || !text) return text;
+  return text.replace(COST_WORD_VARIANTS, (match: string, offset: number, whole: string) => {
+    if (match.toLowerCase() === costWord.toLowerCase()) return match;
+    const before = whole.slice(0, offset);
+    const startsSentence = before.length === 0 || /(?:[.!?:]\s+|\n)$/.test(before);
+    return startsSentence ? costWord[0]!.toUpperCase() + costWord.slice(1) : costWord;
+  });
+}
+
+/** The cost-word pass over every prose string at any depth of a section. */
+export function oneCostWordDeep<T>(value: T, costWord: string | null): T {
+  if (!costWord) return value;
+  return mapDeepStrings(value, (text) => unifyCostWord(text, costWord));
+}
+
 /** Which banned phrases the text still contains (labels, in the listed order). */
 export function findBannedPhrases(text: string): string[] {
   if (!text) return [];

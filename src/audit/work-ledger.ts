@@ -79,7 +79,13 @@ export function buildWorkLedger(inp: WorkLedgerInputs): WorkRow[] {
   push(numOf(conc.ads_with_spend), `Measured how the budget concentrates across ${numOf(conc.ads_with_spend)} ads`);
 
   const scatter = dataOf(s['budget_scatter']);
-  push(numOf(scatter.ads_plotted), `Plotted spend against return for ${numOf(scatter.ads_plotted)} ads`);
+  // A lead-gen account has no return, and the chart it is describing has a cost
+  // axis. The axis the section actually plotted decides the word.
+  const scatterAxis =
+    scatter.y_axis === 'cost_per_result' || scatter.kpi_mode === 'cpr'
+      ? `cost per ${typeof scatter.result_noun === 'string' && scatter.result_noun.length > 0 ? scatter.result_noun : 'result'}`
+      : 'return';
+  push(numOf(scatter.ads_plotted), `Plotted spend against ${scatterAxis} for ${numOf(scatter.ads_plotted)} ads`);
 
   const creative = dataOf(s['creative_analysis']);
   push(numOf(creative.creatives_analyzed), `Watched ${numOf(creative.creatives_analyzed)} creatives frame by frame`);

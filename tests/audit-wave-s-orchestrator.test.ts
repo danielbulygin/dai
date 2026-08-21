@@ -77,7 +77,8 @@ describe('the lead-insight ranker may not overrule the sections', () => {
     expect(rules).toContain('link CTR -62%');
     // Both figures are weekly averages and must be named as such: the account's
     // "now" is its measured 30-day rate, which lives in the funnel chapter.
-    expect(rules).toContain('weekly averages: 2.2% in the first week of that window, 0.85% in the last');
+    // ONE basis for every click-rate figure in the report: the thirds averages.
+    expect(rules).toContain('weekly averages: 2.2% over the first third of that window, 0.85% over the last third');
     expect(rules).toContain('call a weekly average a weekly average rather than "now"');
     expect(rules).toContain('do not recompute them');
     expect(rules).toContain('never as a new ceiling');
