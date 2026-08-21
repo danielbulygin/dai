@@ -99,6 +99,7 @@ import { runBridgedColdAudit } from '../src/audit/tinkers-bridge.js';
 import {
   fetchTinkersAdDays,
   fetchTinkersDestinations,
+  fetchTinkersLeadContext,
   fetchTinkersStoreMedia,
   hasReportContent,
   isTinkersSeamConfigured,
@@ -158,6 +159,7 @@ beforeEach(() => {
     'ad-days': { json: { ok: true, rows: [], partial: false } },
     creatives: { json: { ok: true, creatives: [] } },
     'creative-media': { json: { ok: true, ads: [] } },
+    context: { json: { ok: true, goal: null, grossMarginPct: null, interview: { who_runs_ads: null, pain_point: null, tried: [], agency_fee: null }, rivals: [], accountTarget: null } },
   };
   state.orchestratorPatches = [
     { recognition: { ads_count: 12 }, updated_at: 'ts' },
@@ -333,6 +335,60 @@ describe('fetchTinkersDestinations + fetchTinkersStoreMedia', () => {
   });
 });
 
+describe('fetchTinkersLeadContext — what the owner told us, contained', () => {
+  it('prefers the funnel answer and says it came from signup', async () => {
+    state.reads.context = {
+      json: {
+        ok: true,
+        goal: { metric: 'cpl', value: 40 },
+        grossMarginPct: 62,
+        interview: { who_runs_ads: 'an agency', pain_point: 'nobody buys', tried: ['lookalikes'], agency_fee: '2000/mo' },
+        rivals: ['acme', 'globex'],
+        accountTarget: { metric: 'cpl', value: 55 },
+      },
+    };
+    const ctx = await fetchTinkersLeadContext('aud_1');
+    expect(ctx).toEqual({
+      goalMetric: 'cpl',
+      goalValue: 40,
+      goalSource: 'signup',
+      grossMarginPct: 62,
+      interview: { who_runs_ads: 'an agency', pain_point: 'nobody buys', tried: ['lookalikes'], agency_fee: '2000/mo' },
+      rivals: ['acme', 'globex'],
+    });
+    // Read like every other generation read: Bearer authorized, never signed.
+    const call = state.calls.find((c) => c.url.includes('/context'))!;
+    expect(call.auth).toBe('Bearer seam-secret');
+    expect(call.signature).toBeNull();
+  });
+
+  it('falls back to the account target and says THAT is where it came from', async () => {
+    state.reads.context = { json: { ok: true, goal: null, grossMarginPct: null, accountTarget: { metric: 'roas', value: 3 } } };
+    const ctx = await fetchTinkersLeadContext('aud_1');
+    expect(ctx).toMatchObject({ goalMetric: 'roas', goalValue: 3, goalSource: 'account' });
+    expect(ctx!.interview).toBeNull();
+  });
+
+  it('an org that told us nothing is a domain state, not an error', async () => {
+    state.reads.context = { json: { ok: true, goal: null, grossMarginPct: null, interview: null, rivals: [], accountTarget: null } };
+    const ctx = await fetchTinkersLeadContext('aud_1');
+    expect(ctx).toMatchObject({ goalMetric: null, goalValue: null, goalSource: null, grossMarginPct: null });
+  });
+
+  it('a 404, a not-ready answer, a broken contract and an outage all cost the same nothing', async () => {
+    for (const read of [
+      { status: 404, json: { error: 'not found' } },
+      { json: { ok: false, reason: 'no_connection' } },
+      { json: { ok: true, goal: { metric: 'cpl' } } },
+      { throws: new Error('socket hang up') },
+    ]) {
+      state.reads.context = read;
+      await expect(fetchTinkersLeadContext('aud_1')).resolves.toBeNull();
+    }
+    expect(state.logs.filter((l) => l.includes('context read')).length).toBe(4);
+  });
+});
+
 describe('topSpendingAdIds', () => {
   it('ranks by 30d spend and ignores older rows', () => {
     const rows = [
@@ -487,9 +543,40 @@ describe('runBridgedColdAudit reporting', () => {
     expect(cold.adAccountId).toBe('act_123');
     expect(cold.accountName).toBe('Acme');
     expect(cold.currency).toBe('EUR');
-    // The trigger fires at Meta connect, before the funnel's goal step.
+    // Nothing stated yet: the audit runs on its honest defaults.
     expect(cold.goalMetric).toBeNull();
     expect(cold.grossMarginPct).toBeNull();
+  });
+
+  it('threads the owner\'s own goal, margin and answers into the audit', async () => {
+    state.reads.context = {
+      json: {
+        ok: true,
+        goal: { metric: 'cpl', value: 40 },
+        grossMarginPct: 62,
+        interview: { who_runs_ads: 'me', pain_point: 'no purchases', tried: [], agency_fee: null },
+        rivals: [],
+        accountTarget: null,
+      },
+    };
+    await runBridge();
+    const cold = state.magicAuditOptions?.cold as Record<string, unknown>;
+    expect(cold.goalMetric).toBe('cpl');
+    expect(cold.goalValue).toBe(40);
+    expect(cold.goalSource).toBe('signup');
+    expect(cold.grossMarginPct).toBe(62);
+    expect(cold.interview).toEqual({ who_runs_ads: 'me', pain_point: 'no purchases', tried: [], agency_fee: null });
+  });
+
+  it('a context endpoint that is not there yet costs the target, never the audit', async () => {
+    state.reads.context = { status: 404, json: { error: 'not found' } };
+    const posted = await runBridge();
+    const cold = state.magicAuditOptions?.cold as Record<string, unknown>;
+    expect(cold.goalMetric).toBeNull();
+    expect(cold.goalSource).toBeNull();
+    expect(cold.interview).toBeNull();
+    // The audit still ran and still sealed.
+    expect(posted.at(-1)).toEqual({ auditId: 'aud_1', finalize: true });
   });
 
   it('skips the contentless cost-only patch instead of earning a warning for it', async () => {

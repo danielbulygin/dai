@@ -189,6 +189,29 @@ same audit with and without the option and asserts the sequence of writes to
 Nothing else in `magic-audit.ts` was touched: no section, no prompt, no cost
 meter, no ordering.
 
+## The owner's own answers
+
+`GET /api/generation/:auditId/context` (Bearer-authorized like every other
+generation read, no provider touched) carries what the customer already told
+Tinkers: `goal` (the funnel answer), `grossMarginPct`, `interview`
+(who_runs_ads / pain_point / tried / agency_fee), `rivals`, and `accountTarget`
+(the same target mirrored onto the account they picked).
+
+`fetchTinkersLeadContext` reads it and threads it into the cold injection, so
+`buildColdKnowledge` can cite the number AS THE OWNER'S: "the CPL 40 target you
+set when you connected" for a funnel answer, "your stated target of 40 CPL" for
+an account target, and the margin drives the breakeven derivation it always
+drove. **"No target has been set" now appears only when goal AND accountTarget
+are both null.** A stated cost target also becomes the budget scatter's line
+(`cpr_line_source: "owner_target"`), which is the one number on that chart that
+was previously borrowed from nowhere.
+
+The read is CONTAINED: a 404, a not-ready answer, a changed contract or an
+outage all cost the same thing, the target we would have cited. The endpoint
+ships on Tinkers' schedule and an audit that died because it could not read an
+optional answer would be a worse report than one that honestly says no target
+was given.
+
 ## Two rules the report page depends on
 
 **A quiet section carries no next step.** `data.signal === false` is a section

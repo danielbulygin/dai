@@ -27,7 +27,7 @@ import {
   buildAccountModel, mergeAccountModel, readAccountLens,
   type AccountModel, type AccountModelInputs, type AccountLensRead,
 } from './account-model.js';
-import { coldBreakeven, buildColdKnowledge, type ColdRows } from './cold-source.js';
+import { coldBreakeven, buildColdKnowledge, type ColdRows, type OwnerInterview } from './cold-source.js';
 import { runColdCreativeAnalysis, type OwnLibraryScrape } from './cold-creative.js';
 import type { StoreMediaCandidate } from './cold-creative-source.js';
 import { scrubSectionProse, scrubInsightProse, dedashDeep, dedash } from './prose.js';
@@ -103,9 +103,14 @@ export interface ColdInjection {
   rows: ColdRows;
   goalMetric?: string | null;
   goalValue?: number | null;
+  /** Where that target came from. Only the wording differs: a funnel answer is
+   *  "at signup", the same number on the ad account is "on the ad account". */
+  goalSource?: 'signup' | 'account' | null;
   /** Lead-stated gross margin % (ada_leads.gross_margin_pct, 0<x<100 or null).
    * When set, the fatigue breakeven re-bases from 1.0× to 1 ÷ margin. */
   grossMarginPct?: number | null;
+  /** The owner's own answers from the funnel interview, cited as theirs. */
+  interview?: OwnerInterview | null;
   /** Tinkers media store creatives by provider ad id (the tokenless path's
    *  media + copy source for creative_analysis). */
   storeMedia?: Map<string, StoreMediaCandidate> | null;
@@ -1842,8 +1847,10 @@ export async function runMagicAudit(
     clientKnowledge = buildColdKnowledge({
       goalMetric: cold.goalMetric,
       goalValue: cold.goalValue,
+      goalSource: cold.goalSource,
       grossMarginPct,
       breakevenRoas,
+      interview: cold.interview,
     });
   } else {
     try {

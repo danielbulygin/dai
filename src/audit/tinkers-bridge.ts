@@ -23,6 +23,9 @@ import { runMagicAudit } from './magic-audit.js';
  *   GET /api/generation/:auditId/ad-days?since&until → one ≤31-day window of
  *       ad-level daily rows (their functions die at 300s, so we slice — which
  *       is what fetchColdAdDays did against Graph anyway)
+ *   GET /api/generation/:auditId/context         → the owner's own goal,
+ *       margin, interview answers and picked rivals (nothing from the provider,
+ *       so it answers whether or not their Meta token still does)
  *   GET /api/generation/:auditId/creatives       → per-ad landing destinations
  *   GET /api/generation/:auditId/creative-media?adIds= → the top ads' words +
  *       30-minute signed URLs onto their media store (their connect burst
@@ -71,6 +74,30 @@ const creativesSchema = z.union([
         mediaType: z.string().nullish(),
       }),
     ),
+  }),
+  notReady,
+]);
+
+/** Loose on purpose, like toRawAdDay: a field their port renames costs that
+ *  field, never the read. An org that never came through the funnel answers
+ *  all-null, which is a domain state and not an error. */
+const targetSchema = z.object({ metric: z.string(), value: z.number() });
+
+const contextSchema = z.union([
+  z.object({
+    ok: z.literal(true),
+    goal: targetSchema.nullish(),
+    grossMarginPct: z.number().nullish(),
+    interview: z
+      .object({
+        who_runs_ads: z.string().nullish(),
+        pain_point: z.string().nullish(),
+        tried: z.array(z.string()).nullish(),
+        agency_fee: z.string().nullish(),
+      })
+      .nullish(),
+    rivals: z.array(z.string()).nullish(),
+    accountTarget: targetSchema.nullish(),
   }),
   notReady,
 ]);
@@ -266,6 +293,68 @@ export async function fetchTinkersAdDays(
     logger.error({ auditId, rows: adDays.length, maxRows }, 'tinkers pull hit row cap — aggregates incomplete');
   }
   return { adDays, truncated, failedSlices };
+}
+
+/** What the owner has already TOLD us, in the shape the cold knowledge bundle
+ *  takes. `goalSource` records which of the two answers we are citing, because
+ *  "you set this at signup" and "you set this on the ad account" are different
+ *  sentences about the same number. */
+export interface TinkersLeadContext {
+  goalMetric: string | null;
+  goalValue: number | null;
+  goalSource: 'signup' | 'account' | null;
+  grossMarginPct: number | null;
+  interview: {
+    who_runs_ads: string | null;
+    pain_point: string | null;
+    tried: string[];
+    agency_fee: string | null;
+  } | null;
+  /** The handles their rival picker queued. Read and logged; no section on the
+   *  tokenless path consumes them yet. */
+  rivals: string[];
+}
+
+/**
+ * The context read, CONTAINED. This endpoint ships on Tinkers' own schedule, so
+ * a 404, a not-ready answer, a contract change or an outage must all cost the
+ * same thing: the target we would have cited, and nothing else. An audit that
+ * dies because it could not read an optional answer is a worse report than one
+ * that honestly says no target has been set.
+ */
+export async function fetchTinkersLeadContext(auditId: string): Promise<TinkersLeadContext | null> {
+  try {
+    const raw = await getGeneration(`/api/generation/${auditId}/context`);
+    const page = parseOrThrow(contextSchema, raw, 'context');
+    if (!page.ok) {
+      logger.warn({ auditId, reason: page.reason }, 'tinkers context read not ready (the audit runs without a stated target)');
+      return null;
+    }
+    // The funnel answer is the owner's own words; the account target is the same
+    // number mirrored onto the account they picked. Prefer what they typed.
+    const goal = page.goal ?? page.accountTarget ?? null;
+    const goalSource = page.goal ? 'signup' : page.accountTarget ? 'account' : null;
+    const iv = page.interview;
+    const interview = iv
+      ? {
+          who_runs_ads: iv.who_runs_ads ?? null,
+          pain_point: iv.pain_point ?? null,
+          tried: iv.tried ?? [],
+          agency_fee: iv.agency_fee ?? null,
+        }
+      : null;
+    return {
+      goalMetric: goal?.metric ?? null,
+      goalValue: goal?.value ?? null,
+      goalSource,
+      grossMarginPct: page.grossMarginPct ?? null,
+      interview,
+      rivals: page.rivals ?? [],
+    };
+  } catch (err) {
+    logger.warn({ err: seamError(err), auditId }, 'tinkers context read failed (the audit runs without a stated target)');
+    return null;
+  }
 }
 
 /** Landing destinations from their creatives read — the same map
@@ -495,6 +584,24 @@ async function runBridged(args: {
     'bridged cold audit: account resolved, starting tinkers pull',
   );
 
+  // What the owner already told us. Contained: no context means no target to
+  // cite, never a failed audit.
+  const leadContext = await fetchTinkersLeadContext(auditId);
+  logger.info(
+    {
+      organizationId,
+      auditId,
+      goalMetric: leadContext?.goalMetric ?? null,
+      goalSource: leadContext?.goalSource ?? null,
+      hasMargin: leadContext?.grossMarginPct != null,
+      interviewAnswers: leadContext?.interview
+        ? Object.values(leadContext.interview).filter((v) => (Array.isArray(v) ? v.length > 0 : !!v)).length
+        : 0,
+      rivals: leadContext?.rivals.length ?? 0,
+    },
+    'bridged cold audit: owner context resolved',
+  );
+
   const asOf = new Date().toISOString().slice(0, 10);
   const pull = await fetchTinkersAdDays(auditId, { asOf });
   const destinations = await fetchTinkersDestinations(auditId);
@@ -565,12 +672,16 @@ async function runBridged(args: {
       accountName: account.account.name ?? null,
       currency: account.account.currency ?? 'EUR',
       rows,
-      // The trigger fires at Meta connect, BEFORE the funnel's goal step, so
-      // there is no stated goal to anchor on yet. The audit runs on its
-      // honest 1.0× breakeven default, exactly like a goal-less legacy lead.
-      goalMetric: null,
-      goalValue: null,
-      grossMarginPct: null,
+      // Whatever the owner has told us by now: the goal they typed into the
+      // funnel (or the target on the account they picked), their margin, and
+      // their interview answers. All of it optional. Nothing told to us means
+      // the audit runs on its honest 1.0× breakeven default and says plainly
+      // that no target has been set, exactly like a goal-less legacy lead.
+      goalMetric: leadContext?.goalMetric ?? null,
+      goalValue: leadContext?.goalValue ?? null,
+      goalSource: leadContext?.goalSource ?? null,
+      grossMarginPct: leadContext?.grossMarginPct ?? null,
+      interview: leadContext?.interview ?? null,
       storeMedia,
     },
   });

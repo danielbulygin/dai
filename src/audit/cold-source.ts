@@ -313,25 +313,44 @@ export function coldBreakeven(grossMarginPct: number | null | undefined): { gros
   return { grossMarginPct: pct, breakevenRoas: pct != null ? Math.round((100 / pct) * 100) / 100 : 1.0 };
 }
 
+/** What the owner told us in their own words, from the funnel's interview. */
+export interface OwnerInterview {
+  who_runs_ads?: string | null;
+  pain_point?: string | null;
+  tried?: string[] | null;
+  agency_fee?: string | null;
+}
+
 /**
  * The cold-path clientKnowledge block for every synthesis call. The contract:
  * anything the owner stated at signup is cited AS THEIRS, in-text, every time —
  * and anything they did NOT state is never invented, assumed, or implied.
+ *
+ * `goalSource` only changes the wording, never the math: a target typed into
+ * the funnel is "at signup", the same number mirrored onto the ad account is
+ * "on the ad account". Both are the owner's. And "no target set" may only
+ * appear when they gave us neither.
  */
 export function buildColdKnowledge(args: {
   goalMetric?: string | null;
   goalValue?: number | null;
+  goalSource?: 'signup' | 'account' | null;
   grossMarginPct: number | null;
   breakevenRoas: number;
+  interview?: OwnerInterview | null;
 }): string {
   const hasGoal = !!args.goalMetric && args.goalValue != null;
   const parts: string[] = [];
   if (hasGoal) {
     const metric = args.goalMetric!.toUpperCase();
     parts.push(
-      `The account owner set this target themselves at signup: ${metric} of ${args.goalValue}. ` +
-        `When you cite it, ALWAYS attribute it in-text — e.g. "the ${metric} ${args.goalValue} target you set when you connected" — ` +
-        `never present it as our estimate, a Meta value, or an industry number.`,
+      args.goalSource === 'account'
+        ? `The account owner set this target themselves on their ad account: ${metric} of ${args.goalValue}. ` +
+            `When you cite it, ALWAYS attribute it in-text — e.g. "your stated target of ${args.goalValue} ${metric}" — ` +
+            `never present it as our estimate, a Meta value, or an industry number.`
+        : `The account owner set this target themselves at signup: ${metric} of ${args.goalValue}. ` +
+            `When you cite it, ALWAYS attribute it in-text — e.g. "the ${metric} ${args.goalValue} target you set when you connected" — ` +
+            `never present it as our estimate, a Meta value, or an industry number.`,
     );
   }
   if (args.grossMarginPct != null) {
@@ -355,6 +374,33 @@ export function buildColdKnowledge(args: {
       parts.push(`No gross margin was given — never invent or imply a margin or breakeven figure.`);
     }
   }
+  const said = ownWords(args.interview);
+  if (said) parts.push(said);
   parts.push(`No other client history is available — this is a first-time audit of a freshly connected account.`);
   return parts.join(' ');
+}
+
+/**
+ * The owner's own answers, quoted as theirs. These are the only things in the
+ * whole bundle that were TOLD to us rather than measured, so they carry the
+ * same attribution rule as the target: cite them as what the owner said, never
+ * as something we found in the account.
+ */
+function ownWords(interview: OwnerInterview | null | undefined): string | null {
+  if (!interview) return null;
+  const bits: string[] = [];
+  const one = (label: string, value: string | null | undefined): void => {
+    const text = typeof value === 'string' ? value.trim() : '';
+    if (text) bits.push(`${label}: "${text}"`);
+  };
+  one('who runs the ads today', interview.who_runs_ads);
+  one('what hurts most right now', interview.pain_point);
+  one('what they pay for ads management', interview.agency_fee);
+  const tried = (interview.tried ?? []).map((v) => v.trim()).filter((v) => v.length > 0);
+  if (tried.length) bits.push(`what they have already tried: "${tried.join(', ')}"`);
+  if (bits.length === 0) return null;
+  return (
+    `The owner also told us this about their situation, in their own words (${bits.join('; ')}). ` +
+    `Cite any of it as what THEY said, never as something we measured, and let it decide which findings matter most to them.`
+  );
 }
