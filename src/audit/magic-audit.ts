@@ -30,13 +30,17 @@ import {
 } from './account-model.js';
 import { coldBreakeven, buildColdKnowledge, type ColdRows, type OwnerInterview } from './cold-source.js';
 import { runColdCreativeAnalysis, type OwnLibraryScrape } from './cold-creative.js';
-import { annotateWinnerDecay, decayIndex, type FatigueDecayRow } from './cold-creative-source.js';
+import {
+  annotateWinnerDecay, decayIndex, readRetiredEarners,
+  type FatigueDecayRow, type RetiredEarnerRead,
+} from './cold-creative-source.js';
 import type { StoreMediaCandidate } from './cold-creative-source.js';
 import { scrubSectionProse, scrubInsightProse, dedashDeep, dedash, mapDeepStrings } from './prose.js';
 import {
   anchoredWindowBrief, anchoredWindowNote, anchorWindowWords, resolveAuditWindow, shortDay,
   type AuditWindow,
 } from './audit-window.js';
+import { buildWorkLedger, type WorkRow } from './work-ledger.js';
 import { createPageFetch, runSiteWalk, type WalkAd, type WalkDestination } from './site-walk.js';
 
 /**
@@ -2522,6 +2526,14 @@ export async function runMagicAudit(
     logger.warn({ err, code }, 'report-pack shared pulls failed (fast sections degrade)');
   }
   const rows30 = packRows90.filter((r) => r.date >= coreCutISO && r.date <= auditWindow.anchorDate);
+  /**
+   * Ads that earned earlier in the six months and have spent nothing in the
+   * core window. Counted here so the work ledger can state it whether or not
+   * the creative section itself managed to run.
+   */
+  const retiredEarners: RetiredEarnerRead | null = cold?.rows.sixMonthAds.length
+    ? readRetiredEarners(cold.rows.sixMonthAds, { anchorDate: auditWindow.anchorDate })
+    : null;
   const accountTotals30 = accFull30.length > 0 ? aggregateDaily(accFull30) : null;
 
   // The recognition strip gets its ads count the moment we know it (seconds in).
@@ -3233,6 +3245,7 @@ export async function runMagicAudit(
   // insights should see what we found in the actual creatives.
   if (coldCreativePromise) await coldCreativePromise;
 
+  let insightsPublished = 0;
   // B3 — rank the lead insights across everything that completed. The ranker
   // reads the sections' own verdicts and the account's own totals as rules: an
   // insight that contradicts the chapter under it is worse than no insight.
@@ -3281,7 +3294,10 @@ export async function runMagicAudit(
         : null,
     };
     const insights = await rankLeadInsights(meter, client, sections, synthSystem, guardrails);
-    if (insights) await updateRow({ lead_insights: insights.map((i) => anchorWords(scrubInsightProse(i))) });
+    if (insights) {
+      insightsPublished = insights.length;
+      await updateRow({ lead_insights: insights.map((i) => anchorWords(scrubInsightProse(i))) });
+    }
   } catch (err) {
     logger.warn({ err }, 'lead-insight ranking failed (report still valid)');
   }
@@ -3290,12 +3306,40 @@ export async function runMagicAudit(
   // written once the chapters exist; fail-soft, because a report without it is
   // the report we shipped yesterday.
   if (recognition) {
+    let connection: string | null = null;
     try {
-      const connection = await connectSections(meter, sections, synthSystem);
-      if (connection) await updateRow({ recognition: { ...recognition, ...(rowState.recognition as object ?? {}), connection } });
+      connection = await connectSections(meter, sections, synthSystem);
     } catch (err) {
       logger.warn({ err, auditId }, 'cross-section connection failed (report still valid)');
     }
+    // The settled work receipt. work_log is the live feed the page narrates
+    // while the run cooks; this is the summary it shows once the report stops
+    // moving, and every row in it points at something this run actually did.
+    let work: WorkRow[] = [];
+    try {
+      work = buildWorkLedger({
+        sections,
+        window: auditWindow,
+        adsRead: adsReadAll,
+        daysRead: daysReadAll,
+        coreDaysCovered: new Set(rows30.map((r) => r.date)).size,
+        retiredAdsFound: retiredEarners?.count ?? 0,
+        insightsRanked: insightsPublished,
+        // Read off what was actually written to the row rather than off the
+        // local: the ledger may only claim work the report can show.
+        scorecardDimensions: Array.isArray(rowState.scorecard) ? rowState.scorecard.length : 0,
+      });
+    } catch (err) {
+      logger.warn({ err, auditId }, 'work ledger build failed (report still valid)');
+    }
+    await updateRow({
+      recognition: {
+        ...recognition,
+        ...((rowState.recognition as object) ?? {}),
+        ...(connection ? { connection } : {}),
+        ...(work.length ? { work: anchorWords(work) } : {}),
+      },
+    });
   }
 
   await updateRow({ status: anyError ? 'error' : 'complete', cost_usd: round2(meter.spentUsd) });
