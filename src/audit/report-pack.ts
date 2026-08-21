@@ -149,6 +149,10 @@ export function computeConcentration(rows30: PackAdRow[]): PackSection {
     warnings.push(`Thin base (${ads.length} ads with spend) — concentration reads are directional only.`);
   }
 
+  const topAds = ads.slice(0, 10);
+  const nameCounts = new Map<string, number>();
+  for (const a of topAds) nameCounts.set(a.name, (nameCounts.get(a.name) ?? 0) + 1);
+
   return {
     summary:
       `Your top ad takes ${top1}% of the last 30 days' spend; the top 3 take ${top3}% and the top 10 take ${top10}% ` +
@@ -169,7 +173,15 @@ export function computeConcentration(rows30: PackAdRow[]): PackSection {
       hhi,
       band,
       signal: band !== 'healthy',
-      top_ads: ads.slice(0, 10).map((a) => ({ ad_id: a.ad_id, ad_name: a.name, spend: Math.round(a.spend), share_pct: pct(a.spend, total) })),
+      top_ads: topAds.map((a) => ({
+        ad_id: a.ad_id,
+        ad_name: a.name,
+        spend: Math.round(a.spend),
+        share_pct: pct(a.spend, total),
+        // Two different ads can carry the same name, and the page rendered two
+        // identical rows. The flag lets it disambiguate; we never rename an ad.
+        ...(nameCounts.get(a.name)! > 1 ? { name_shared_with_other_ad: true } : {}),
+      })),
     },
     warnings: warnings.length ? warnings : undefined,
     derivation:
@@ -199,6 +211,39 @@ export interface FatigueAd {
   low_frequency_acquisition_guard: boolean;
   /** Avg spend/day over the ad's last 14 active days — its CURRENT run-rate. */
   recent_daily_spend: number;
+  /**
+   * The ad's REAL summed spend over the last 30 days of the window, beside the
+   * 90-day `spend`. A page that multiplied `recent_daily_spend` by 30 printed
+   * 4,110 for an ad on an account whose whole 30 days was 8,999.
+   */
+  spend_30d: number;
+  /**
+   * Cost per result over the first half of the run, cpr mode only (null in roas
+   * mode, and null when that half booked no result). The `kpi_*` fields above
+   * are unitless results-per-spend RATES for the trend math, so printing one as
+   * a KPI reads as "0.04x" next to a real cost per lead of 18.59.
+   */
+  cpl_first_half: number | null;
+  /** Cost per result over the confirmation window, same rules as above. */
+  cpl_last_14: number | null;
+}
+
+/**
+ * The ads actually dragging spend: fatiguing, NOT flagged as low-frequency
+ * acquisition, ranked by real 30-day spend, capped at three. Emitted here
+ * because the page cannot derive it: a "below breakeven" filter over the
+ * unitless rate fields matches EVERY ad on a cost-per-result account, and a
+ * guarded acquisition ad is not dragging anything.
+ */
+export interface DraggingAd {
+  ad_id: string;
+  ad_name: string;
+  spend_30d: number;
+  recent_daily_spend: number;
+  /** The headline figure in the account's own grammar, already labelled. */
+  stat: string;
+  /** One sentence saying why it is on this list, with a real number in it. */
+  why: string;
 }
 
 /**
@@ -211,6 +256,31 @@ export const CONCEPT_FLOOR_CAP = 5_000;
 const cappedFloor = (base: number, relative: number, cap: number): number =>
   Math.max(base, Math.min(relative, cap));
 
+/** An exact money figure (two decimals) — a cost per lead of 18.59 must not round to 19. */
+const moneyExact = (v: number, currency: string): string => `${v.toFixed(2)}${currency ? ` ${currency}` : ''}`;
+
+/** The ad's headline figure, labelled, in the account's own grammar. */
+function draggingStat(ad: FatigueAd, mode: 'roas' | 'cpr', currency: string): string {
+  if (mode === 'roas') return `Meta ROAS ${ad.kpi_recent.toFixed(2)}`;
+  if (ad.cpl_last_14 == null) return 'no leads measured in the last 14 days';
+  return `Meta CPL ${moneyExact(ad.cpl_last_14, currency)}`;
+}
+
+/** Why this ad is on the dragging list, in one sentence carrying a real number. */
+function draggingWhy(ad: FatigueAd, mode: 'roas' | 'cpr', currency: string): string {
+  const daily = `${money(ad.recent_daily_spend, currency)} a day`;
+  if (mode === 'roas') {
+    return `ROAS is down ${Math.abs(ad.trend_pct)}% from the first half of its run to the second, it sits at ${ad.kpi_recent.toFixed(2)} now, and it still takes ${daily}.`;
+  }
+  if (ad.cpl_first_half != null && ad.cpl_last_14 != null) {
+    return `Cost per lead moved from ${moneyExact(ad.cpl_first_half, currency)} in the first half of its run to ${moneyExact(ad.cpl_last_14, currency)} now, and it still takes ${daily}.`;
+  }
+  if (ad.cpl_last_14 != null) {
+    return `Leads per unit of spend are down ${Math.abs(ad.trend_pct)}% across its run and it now buys a lead for ${moneyExact(ad.cpl_last_14, currency)}, on ${daily}.`;
+  }
+  return `No lead was measured in its most recent days while it kept spending ${daily}.`;
+}
+
 export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currency = '', grossMarginPct: number | null = null): PackSection & { data: { ads: FatigueAd[] } & Record<string, unknown> } {
   const mode = kpiMode(rows90);
   const byAd = new Map<string, PackAdRow[]>();
@@ -220,6 +290,9 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currenc
     byAd.set(r.ad_id, list);
   }
   const totalSpend = rows90.reduce((s, r) => s + (r.spend || 0), 0);
+  // The window's own last day, so a 30-day spend is REAL summed spend and never
+  // a daily run-rate multiplied out to a month.
+  const windowEndMs = rows90.reduce((max, r) => Math.max(max, Date.parse(r.date)), 0);
 
   const ads: FatigueAd[] = [];
   let suppressedNoResults = 0;
@@ -244,6 +317,13 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currenc
       // cost-per-result mode: LOWER is better, so invert into a "results per spend" rate for trend math
       return div(part.reduce((s, r) => s + resultOf(r), 0), sp);
     };
+    // The unitless rate above carries the TREND. A cost per result is what the
+    // account actually pays, and it is the only figure worth printing in cpr mode.
+    const costPer = (part: PackAdRow[]): number | null => {
+      if (mode !== 'cpr') return null;
+      const res = part.reduce((s, r) => s + resultOf(r), 0);
+      return res > 0 ? r2(div(part.reduce((s, r) => s + r.spend, 0), res)) : null;
+    };
     const h1 = rate(sorted.slice(0, mid));
     const h2 = rate(sorted.slice(mid));
     const trendPct = h1 > 0 ? r1(((h2 - h1) / h1) * 100) : 0;
@@ -254,11 +334,18 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currenc
     // The half-window mean LAGS where the ad is NOW — a steady decliner can
     // average 1.65 while sitting at 1.2 today. Classify + runway off the
     // recent level (last 14 active days), trend off the halves.
-    const lastDate = Date.parse(days[days.length - 1]!);
-    const recentRows = sorted.filter((r) => lastDate - Date.parse(r.date) < 14 * 86_400_000);
+    // The confirmation window is capped at HALF the run: on a run under 28 active
+    // days a flat 14-day window reaches back into the first half, so the trend
+    // would be confirmed against itself.
+    const recentWindowDays = Math.max(1, Math.min(14, Math.floor(days.length / 2)));
+    const recentDates = new Set(days.slice(-recentWindowDays));
+    const recentRows = sorted.filter((r) => recentDates.has(r.date));
     const recent = rate(recentRows);
-    const recentDays = new Set(recentRows.map((r) => r.date)).size;
-    const recentDailySpend = recentDays > 0 ? recentRows.reduce((s, r) => s + r.spend, 0) / recentDays : 0;
+    const recentDays = recentDates.size;
+    const recentDailySpend = recentRows.reduce((s, r) => s + r.spend, 0) / recentDays;
+    const spend30d = list
+      .filter((r) => windowEndMs - Date.parse(r.date) < 30 * 86_400_000)
+      .reduce((s, r) => s + (r.spend || 0), 0);
     const freqVals = list.map((r) => r.frequency).filter((f): f is number => typeof f === 'number' && f > 0);
     const avgFreq = freqVals.length ? r2(freqVals.reduce((s, f) => s + f, 0) / freqVals.length) : null;
 
@@ -298,6 +385,9 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currenc
       days_to_breakeven: runway,
       low_frequency_acquisition_guard: lowFreqGuard,
       recent_daily_spend: Math.round(recentDailySpend),
+      spend_30d: Math.round(spend30d),
+      cpl_first_half: costPer(sorted.slice(0, mid)),
+      cpl_last_14: costPer(recentRows),
     });
   }
 
@@ -319,20 +409,41 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currenc
   // The fatiguing set's CURRENT run-rate — the honest "money riding on declining
   // creative" number (pro-trust layer). A run-rate, not a loss claim.
   const fatiguingDailyBurn = Math.round(fatiguing.reduce((s, a) => s + a.recent_daily_spend, 0));
+  // The list the page prints as "what is dragging the most spend". A guarded
+  // acquisition ad is not dragging anything, and the ranking is real 30-day
+  // spend, not a run-rate.
+  const dragging: DraggingAd[] = fatiguing
+    .filter((a) => !a.low_frequency_acquisition_guard)
+    .sort((a, b) => b.spend_30d - a.spend_30d)
+    .slice(0, 3)
+    .map((a) => ({
+      ad_id: a.ad_id,
+      ad_name: a.ad_name,
+      spend_30d: a.spend_30d,
+      recent_daily_spend: a.recent_daily_spend,
+      stat: draggingStat(a, mode, currency),
+      why: draggingWhy(a, mode, currency),
+    }));
+
   const summaryParts: string[] = [];
   if (fatiguing.length) {
+    // Naming the ads is the point: "1 evergreen winner (35.7% of assessed
+    // spend). Protect these" told a reader nothing they could act on.
+    const biggestFatiguing = fatiguing[0]!;
     summaryParts.push(
       `${fatiguing.length} ad${fatiguing.length > 1 ? 's' : ''} carrying ${fatiguingShare}% of assessed spend ` +
-      `${fatiguing.length > 1 ? 'are' : 'is'} genuinely fatiguing — ${kpiWord} down 25%+ from the first half of its run to the second` +
+      `${fatiguing.length > 1 ? 'are' : 'is'} genuinely fatiguing (${kpiWord} down 25%+ from the first half of its run to the second)` +
+      (fatiguing.length > 1 ? `, the biggest being "${biggestFatiguing.ad_name}"` : `: "${biggestFatiguing.ad_name}"`) +
       (soonest?.days_to_breakeven && soonest.days_to_breakeven > 1 ? `; at the current decline "${soonest.ad_name}" crosses ${breakevenWord} in roughly ${soonest.days_to_breakeven} days` : soonest?.days_to_breakeven === 1 ? `; at the current decline "${soonest.ad_name}" crosses ${breakevenWord} within a day` : '') + '.' +
-      (fatiguingDailyBurn > 0 ? ` Right now ≈${money(fatiguingDailyBurn, currency)}/day runs on this declining set — that's the budget the replacements inherit.` : ''),
+      (fatiguingDailyBurn > 0 ? ` Right now ≈${money(fatiguingDailyBurn, currency)}/day runs on this declining set, and that is the budget the replacements inherit.` : ''),
     );
   } else {
     summaryParts.push(`No ad with meaningful spend shows a real fatigue pattern right now (${kpiWord} trend, not age — long-running ads that still hold their number don't count).`);
   }
   if (evergreens.length) {
+    const biggestEvergreen = evergreens[0]!;
     summaryParts.push(
-      `${evergreens.length} evergreen winner${evergreens.length > 1 ? 's' : ''} (${evergreenShare}% of assessed spend) — running 60+ days with the number holding. Protect these; do not "refresh" them.`,
+      `${evergreens.length} evergreen winner${evergreens.length > 1 ? 's' : ''} (${evergreenShare}% of assessed spend), the biggest "${biggestEvergreen.ad_name}", running 60+ days with the number holding. Protect these; do not "refresh" them.`,
     );
   }
 
@@ -352,20 +463,28 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currenc
   return {
     summary: summaryParts.join(' '),
     next_step: fatiguing.length
-      ? `Brief replacements for the fatiguing ad(s) now — the runway number is the deadline, and the evergreen list is the style guide for what this account rewards.`
+      ? ads.some((a) => a.days_to_breakeven != null)
+        ? `Brief replacements for the fatiguing ad(s) now — the runway number is the deadline, and the evergreen list is the style guide for what this account rewards.`
+        : `Brief replacements for the fatiguing ad(s) now, starting with "${(dragging[0] ?? fatiguing[0]!).ad_name}", and use the evergreen list as the style guide for what this account rewards.`
       : `Nothing to refresh on trend. Re-check in 30 days — the runway math only means something when the decline is real.`,
     data: {
       window_days: 90,
       kpi_mode: mode,
       assessed_ads: ads.length,
-      breakeven_roas: breakevenRoas,
-      gross_margin_pct: grossMarginPct ?? undefined,
+      // An account with no purchase revenue has no breakeven and no margin line,
+      // so neither figure is emitted for it (the scatter does the same).
+      breakeven_roas: mode === 'roas' ? breakevenRoas : undefined,
+      gross_margin_pct: mode === 'roas' ? (grossMarginPct ?? undefined) : undefined,
       fatiguing_spend_share_pct: fatiguingShare,
       evergreen_spend_share_pct: evergreenShare,
       fatiguing_daily_burn: fatiguingDailyBurn,
       currency: currency || undefined,
       ads_suppressed_no_results: suppressedNoResults || undefined,
       signal: fatiguing.length > 0,
+      dragging,
+      dragging_note: dragging.length
+        ? undefined
+        : 'No ad clears the bar as dragging spend once the low-frequency acquisition ads are excluded. Budget concentration is covered in the concentration and budget chapters.',
       ads: ads.slice(0, 20),
     },
     warnings: warnings.length ? warnings : undefined,
@@ -380,8 +499,11 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currenc
             ? `Breakeven line = ${breakevenRoas}× ROAS, as set for this account. `
             : `Breakeven line = 1.0× ROAS — the honest default when we don't know your gross margin; your true breakeven is higher (roughly 1 ÷ gross margin), so treat these runways as optimistic. `
         : '') +
-      `The runway extrapolates the observed per-day decline from the ad's last-14-day level down to breakeven — a deadline estimate, not a guarantee. ` +
-      `The daily figure is each fatiguing ad's average spend over its own last 14 active days, summed.`,
+      (ads.some((a) => a.days_to_breakeven != null)
+        ? `The runway extrapolates the observed per-day decline from the ad's last-14-day level down to breakeven — a deadline estimate, not a guarantee. `
+        : '') +
+      `The daily figure is each fatiguing ad's average spend over its own last 14 active days, summed (half its run when it has been live under 28 days). ` +
+      `The dragging list ranks the fatiguing ads that are NOT flagged as low-frequency acquisition by their real last-30-day spend.`,
   };
 }
 
@@ -726,6 +848,37 @@ export function computeCohorts(rows180: Array<Pick<PackAdRow, 'ad_id' | 'date' |
   // and check the old cohorts are evergreen) belongs in the same sentence as
   // the number, not in an action row the page renders as a finding.
   const quiet = freshShare >= 40;
+
+  const baseDerivation =
+    `Each ad's launch month is approximated by its first day with spend inside the ${series.length}-month window ` +
+    `(ads already running when the window opens are grouped as "${month(windowStart)} or earlier" — we can't see further back). ` +
+    `Each month's spend is then split by those launch cohorts; freshness = the last full month's share going to creatives launched in that month or the one before.`;
+
+  // A read shorter than ~90 days cannot grade creative age: nearly every ad's
+  // first spend day falls inside the window, so freshness trends toward 100% by
+  // construction and the live report rendered that as a strength.
+  const windowEnd = rows180.reduce((max, r) => (r.date > max ? r.date : max), '0000-01-01');
+  const daysCovered =
+    windowStart <= windowEnd ? Math.round((Date.parse(windowEnd) - Date.parse(windowStart)) / 86_400_000) + 1 : 0;
+  const windowTooShort = daysCovered < 90;
+  if (windowTooShort) {
+    return {
+      summary:
+        `The ad-level read covers ${daysCovered} days, too short to judge how old this account's creative is: almost every ad in it first spent inside the window, ` +
+        `so a freshness share here would read high because of the window, not because of the account. ` +
+        `This chapter says something once about 90 days of ad-level history are synced.`,
+      data: {
+        window_months: series.length,
+        window_too_short: true,
+        days_covered: daysCovered,
+        fresh_cohort_share_pct: r1(freshShare),
+        signal: false,
+        series,
+      },
+      derivation: `${baseDerivation} With only ${daysCovered} days of ad-level history the cohort split is still shown, but it is not graded.`,
+    };
+  }
+
   return {
     summary:
       `Of this month's spend, ${r1(freshShare)}% goes to creatives launched in the last ~2 months — ${read}. ` +
@@ -740,14 +893,13 @@ export function computeCohorts(rows180: Array<Pick<PackAdRow, 'ad_id' | 'date' |
         }),
     data: {
       window_months: series.length,
+      window_too_short: false,
+      days_covered: daysCovered,
       fresh_cohort_share_pct: r1(freshShare),
       signal: freshShare < 40,
       series,
     },
-    derivation:
-      `Each ad's launch month is approximated by its first day with spend inside the ${series.length}-month window ` +
-      `(ads already running when the window opens are grouped as "${month(windowStart)} or earlier" — we can't see further back). ` +
-      `Each month's spend is then split by those launch cohorts; freshness = the last full month's share going to creatives launched in that month or the one before.`,
+    derivation: baseDerivation,
   };
 }
 
@@ -777,9 +929,8 @@ export function computeCostTrend(accRows90: PackAccountRow[], currency = ''): Pa
 
   if (series.length < 4) {
     return {
-      summary: `Not enough weekly history to read a cost trend (${series.length} weeks with impressions).`,
-      next_step: `Revisit once 4+ weeks of delivery are synced.`,
-      data: { series, signal: false },
+      summary: `Not enough weekly history to read a cost trend (${series.length} weeks with impressions). Revisit once 4+ weeks of delivery are synced.`,
+      data: { series, weeks: series.length, signal: false },
       warnings: ['Thin window — cost trend suppressed.'],
     };
   }
@@ -787,52 +938,109 @@ export function computeCostTrend(accRows90: PackAccountRow[], currency = ''): Pa
   const firstQ = series.slice(0, Math.max(2, Math.floor(series.length / 3)));
   const lastQ = series.slice(-Math.max(2, Math.floor(series.length / 3)));
   const avg = (xs: number[]) => xs.reduce((s, v) => s + v, 0) / (xs.length || 1);
-  const cpmDelta = pct(avg(lastQ.map((s) => s.cpm)) - avg(firstQ.map((s) => s.cpm)), avg(firstQ.map((s) => s.cpm)));
-  const ctrDelta = pct(avg(lastQ.map((s) => s.ctr_link_pct)) - avg(firstQ.map((s) => s.ctr_link_pct)), avg(firstQ.map((s) => s.ctr_link_pct)) || 1);
+  // ONE computation owns the trend: these six figures are what the summary
+  // says, what `verdict` is decided from, and what the page prints. The live
+  // report printed "flat", "+6.9%" and "+23%" about the same CPM series.
+  const cpmFirstRaw = avg(firstQ.map((s) => s.cpm));
+  const cpmLastRaw = avg(lastQ.map((s) => s.cpm));
+  const ctrFirstRaw = avg(firstQ.map((s) => s.ctr_link_pct));
+  const ctrLastRaw = avg(lastQ.map((s) => s.ctr_link_pct));
+  const cpmDelta = pct(cpmLastRaw - cpmFirstRaw, cpmFirstRaw);
+  // With no link click recorded anywhere in the window there is no CTR read at
+  // all — 0% against 0% is not "CTR held".
+  const ctrReadable = ctrFirstRaw > 0;
+  const ctrDelta = ctrReadable ? pct(ctrLastRaw - ctrFirstRaw, ctrFirstRaw) : 0;
+  const cpmFirst = r2(cpmFirstRaw);
+  const cpmLast = r2(cpmLastRaw);
+  const ctrFirst = r2(ctrFirstRaw);
+  const ctrLast = r2(ctrLastRaw);
+  const cpmMoveWord = `${cpmDelta >= 0 ? '+' : ''}${r1(cpmDelta)}%`;
 
   // Quantify the drift honestly (pro-trust layer): what the LAST quarter of
   // weeks' impressions actually cost vs what they'd have cost at the window's
   // opening CPM. A "same impressions, today's prices" comparison — not a loss
   // claim, and never summed with other reports' numbers.
-  const openingCpm = avg(firstQ.map((s) => s.cpm));
   const recentImps = lastQ.reduce((s, w) => s + w.impressions, 0);
   const recentSpend = lastQ.reduce((s, w) => s + w.spend, 0);
   const recentWeeks = lastQ.length;
-  const extraCost = Math.round(recentSpend - (recentImps * openingCpm) / 1000);
+  const extraCost = Math.round(recentSpend - (recentImps * cpmFirstRaw) / 1000);
+  const showsExtraCost = cpmDelta > 10 && extraCost > 0;
 
-  // Decompose: CPM up + CTR holding = auction/market. CPM up + CTR down = the creative is earning worse delivery.
+  // Decompose: CPM up + CTR holding = auction/market. CTR falling while CPM is
+  // flat or up = the creative is earning worse auctions, which is a finding on
+  // its own — the live report called a 62% CTR slide "flat, no action needed".
+  const ctrLevels = `${ctrLast}% now against ${ctrFirst}% at the start of the window`;
+  let verdict: 'cpm_up_ctr_down' | 'ctr_down_cpm_held' | 'cpm_up_ctr_held' | 'ctr_down_cpm_soft' | 'cpm_down' | 'flat';
   let read: string;
-  if (cpmDelta > 10 && ctrDelta < -10) read = `costs are up ${r1(cpmDelta)}% AND link CTR is down ${r1(-ctrDelta)}% — that combination points at the creative earning worse auctions, not just a pricier market`;
-  else if (cpmDelta > 10) read = `CPM is up ${r1(cpmDelta)}% while CTR held — that reads as auction/market pressure, not something your creative did wrong`;
-  else if (cpmDelta < -10) read = `CPM is DOWN ${r1(-cpmDelta)}% across the window — the market is getting cheaper for you`;
-  else read = `CPM has been flat (within ±10%) across the window — cost pressure is not the story here`;
-  const quantified =
-    cpmDelta > 10 && extraCost > 0
-      ? ` The last ${recentWeeks} weeks' impressions cost ≈${money(extraCost, currency)} more than the same impressions at your start-of-window CPM.`
-      : '';
+  if (cpmDelta > 10 && ctrReadable && ctrDelta < -10) {
+    verdict = 'cpm_up_ctr_down';
+    read = `costs are up ${r1(cpmDelta)}% AND link CTR is down ${r1(-ctrDelta)}% (${ctrLevels}) — that combination points at the creative earning worse auctions, not just a pricier market`;
+  } else if (ctrReadable && ctrDelta <= -25 && cpmDelta >= -5) {
+    verdict = 'ctr_down_cpm_held';
+    read =
+      `link CTR is down ${r1(-ctrDelta)}% (${ctrLevels}) while CPM moved ${cpmMoveWord}. ` +
+      `Delivery is not getting cheaper and the creative is earning worse auctions than it did`;
+  } else if (cpmDelta > 10) {
+    verdict = 'cpm_up_ctr_held';
+    read = `CPM is up ${r1(cpmDelta)}% while CTR held — that reads as auction/market pressure, not something your creative did wrong`;
+  } else if (ctrReadable && ctrDelta < -10) {
+    verdict = 'ctr_down_cpm_soft';
+    read = `CPM moved ${cpmMoveWord} but link CTR is down ${r1(-ctrDelta)}% (${ctrLevels}), so delivery is holding while engagement slips`;
+  } else if (cpmDelta < -10) {
+    verdict = 'cpm_down';
+    read = `CPM is DOWN ${r1(-cpmDelta)}% across the window — the market is getting cheaper for you`;
+  } else {
+    verdict = 'flat';
+    read = `CPM has been flat (within ±10%) across the window — cost pressure is not the story here`;
+  }
+  const quantified = showsExtraCost
+    ? ` The last ${recentWeeks} weeks' impressions cost ≈${money(extraCost, currency)} more than the same impressions at your start-of-window CPM.`
+    : '';
+  const ctrCaveat = ctrReadable ? '' : ` No link click is recorded in this window, so the CTR half of this read is not available.`;
+
+  const next_step =
+    verdict === 'cpm_up_ctr_down'
+      ? `Treat this as a creative problem first: fresher hooks lift CTR, better CTR buys cheaper auctions. Re-check CPM two weeks after new creative lands.`
+      : verdict === 'ctr_down_cpm_held'
+        ? `Rebuild the creative rather than waiting for CPM to come back down: at ${ctrLast}% link CTR the auction is pricing weaker engagement, not a pricier market. Brief new hooks this week and re-read this chart two weeks after they land.`
+        : verdict === 'cpm_up_ctr_held'
+          ? `Nothing to fix on your side — budget for the pricier auction or shift spend toward the placements/dayparts where CPM held.`
+          : verdict === 'ctr_down_cpm_soft'
+            ? `Get new hooks into test before CPM follows CTR down: falling engagement usually shows up as a pricier auction a few weeks later.`
+            : verdict === 'cpm_down'
+              ? `Take the cheaper auction while it lasts: the ads already clearing your bar can carry more budget at this CPM.`
+              // A flat read is the section saying it found nothing, and a quiet
+              // section carries no action row.
+              : undefined;
 
   return {
-    summary: `Over the last ${series.length} weeks: ${read}.${quantified} (Weekly averages, account level.)`,
-    next_step:
-      cpmDelta > 10 && ctrDelta < -10
-        ? `Treat this as a creative problem first: fresher hooks lift CTR, better CTR buys cheaper auctions. Re-check CPM two weeks after new creative lands.`
-        : cpmDelta > 10
-          ? `Nothing to fix on your side — budget for the pricier auction or shift spend toward the placements/dayparts where CPM held.`
-          : `No action needed — keep this chart as the baseline for the next audit.`,
+    summary: `Over the last ${series.length} weeks: ${read}.${quantified}${ctrCaveat} (Weekly averages, account level.)`,
+    ...(next_step ? { next_step } : {}),
     data: {
       series,
+      // The ACTUAL bucket count — any week figure in the prose or on the page
+      // is this number, never a rounded month count.
+      weeks: series.length,
+      verdict,
       cpm_delta_pct: r1(cpmDelta),
       ctr_delta_pct: r1(ctrDelta),
-      cpm_extra_cost_recent: cpmDelta > 10 && extraCost > 0 ? extraCost : undefined,
-      cpm_extra_cost_weeks: cpmDelta > 10 && extraCost > 0 ? recentWeeks : undefined,
+      cpm_first: cpmFirst,
+      cpm_last: cpmLast,
+      ctr_first: ctrFirst,
+      ctr_last: ctrLast,
+      ctr_readable: ctrReadable,
+      cpm_extra_cost_recent: showsExtraCost ? extraCost : undefined,
+      cpm_extra_cost_weeks: showsExtraCost ? recentWeeks : undefined,
       currency: currency || undefined,
-      signal: Math.abs(cpmDelta) > 10 || ctrDelta < -10,
+      signal: verdict !== 'flat',
     },
     derivation:
       `Daily account delivery is bucketed into calendar weeks; CPM = spend ÷ impressions × 1000 per week. ` +
-      `The trend compares the average of the first third of weeks against the last third. ` +
-      `The cost figure prices the last ${recentWeeks} weeks' actual impressions at the opening CPM and takes the difference — ` +
-      `"same impressions, opening prices". It shares the CPM's causes (market AND creative), so we never add it to other reports' numbers.`,
+      `The trend compares the average of the first third of those ${series.length} weeks against the last third, for CPM and link CTR alike. ` +
+      (showsExtraCost
+        ? `The cost figure prices the last ${recentWeeks} weeks' actual impressions at the opening CPM and takes the difference — ` +
+          `"same impressions, opening prices". It shares the CPM's causes (market AND creative), so we never add it to other reports' numbers.`
+        : `No cost figure is quoted here: it only means something when CPM actually rose over the window.`),
   };
 }
 
@@ -918,11 +1126,12 @@ export function computeDayOfWeek(accRows90: PackAccountRow[]): PackSection {
     warnings: suppressedDays > 0
       ? [`${suppressedDays} weekday(s) carry no mapped result, so they have no ${kpiLabel} and sit outside the best/worst comparison.`]
       : undefined,
+    // The daily-granularity caveat is stated ONCE, in the summary above: the
+    // rendered section repeated it verbatim here.
     derivation:
       `90 days of account-level delivery grouped by weekday (~13 of each), ${kpiLabel} computed per weekday from the summed spend and ` +
-      `that weekday's own results (purchases, or the lead actions when the account books leads). A weekday with no mapped result gets no ` +
-      `${kpiLabel} at all rather than showing its raw spend. ` +
-      `Daily granularity only — Meta doesn't give us clean hourly history, so this is day-of-week, not dayparting. ` +
+      `that weekday's own ${mode === 'roas' ? 'purchases' : 'recorded results, the lead actions this account books'}. ` +
+      `A weekday with no mapped result gets no ${kpiLabel} at all rather than showing its raw spend. ` +
       `Gaps under 25% stay on the watchlist rather than becoming schedule advice.`,
   };
 }

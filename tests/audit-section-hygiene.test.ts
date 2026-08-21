@@ -87,13 +87,28 @@ describe('budget scatter — a wide spread is a finding, not a quiet row', () =>
   });
 });
 
-describe('creative cohorts — the quiet cadence line lives in the summary', () => {
-  it('a fresh account keeps the advice in its one line and carries no next step', () => {
-    // Every ad launches in the last window month, so the fresh share is 100%.
+describe('creative cohorts — a quiet chapter carries no next step', () => {
+  it('a short read says so and advises nothing, because it cannot judge a cadence', () => {
+    // 20 days of history: every ad first spent inside the window.
     const rows = Array.from({ length: 40 }, (_, i) => ({
       ad_id: `ad_${i % 4}`, date: day(60 + (i % 20)), spend: 100,
     }));
     const s = computeCohorts(rows);
+    expect(s.data.signal).toBe(false);
+    expect(s.data.window_too_short).toBe(true);
+    expect(s.next_step).toBeUndefined();
+    expect(s.summary).toContain('too short to judge');
+    expect(s.summary).not.toContain('Keep this launch cadence');
+  });
+
+  it('a full window with a healthy cadence keeps the advice in its one line', () => {
+    // 200 days of history, every ad launched in the last two months.
+    const rows = [
+      ...Array.from({ length: 30 }, (_, i) => ({ ad_id: 'old_1', date: day(i), spend: 10 })),
+      ...Array.from({ length: 40 }, (_, i) => ({ ad_id: `ad_${i % 4}`, date: day(170 + (i % 30)), spend: 100 })),
+    ];
+    const s = computeCohorts(rows);
+    expect(s.data.window_too_short).toBe(false);
     if (s.data.signal === false) {
       expect(s.next_step).toBeUndefined();
       expect(s.summary).toContain('Keep this launch cadence');
