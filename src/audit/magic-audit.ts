@@ -2488,6 +2488,9 @@ export async function runMagicAudit(
         sections['concept_roas']?.data as Parameters<typeof computeWhatsWorking>[1],
         savedScorecard ?? undefined,
         client.currency,
+        // On a read too short to judge creative age, "100% fresh" is arithmetic
+        // on the window, so the protect list must not claim it as a strength.
+        sections['creative_cohorts']?.data as Parameters<typeof computeWhatsWorking>[4],
       ),
     optimization_events: async () => {
       adsetConfigsForModel = await fetchAdsetConfigs(code, client.adAccountId, coldToken);
@@ -2743,7 +2746,9 @@ export async function runMagicAudit(
         logger.warn({ err, code }, 'hook correction failed (scorecard continues uncorrected)');
       }
 
-      if (scorecard.length) await updateRow({ scorecard });
+      // The scorecard's position and next-step lines are read by the customer
+      // like any section string, and they were bypassing the dash gate.
+      if (scorecard.length) await updateRow({ scorecard: dedashDeep(scorecard) });
       savedScorecard = scorecard; // later sections (whats_working) read it
       logger.info({ code, dimensions: scorecard.map((e) => `${e.key}:${e.band}`) }, 'scorecard computed');
 

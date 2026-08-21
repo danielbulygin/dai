@@ -291,6 +291,23 @@ reader could have disproved from the same payload. The generator-side fixes:
   claim can be scoped to them, and a lead-gen ad's fallback stat is money per
   lead ("Meta CPL 18.6 USD") rather than a bare count or a ROAS multiple.
 
+### Section fields the simulation round added
+
+The page must read these rather than deriving them, because deriving them is
+what produced the wrong numbers on the live report.
+
+| Field | Section | Meaning |
+|---|---|---|
+| `ads[].spend_30d` | creative_fatigue | The ad's REAL summed spend over the last 30 days. Print this as "spend riding on this ad", never `recent_daily_spend * 30` (that turned 137/day into 4,110 on an account whose whole month was 8,999). |
+| `ads[].cpl_first_half`, `ads[].cpl_last_14` | creative_fatigue | Cost per result in money, cpr mode only, null when that period booked none. `kpi_first_half`/`kpi_recent` stay unitless RATES and must never be labelled ROAS. |
+| `dragging[]`, `dragging_note` | creative_fatigue | The correct "dragging the most spend" list: fatiguing ads with the low-frequency acquisition ads already excluded, ranked by real 30-day spend, each with a labelled `stat` and a `why`. Render as-is. When it is empty the note explains why and says where concentration is covered instead. |
+| `breakeven_roas`, `gross_margin_pct` | creative_fatigue | ABSENT in cpr mode. Absence means the account has no breakeven. Do not default to 1: that default is what made every lead-gen ad read as "below breakeven". |
+| `verdict`, `weeks`, `cpm_first/cpm_last/ctr_first/ctr_last`, `cpm_delta_pct`, `ctr_delta_pct`, `ctr_readable` | cost_trends | ONE computation owns the auction read. `weeks` is the real bucket count (the live page titled "12 weeks" over 14). A CTR down 25% or more while CPM holds is `ctr_down_cpm_held`, signal true, and the section says to rebuild creative. |
+| `window_too_short`, `days_covered` | creative_cohorts | `true` means freshness is an artifact of a short read. The section is quiet, the scorecard drops the freshness grade, and the protect list withholds it (`whats_working.data.freshness_withheld`). |
+| `top_ads[].name_shared_with_other_ad` | spend_concentration | Two different ads share this name. Disambiguate the row. |
+| `top_evergreen`, `best_angle.spend_share_pct`, `freshness_withheld`, `cohort_days_covered` | whats_working | The protect list now names the ad and the angle it protects. |
+| `window_days`, `window_start`, `window_end`, `delivery_days`, `window_spend`, `daily_avg` | account_facts | Every did-you-know sentence states its own window, and the daily average divides that window's spend by that window's days. `daily_avg * window_days` reconciles with `window_spend`. |
+
 ## Two rules the report page depends on
 
 **A quiet section carries no next step.** `data.signal === false` is a section

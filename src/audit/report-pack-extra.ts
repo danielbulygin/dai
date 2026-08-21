@@ -592,51 +592,88 @@ export function computeCohortWave(rows180: Array<Pick<PackAdRow, 'ad_id' | 'date
 export function computeWhatsWorking(
   fatigueData: { evergreen?: Array<{ ad_name: string; spend: number; roas_read?: string; days_running?: number }> } | undefined,
   conceptData: { angles?: Array<{ angle: string; kpi: number | null; spend_share_pct: number; below_floor: boolean }>; kpi_mode?: string; kpi_label?: string } | undefined,
-  scorecard: Array<{ dimension: string; band: string; position: string }> | undefined,
+  scorecard: Array<{ key?: string; dimension: string; band: string; position: string }> | undefined,
   currency: string,
+  cohortData?: { window_too_short?: boolean; days_covered?: number },
 ): PackSection {
   const evergreen = fatigueData?.evergreen ?? [];
-  const strongDims = (scorecard ?? []).filter((e) => e.band === 'strong');
+  // On a window shorter than the launch-cohort read needs, creative freshness
+  // comes out ~100% by construction: every ad in view launched inside it. That
+  // is arithmetic, not a strength, so it is withheld rather than graded.
+  const freshnessWithheld = cohortData?.window_too_short === true;
+  const isFreshness = (e: { key?: string; dimension: string }): boolean =>
+    e.key === 'freshness' || e.dimension.toLowerCase().startsWith('creative freshness');
+  const strongDims = (scorecard ?? []).filter((e) => e.band === 'strong' && !(freshnessWithheld && isFreshness(e)));
   const mode = conceptData?.kpi_mode ?? 'roas';
   const assessed = (conceptData?.angles ?? []).filter((a) => !a.below_floor && a.kpi != null);
   const bestAngle = assessed.length
     ? [...assessed].sort((a, b) => (mode === 'roas' ? (b.kpi ?? 0) - (a.kpi ?? 0) : (a.kpi ?? Infinity) - (b.kpi ?? Infinity)))[0]
     : null;
+  const biggestEvergreen = evergreen.length ? [...evergreen].sort((a, b) => (b.spend || 0) - (a.spend || 0))[0]! : null;
+  const cohortDaysCovered = typeof cohortData?.days_covered === 'number' ? cohortData.days_covered : null;
 
   if (evergreen.length === 0 && strongDims.length === 0 && !bestAngle) {
     return {
       summary: 'Nothing in the window clears the bar as a proven, protected winner yet — that itself is the finding.',
       next_step: 'The fastest path to a protect-list is creative volume: more genuinely different tests.',
-      data: { evergreen: [], strong_dimensions: [] },
+      data: {
+        evergreen: [],
+        strong_dimensions: [],
+        top_evergreen: null,
+        best_angle: null,
+        freshness_withheld: freshnessWithheld,
+        cohort_days_covered: cohortDaysCovered,
+      },
     };
   }
 
   const parts: string[] = [];
-  if (evergreen.length > 0) {
+  if (biggestEvergreen) {
     const evSpend = evergreen.reduce((s, e) => s + (e.spend || 0), 0);
+    const age = biggestEvergreen.days_running ? `${biggestEvergreen.days_running} days live` : '60+ days live';
     parts.push(
-      `${evergreen.length} evergreen winner${evergreen.length > 1 ? 's' : ''} (${money(evSpend, currency)} of recent spend) running 60+ days with the number holding`,
+      evergreen.length === 1
+        ? `"${biggestEvergreen.ad_name}" is the evergreen winner: ${money(biggestEvergreen.spend, currency)} of recent spend, ${age}, and its number is still holding`
+        : `${evergreen.length} evergreen winners hold ${money(evSpend, currency)} of recent spend. The biggest is "${biggestEvergreen.ad_name}" at ${money(biggestEvergreen.spend, currency)}, ${age}, with its number still holding`,
     );
   }
   if (strongDims.length > 0) parts.push(`${strongDims.length} benchmarked dimension${strongDims.length > 1 ? 's' : ''} in the strong band`);
-  if (bestAngle) parts.push(`"${bestAngle.angle}" is the proven angle (${conceptData?.kpi_label ?? 'Meta ROAS'} ${bestAngle.kpi})`);
+  if (bestAngle) {
+    parts.push(
+      `"${bestAngle.angle}" is the proven angle (${conceptData?.kpi_label ?? 'Meta ROAS'} ${bestAngle.kpi} on ${bestAngle.spend_share_pct}% of spend)`,
+    );
+  }
 
   return {
     summary: `The protect list: ${parts.join(' · ')}.`,
     next_step:
-      evergreen.length > 0
-        ? `Do NOT refresh the evergreens on a calendar — they retire when their number declines, not when they age. Mine them: their hooks and structure are your next briefs' starting point.`
+      biggestEvergreen
+        ? `Do NOT refresh "${biggestEvergreen.ad_name}" on a calendar. It retires when its number declines, not when it ages. Mine it: its hook and structure are the starting point for the next briefs.`
         : `Protect the strong dimensions while fixing the weak ones — don't churn what already works.`,
     data: {
       evergreen: evergreen.slice(0, 8),
+      top_evergreen: biggestEvergreen
+        ? {
+            ad_name: biggestEvergreen.ad_name,
+            spend: Math.round(biggestEvergreen.spend || 0),
+            days_running: biggestEvergreen.days_running ?? null,
+          }
+        : null,
       strong_dimensions: strongDims.map((d) => ({ dimension: d.dimension, position: d.position })),
-      best_angle: bestAngle ? { angle: bestAngle.angle, kpi: bestAngle.kpi } : null,
+      best_angle: bestAngle ? { angle: bestAngle.angle, kpi: bestAngle.kpi, spend_share_pct: bestAngle.spend_share_pct } : null,
+      freshness_withheld: freshnessWithheld,
+      cohort_days_covered: cohortDaysCovered,
       currency,
     },
     derivation:
       `Assembled from reports above, no new pulls: the fatigue report's evergreen set (60+ days running, return holding — the ` +
       `binding rule is decline-based, never age-based), the scorecard's strong-band dimensions, and the best assessed creative ` +
-      `angle. If it's listed here, the data says protect it.`,
+      `angle. If it's listed here, the data says protect it.` +
+      (freshnessWithheld
+        ? ` Creative freshness is left out here: ` +
+          (cohortDaysCovered != null ? `the ad-level window covers only ${cohortDaysCovered} days, ` : `the ad-level window is too short, `) +
+          `so a "recent launches" share of ~100% would only be restating the window's length.`
+        : ''),
   };
 }
 
@@ -795,17 +832,18 @@ export function computeLandingPages(rows: LandingAdRow[], checks: DeadUrlCheck[]
   const softCount = checks.filter((c) => c.verdict === 'soft_404').length;
   const redirects = checks.filter((c) => c.verdict === 'redirect_home');
   const burn = dead.reduce((s, c) => s + c.daily_burn, 0);
+  const deadAdCount = new Set(dead.flatMap((c) => c.ads)).size;
   const homepage = paths.find((p) => p.path === '/');
 
   const warnings: string[] = [];
   if (dead.length > 0) {
     warnings.push(
-      `${dead.length} live destination${dead.length > 1 ? 's' : ''} came back DEAD with ~${money(burn, currency)}/day still flowing at ${dead.length > 1 ? 'them' : 'it'} — pause the listed ads first.` +
+      `${dead.length} live destination${dead.length > 1 ? 's' : ''} came back DEAD with ~${money(burn, currency)}/day still flowing at ${dead.length > 1 ? 'them' : 'it'} — pause the listed ${deadAdCount === 1 ? 'ad' : 'ads'} first.` +
         (softCount > 0 ? ` (${softCount} of these ${softCount > 1 ? 'are' : 'is a'} soft-404${softCount > 1 ? 's' : ''}: the server answers 200 but the page itself says "not found".)` : ''),
     );
   }
   if (redirects.length > 0) {
-    warnings.push(`${redirects.length} destination${redirects.length > 1 ? 's' : ''} bounce to the homepage — the ad's promise dies on arrival.`);
+    warnings.push(`${redirects.length} destination${redirects.length > 1 ? 's' : ''} ${redirects.length === 1 ? 'bounces' : 'bounce'} to the homepage — the ad's promise dies on arrival.`);
   }
   if (uncheckedUrls > 0) {
     warnings.push(
@@ -817,15 +855,18 @@ export function computeLandingPages(rows: LandingAdRow[], checks: DeadUrlCheck[]
   }
 
   const top = paths[0]!;
+  const topFigure = `${top.path} (${top.spend_share_pct}%${top.kpi != null ? `, ${kpiLabel} ${top.kpi}` : ''})`;
   return {
     summary:
-      `${paths.length} destinations carry the mapped spend — biggest: ${top.path} (${top.spend_share_pct}%${top.kpi != null ? `, ${kpiLabel} ${top.kpi}` : ''}). ` +
+      (paths.length === 1
+        ? `1 destination carries the mapped spend: ${topFigure}. `
+        : `${paths.length} destinations carry the mapped spend — biggest: ${topFigure}. `) +
       (dead.length > 0
         ? `${dead.length} spending URL${dead.length > 1 ? 's are' : ' is'} DEAD right now (~${money(burn, currency)}/day burning).`
         : `Every checked live destination loads.`),
     next_step:
       dead.length > 0
-        ? `Pause the ads pointing at the dead URL${dead.length > 1 ? 's' : ''} today — that's ${money(burn * 30, currency)}/month recovered with zero downside.`
+        ? `Pause the ${deadAdCount === 1 ? 'ad' : 'ads'} pointing at the dead URL${dead.length > 1 ? 's' : ''} today — that's ${money(burn * 30, currency)}/month recovered with zero downside.`
         : homepage && homepage.spend_share_pct >= 5
           ? `Move the homepage traffic to the closest converting page and re-measure — the homepage almost never closes cold traffic.`
           : `Ranking looks healthy — shift test budget toward the best-returning underfunded destination.`,
@@ -926,7 +967,19 @@ export function computeAccountFacts(inp: AccountFactsInputs): PackSection {
   }
 
   const days = [...byDay.keys()].sort();
+  const firstDay = days[0]!;
   const lastDay = days[days.length - 1]!;
+  // One window, one denominator. Every sentence below states the span of the
+  // rows it was handed, and the daily average divides THIS window's spend by
+  // THIS window's day count. The report's hero states a shorter window of its
+  // own, so a fact that leaves its window unsaid reads as if it shared that one.
+  const windowDays =
+    Math.round((new Date(lastDay + 'T00:00:00Z').getTime() - new Date(firstDay + 'T00:00:00Z').getTime()) / 86400_000) + 1;
+  const deliveryDays = days.length;
+  const windowSpend = total;
+  const dailyAvg = windowSpend / Math.max(1, windowDays);
+  const windowPhrase =
+    windowDays >= 150 ? `over the last ${Math.round(windowDays / 30)} months` : `in the ${windowDays} days of history we can see`;
 
   const facts: Array<{ fact: string; detail: string }> = [];
 
@@ -935,7 +988,7 @@ export function computeAccountFacts(inp: AccountFactsInputs): PackSection {
   const longest = longestStillSpendingSpan(rows180);
   if (longest && longest.spanDays >= 30) {
     facts.push({
-      fact: `Your longest-running ad has been live ${longest.spanDays} days — and it's still spending.`,
+      fact: `Your longest-running ad has been live ${longest.spanDays} days, out of the ${windowDays} days of history we can see, and it is still spending.`,
       detail: `${adNames.get(longest.adId) ?? longest.adId} (first seen ${longest.first} in this window). Check the fatigue report: if its number holds, that's an evergreen, not a liability.`,
     });
   }
@@ -954,7 +1007,7 @@ export function computeAccountFacts(inp: AccountFactsInputs): PackSection {
   }
   if (recent30 > 0) {
     facts.push({
-      fact: `${pct(oldSpend, recent30)}% of this month's spend runs on creative older than 90 days.`,
+      fact: `${pct(oldSpend, recent30)}% of the last 30 days' spend runs on creative that first went live more than 90 days ago.`,
       detail: `Not automatically bad — the cohorts report says whether the old guard still earns its budget.`,
     });
   }
@@ -962,20 +1015,22 @@ export function computeAccountFacts(inp: AccountFactsInputs): PackSection {
   // Biggest single day
   const biggest = [...byDay.entries()].sort((a, b) => b[1] - a[1])[0]!;
   facts.push({
-    fact: `Your biggest single day in this window: ${money(biggest[1], currency)} on ${biggest[0]}.`,
-    detail: `Daily average is ${money(total / Math.max(1, days.length), currency)} across ${days.length} delivery days.`,
+    fact: `Your biggest single day ${windowPhrase}: ${money(biggest[1], currency)} on ${biggest[0]}.`,
+    detail:
+      `Daily average is ${money(dailyAvg, currency)}: ${money(windowSpend, currency)} across the ${windowDays} days of this window` +
+      (deliveryDays < windowDays ? `, ${deliveryDays} of which had delivery.` : '.'),
   });
 
   // Weekend share
   facts.push({
-    fact: `${pct(weekend, total)}% of spend delivers on weekends.`,
+    fact: `${pct(weekend, total)}% of spend ${windowPhrase} delivers on weekends.`,
     detail: `The day-of-week report says whether those weekend ${currency || 'units'} return like the weekday ones.`,
   });
 
   // Partnership share
   if (inp.partnershipSpendPct != null && inp.partnershipSpendPct > 0) {
     facts.push({
-      fact: `${inp.partnershipSpendPct}% of spend runs through partnership (branded-content) ads.`,
+      fact: `${inp.partnershipSpendPct}% of the last 30 days' spend runs through partnership (branded-content) ads.`,
       detail: `Creator handles carry that spend — worth knowing which creators' posts are doing the lifting.`,
     });
   }
@@ -986,17 +1041,28 @@ export function computeAccountFacts(inp: AccountFactsInputs): PackSection {
   const adsCount = byAd.size;
   const activeRecent = [...byAd.values()].filter((a) => a.last >= recentCut).length;
   facts.push({
-    fact: `${adsCount} ads spent something in ~6 months; ${activeRecent} still spend today.`,
+    fact: `${adsCount} ads spent something ${windowPhrase}; ${activeRecent} still spend today.`,
     detail: `${pct(adsCount - activeRecent, adsCount)}% of everything launched has already been retired — that's the real test-and-kill rate.`,
   });
 
   return {
-    summary: `${facts.length} things about this account most people running it couldn't quote.`,
+    summary: `${facts.length} things about this account most people running it couldn't quote, read ${windowPhrase}.`,
     next_step: `None of these demand action alone — they're the texture behind the reports above. The ones that do demand action are flagged there.`,
-    data: { facts: facts.slice(0, 6), window_days: 180, currency },
+    data: {
+      facts: facts.slice(0, 6),
+      window_days: windowDays,
+      window_start: firstDay,
+      window_end: lastDay,
+      delivery_days: deliveryDays,
+      window_spend: Math.round(windowSpend),
+      daily_avg: Math.round(dailyAvg),
+      currency,
+    },
     derivation:
-      `Computed from ~6 months of ad-level delivery history (${rows180.length.toLocaleString('en-US')} ad-day rows) — first/last ` +
-      `spend day per ad, daily totals, weekend split, and the branded-content flag read live from Meta's creative metadata. ` +
+      `Computed from the ${windowDays} days of ad-level delivery history we can see (${firstDay} to ${lastDay}, ` +
+      `${rows180.length.toLocaleString('en-US')} ad-day rows) — first/last spend day per ad, daily totals, weekend split, and the ` +
+      `branded-content flag read live from Meta's creative metadata. The daily average is this window's own spend divided by its ` +
+      `own ${windowDays} days, which is why it will not match a shorter window's total. ` +
       `"Still spending" = delivered within 7 days of the newest data day.`,
   };
 }

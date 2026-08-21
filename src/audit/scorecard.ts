@@ -69,15 +69,22 @@ export function cohortPosition(value: number, cohort: number[]): { pctile: numbe
   return { pctile: Math.round((below / Math.max(1, xs.length - 1)) * 100), median: at(0.5), p25: at(0.25), p75: at(0.75) };
 }
 
+/**
+ * Every dimension is OPTIONAL and nothing is defaulted: an omitted dimension
+ * produces no entry and therefore no grading. That is the only way a caller can
+ * refuse to grade something it cannot stand behind (a launch-cohort read on a
+ * window shorter than it needs forces freshness to ~100% by construction, so
+ * the caller omits `freshness` rather than passing a number it invented).
+ */
 export interface ScorecardInputs {
   /** Spend-weighted hook rate %, and the per-account cohort values (rates cross accounts safely). */
   hooks?: { value: number; cohortValues: number[]; cohortLabel: string; impressions30?: number };
   hold?: { value: number; cohortValues: number[]; cohortLabel: string };
-  /** From the cohort report: % of this month's spend on creatives launched in the last ~2 months. */
+  /** From the cohort report: % of this month's spend on creatives launched in the last ~2 months. Omit on a short window. */
   freshness?: { value: number };
   /** From concentration: top-3 spend share %. */
   concentration?: { value: number };
-  /** From cost trend: CPM delta % over the window (own trajectory — never cross-currency). */
+  /** From cost trend: CPM delta % over the window, exactly as that section computed it. Never re-derived here. */
   cpmTrend?: { value: number };
 }
 
@@ -188,20 +195,27 @@ export function buildScorecard(inp: ScorecardInputs): ScorecardEntry[] {
     });
   }
   if (inp.cpmTrend) {
+    // The cost-trend section owns this figure. It is stated exactly as given
+    // (no second rounding) and banded on the SAME plus/minus 10% threshold that
+    // section's own verdict uses, so "flat" cannot mean one thing on the
+    // scorecard and another in the report it links to.
     const v = inp.cpmTrend.value;
-    const band: ScorecardEntry['band'] = v <= 0 ? 'strong' : v <= 15 ? 'middle' : 'weak';
+    const band: ScorecardEntry['band'] = v > 10 ? 'weak' : v < -10 ? 'strong' : 'middle';
     entries.push({
-      key: 'cpm_trend', dimension: 'Cost trajectory (CPM, your own trend)', value: r1(v), unit: '% vs start of window',
+      key: 'cpm_trend', dimension: 'Cost trajectory (CPM, your own trend)', value: v, unit: '% vs start of window',
       band,
       position:
-        band === 'strong' ? `Cost trajectory — CPM flat-to-falling (${r1(v)}%) over the window`
-        : band === 'middle' ? `Cost trajectory — CPM drifting up ${r1(v)}%`
-        : `Cost trajectory — CPM up ${r1(v)}% over the window`,
+        band === 'weak' ? `Cost trajectory — CPM up ${v}% over the window`
+        : band === 'strong' ? `Cost trajectory — CPM down ${Math.abs(v)}% over the window`
+        : `Cost trajectory — CPM flat within 10% (${v}%) over the window`,
       lever: 'Whether rising costs are the market or your creative earning worse auctions (see the decomposition).',
       next_step: band === 'weak' ? `Read the CPM section: if CTR fell with it, it's a creative problem first.` : `Baseline for the next audit.`,
       section_key: 'cost_trends',
       cohort: null,
-      derivation: `Your own weekly CPM, first third of the 90-day window vs the last third — never another account's prices. Decomposition in the cost report below.`,
+      derivation:
+        `The CPM change the cost report measured, carried here unchanged: your own weekly CPM, the first third of the window ` +
+        `against the last third, never another account's prices. Up more than 10% reads weak, down more than 10% reads strong, ` +
+        `anything in between is flat. The decomposition is in that report.`,
     });
   }
 
