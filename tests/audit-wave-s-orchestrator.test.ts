@@ -71,7 +71,10 @@ describe('the lead-insight ranker may not overrule the sections', () => {
     expect(rules).toContain('over 14 weeks');
     expect(rules).toContain('CPM 23%');
     expect(rules).toContain('link CTR -62%');
-    expect(rules).toContain('0.85% now against 2.2% at the start of the window');
+    // Both figures are weekly averages and must be named as such: the account's
+    // "now" is its measured 30-day rate, which lives in the funnel chapter.
+    expect(rules).toContain('weekly averages: 2.2% in the first week of that window, 0.85% in the last');
+    expect(rules).toContain('call a weekly average a weekly average rather than "now"');
     expect(rules).toContain('do not recompute them');
     expect(rules).toContain('never as a new ceiling');
   });

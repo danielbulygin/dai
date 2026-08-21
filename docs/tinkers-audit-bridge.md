@@ -308,6 +308,56 @@ what produced the wrong numbers on the live report.
 | `top_evergreen`, `best_angle.spend_share_pct`, `freshness_withheld`, `cohort_days_covered` | whats_working | The protect list now names the ad and the angle it protects. |
 | `window_days`, `window_start`, `window_end`, `delivery_days`, `window_spend`, `daily_avg` | account_facts | Every did-you-know sentence states its own window, and the daily average divides that window's spend by that window's days. `daily_avg * window_days` reconciles with `window_spend`. |
 
+### The target gap (`funnel_read.data.target_gap`)
+
+The headline the report was missing: what the distance to the owner's OWN stated
+target costs per month. Computed in TypeScript, never by a model, because a
+model asked to multiply 483 by 3.67 sometimes answers 1,600.
+
+```json
+{ "metric": "cpl", "target": 15, "cpl": 18.67, "leads_30d": 483,
+  "monthly_over_target_usd": 1773,
+  "formula": "483 leads x (18.67 - 15.00)",
+  "recovery_cpl_usd": 14.36,
+  "recovery_formula": "18.67 x (1 / 1.3)",
+  "ctr_now": 1.0,  "ctr_now_basis": "measured link CTR over the last 30 days",
+  "ctr_recoverable": 1.3, "ctr_recoverable_basis": "weekly average link CTR at the start of the cost-trend window",
+  "currency": "USD" }
+```
+
+Absent unless the owner gave a cost target (the `/context` read) AND the account
+is above it. The recovery figures are absent unless the cost-trend chapter found
+a HIGHER click rate this account already held: it prices the same spend at a rate
+they achieved, which is a recovery rather than a projection, and both rates carry
+their basis because one is a 30-day measure and the other a weekly average.
+`monthly_over_target_usd` keeps its name for the page, and `currency` says what
+the unit actually is.
+
+The funnel synthesis and the insight ranker both receive the same computed brief
+with an instruction to quote the fields verbatim, so the report's number one
+opportunity is this gap stated in money against their own target.
+
+### Smaller payload changes from sim round two
+
+- `funnel_read.data`/facts carry `cost_per_lead_direction` (`better|worse|flat`,
+  a move under 2% is flat): the model called 19.57 against 19.63 "worse" because
+  it had to work out that lower is better for a cost. It no longer decides.
+- `creative_analysis` winners: a winner whose own last fortnight costs 25%+ more
+  per result than its first half now carries both figures in its `why`,
+  appended deterministically after synthesis rather than trusted to the prompt.
+  The facts carry `cost_per_lead_first_half`, `cost_per_lead_last_14` and
+  `cost_per_lead_decay_pct` per top ad, and the copy fields are renamed
+  `headline_field` / `primary_text_field` so a quote can name which of the three
+  sources it came from (headline field, primary text, or the words on the image).
+- `message_match`: two promises resolving to the same page line count once, and
+  a headline the markup prints twice is collapsed to the phrase.
+- The scorecard's freshness dimension can be capped to `middle` with a citable
+  reason (`{ value, capBand: 'middle', capReason }`), and is capped whenever a
+  top-three spender's last fortnight costs 25%+ more per result than its own
+  first half. Freshness measures how recently creative launched, so a young and
+  decaying portfolio scores high on it, which is the wrong thing to hand a reader
+  as a strength.
+
 ## Two rules the report page depends on
 
 **A quiet section carries no next step.** `data.signal === false` is a section

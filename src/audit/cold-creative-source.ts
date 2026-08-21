@@ -269,6 +269,73 @@ export interface UnresolvedAd {
 }
 
 /**
+ * One ad's own cost-per-result decay, from the fatigue chapter's rows. The
+ * creative read used to call an ad "cheap" on its run average while its last
+ * fortnight ran 40% dearer, because the two chapters never met.
+ */
+export interface FatigueDecayRow {
+  ad_id: string;
+  ad_name: string;
+  cpl_first_half: number | null;
+  cpl_last_14: number | null;
+}
+
+export interface AdDecay {
+  cpl_first_half: number | null;
+  cpl_last_14: number | null;
+  /** Percent worse the last fortnight is than the first half. Null when unknown. */
+  decay_pct: number | null;
+}
+
+/**
+ * Decay by ad NAME, because that is the only handle a synthesized winner gives
+ * us. A name two different ads share is dropped rather than guessed at: the
+ * concentration chapter already found this account running two ads under one
+ * name, and attributing one ad's decay to the other would be a fabricated fact.
+ */
+export function decayIndex(rows: FatigueDecayRow[]): Map<string, AdDecay> {
+  const counts = new Map<string, number>();
+  for (const r of rows) counts.set(r.ad_name, (counts.get(r.ad_name) ?? 0) + 1);
+  const out = new Map<string, AdDecay>();
+  for (const r of rows) {
+    if ((counts.get(r.ad_name) ?? 0) > 1) continue;
+    const decay =
+      r.cpl_first_half != null && r.cpl_first_half > 0 && r.cpl_last_14 != null
+        ? Math.round(((r.cpl_last_14 - r.cpl_first_half) / r.cpl_first_half) * 1000) / 10
+        : null;
+    out.set(r.ad_name, { cpl_first_half: r.cpl_first_half, cpl_last_14: r.cpl_last_14, decay_pct: decay });
+  }
+  return out;
+}
+
+/**
+ * A winner whose own last fortnight got materially dearer says so, in its why.
+ * Deterministic on purpose: the facts carry the figures and the prompt asks for
+ * them, but a winner tile is the most-read line in the report and it may not
+ * depend on the model having obeyed.
+ */
+export function annotateWinnerDecay<T extends { ad_name?: unknown; why?: unknown }>(
+  winners: T[],
+  index: Map<string, AdDecay>,
+  currency: string,
+  thresholdPct = 25,
+): T[] {
+  const unit = currency ? ` ${currency}` : '';
+  return winners.map((w) => {
+    const name = typeof w.ad_name === 'string' ? w.ad_name : '';
+    const d = index.get(name);
+    if (!d || d.decay_pct == null || d.decay_pct < thresholdPct || d.cpl_last_14 == null || d.cpl_first_half == null) return w;
+    const why = typeof w.why === 'string' ? w.why : '';
+    const alreadySaid = why.includes(String(round2(d.cpl_last_14)));
+    if (alreadySaid) return w;
+    return {
+      ...w,
+      why: `${why}${why && !/[.!?]$/.test(why.trim()) ? '.' : ''} It averaged ${round2(d.cpl_first_half)}${unit} per lead over the first half of its run and its last fortnight runs ${round2(d.cpl_last_14)}${unit}.`.trim(),
+    };
+  });
+}
+
+/**
  * The deterministic facts payload the Opus synthesis reads.
  *
  * The account's own economics decide which number each ad carries. Sending
@@ -284,8 +351,11 @@ export function buildColdCreativeFacts(args: {
   graphByAdId: Map<string, GraphCreativeLite>;
   reads: CreativeRead[];
   unresolved: UnresolvedAd[];
+  /** The fatigue chapter's rows, so a "cheap" winner cannot hide its decay. */
+  fatigueRows?: FatigueDecayRow[];
 }): Record<string, unknown> {
   const readByAd = new Map(args.reads.map((r) => [r.ad_id, r]));
+  const decayByName = decayIndex(args.fatigueRows ?? []);
   const leadGen =
     args.summary.ads.every((a) => a.roas === 0 && a.purchases === 0) &&
     args.summary.ads.some((a) => a.leads > 0);
@@ -314,8 +384,14 @@ export function buildColdCreativeFacts(args: {
         leads: a.leads,
         hook_rate_pct: a.hook_rate != null ? round2(a.hook_rate * 100) : null,
         is_video: a.is_video,
-        headline: g?.title ? g.title.slice(0, 120) : undefined,
-        primary_text: g?.body ? g.body.slice(0, 220) : undefined,
+        // The ad's HEADLINE FIELD and its PRIMARY TEXT FIELD, named as fields:
+        // the live report called a headline "identical across all ten ads" in one
+        // sentence and quoted a different, on-image headline in the next.
+        headline_field: g?.title ? g.title.slice(0, 120) : undefined,
+        primary_text_field: g?.body ? g.body.slice(0, 220) : undefined,
+        cost_per_lead_first_half: decayByName.get(a.ad_name)?.cpl_first_half ?? undefined,
+        cost_per_lead_last_14: decayByName.get(a.ad_name)?.cpl_last_14 ?? undefined,
+        cost_per_lead_decay_pct: decayByName.get(a.ad_name)?.decay_pct ?? undefined,
         creative_read: read
           ? {
               watched: read.kind,

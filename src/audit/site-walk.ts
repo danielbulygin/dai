@@ -216,10 +216,30 @@ export interface PageRead {
   social_proof_evidence: string | null;
 }
 
+/**
+ * Collapse a phrase a page prints twice in one element. Hero markup routinely
+ * carries a visually-hidden copy of its own headline, and the live walk quoted
+ * "$2,000,000 Life Cover from $1 /day$2,000,000 Life Cover from $1 /day" back
+ * to the customer as their headline.
+ */
+export function collapseRepeat(text: string): string {
+  const clean = text.trim();
+  const half = Math.floor(clean.length / 2);
+  if (half < 8) return clean;
+  for (const gap of ['', ' ', '. ', ' | ', ' - ']) {
+    const first = clean.slice(0, half - Math.floor(gap.length / 2));
+    if (clean === `${first}${gap}${first}`) return first.trim();
+  }
+  // An odd-length duplicate with a separator: split on the midpoint and compare.
+  const left = clean.slice(0, half).trim();
+  const right = clean.slice(half).replace(/^[\s.|,;:-]+/, '').trim();
+  return left.length >= 8 && left.toLowerCase() === right.toLowerCase() ? left : clean;
+}
+
 const tagText = (html: string, re: RegExp): string | null => {
   const hit = re.exec(html);
   if (!hit?.[1]) return null;
-  const text = stripHtml(hit[1]);
+  const text = collapseRepeat(stripHtml(hit[1]));
   return text.length > 0 ? text.slice(0, 240) : null;
 };
 
@@ -228,7 +248,7 @@ const META_CONTENT = (html: string, property: string): string | null => {
   const tag = re.exec(html)?.[0];
   if (!tag) return null;
   const content = /content=["']([^"']*)["']/i.exec(tag)?.[1];
-  const text = content ? stripHtml(content) : '';
+  const text = content ? collapseRepeat(stripHtml(content)) : '';
   return text.length > 0 ? text.slice(0, 240) : null;
 };
 
@@ -387,7 +407,12 @@ export function deriveMatch(checks: MatchCheck[], page: PageRead, pageText: stri
     : { verdict: 'inconclusive', evidence_quote: null, checks };
 }
 
-/** The model's checks, kept only where the page backs them. */
+/**
+ * The model's checks, kept only where the page backs them, and only once per
+ * line of page evidence. Two promises that both resolve to "See your
+ * personalised rate in 60 seconds" are one kept promise: counting them twice
+ * inflated the kept side of the live verdict.
+ */
 export function reconcileChecks(
   deterministic: MatchCheck[],
   fromRead: Array<{ promise?: unknown; found_on_page?: unknown; page_evidence?: unknown }>,
@@ -395,6 +420,9 @@ export function reconcileChecks(
 ): MatchCheck[] {
   const out = [...deterministic];
   const claimed = new Set(deterministic.map((c) => normalizeForSearch(c.promise)));
+  const evidenceSeen = new Set(
+    deterministic.filter((c) => c.found_on_page && c.page_evidence).map((c) => normalizeForSearch(c.page_evidence!)),
+  );
   for (const raw of fromRead) {
     const promise = typeof raw.promise === 'string' ? raw.promise.trim() : '';
     if (!promise) continue;
@@ -409,6 +437,9 @@ export function reconcileChecks(
       // turned into its opposite: an unverifiable claim is not evidence of
       // absence either.
       if (!evidence || !verifyEvidence(pageText, evidence)) continue;
+      const line = normalizeForSearch(evidence);
+      if (evidenceSeen.has(line)) continue;
+      evidenceSeen.add(line);
       out.push({ promise, found_on_page: true, page_evidence: evidence, source: 'read' });
     } else {
       out.push({ promise, found_on_page: false, page_evidence: null, source: 'read' });
@@ -546,7 +577,8 @@ async function walk(args: SiteWalkArgs): Promise<WalkSectionResult> {
 
   const signal = outcome.verdict === 'partial' || outcome.verdict === 'mismatch';
   const next_step = signal
-    ? `Put "${missing[0]!.promise}" on ${host}${new URL(guard.url).pathname} where the visitor lands, or take it out of the ad. The two have to say the same thing before anything else on this page is worth testing.`
+    ? `Put "${missing[0]!.promise}" on ${host}${new URL(guard.url).pathname} where the visitor lands, or take it out of the ad. ` +
+      `The two have to say the same thing before anything else on this page is worth testing, and this is the page side of the same click the funnel chapter reads upstream.`
     : undefined;
 
   return {

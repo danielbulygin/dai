@@ -6,6 +6,7 @@ import {
   rankTopAds, extractLibraryMedia, matchLibraryMedia, pickMedia,
   buildColdCreativeFacts, fallbackWinners,
   type GraphCreativeLite, type CreativeRead, type UnresolvedAd, type ResolvedMedia, type StoreMediaCandidate,
+  annotateWinnerDecay, decayIndex, type FatigueDecayRow,
 } from './cold-creative-source.js';
 
 /**
@@ -351,6 +352,9 @@ export interface ColdCreativeArgs {
    *  On the tokenless path both the media and the copy come from here; with a
    *  token it still wins on fidelity wherever a file exists (pickMedia). */
   storeMedia?: Map<string, StoreMediaCandidate> | null;
+  /** The fatigue chapter's rows (ad_name + the two cost figures), so a winner
+   *  whose last fortnight got dearer carries that fact on its own tile. */
+  fatigueRows?: FatigueDecayRow[];
 }
 
 const withTimeout = async <T>(p: Promise<T>, ms: number, what: string): Promise<T> => {
@@ -522,13 +526,21 @@ export async function runColdCreativeAnalysis(args: ColdCreativeArgs): Promise<P
     graphByAdId,
     reads,
     unresolved,
+    fatigueRows: args.fatigueRows,
   });
+  const decayByName = decayIndex(args.fatigueRows ?? []);
   const synth = await args.synthesize<CreativeSynthesis>(
     'creative_analysis',
     `Top-ad creative data for a freshly connected account (deterministic stats from the live Meta pull; ` +
       `creative_read fields are frame-accurate reads of the ACTUAL downloaded creatives — hooks are what literally happens in the first 3 seconds):\n` +
       `${JSON.stringify(facts, null, 1)}\n\n` +
       `Write the "Creative Performance & Angles" audit section. Voice: plain operator language. Never use "not X but Y" constructions. No metaphors.\n` +
+      `NAME THE SOURCE OF EVERY QUOTE: headline_field is the ad's headline FIELD, primary_text_field is its body copy, and ` +
+      `anything the creative_read describes is what is ON the image or in the video. A quote must say which of the three it came ` +
+      `from ("the headline field", "the first line of the primary text", "the words on the image"), because they are different ` +
+      `things and the last report treated them as one.\n` +
+      `A winner whose cost_per_lead_decay_pct is 25 or more is not simply cheap: state its cost_per_lead_first_half and its ` +
+      `cost_per_lead_last_14 in the same sentence.\n` +
       `SCOPE: every claim about creative, copy, hooks, casting or format covers ONLY the ads in top_ads, and a claim ` +
       `about what was WATCHED covers only the creatives_watched count. Say "the ${'${'}facts.creatives_watched${'}'} creatives we watched" or ` +
       `"the top ${'${'}facts.top_ads_in_facts${'}'} ads by spend", never "every ad" or "all your creative". Quote no field names in a sentence.\n` +
@@ -559,7 +571,7 @@ export async function runColdCreativeAnalysis(args: ColdCreativeArgs): Promise<P
       summary:
         `${summary.ads_with_spend} ads spent in the last 30 days; top 12 carry ${summary.top12_spend_share_pct}% of spend. ` +
         `Watched ${reads.length} of the top ${summary.ads.length} creatives (cost cap reached before narrative synthesis).`,
-      data: { ...baseData, winners: fallbackWinners(summary, reads, 4, args.currency), angle_patterns: [], gaps: [] },
+      data: { ...baseData, winners: annotateWinnerDecay(fallbackWinners(summary, reads, 4, args.currency), decayByName, args.currency), angle_patterns: [], gaps: [] },
       warnings: sectionWarnings,
     };
   }
@@ -569,7 +581,7 @@ export async function runColdCreativeAnalysis(args: ColdCreativeArgs): Promise<P
     summary: synth.summary,
     data: {
       ...baseData,
-      winners: synth.winners,
+      winners: annotateWinnerDecay(synth.winners ?? [], decayByName, args.currency),
       angle_patterns: synth.angle_patterns,
       gaps: coerceStringList(synth.gaps),
     },

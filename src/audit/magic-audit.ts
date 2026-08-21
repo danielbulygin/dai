@@ -30,6 +30,7 @@ import {
 } from './account-model.js';
 import { coldBreakeven, buildColdKnowledge, type ColdRows, type OwnerInterview } from './cold-source.js';
 import { runColdCreativeAnalysis, type OwnLibraryScrape } from './cold-creative.js';
+import { annotateWinnerDecay, decayIndex, type FatigueDecayRow } from './cold-creative-source.js';
 import type { StoreMediaCandidate } from './cold-creative-source.js';
 import { scrubSectionProse, scrubInsightProse, dedashDeep, dedash } from './prose.js';
 import { createPageFetch, runSiteWalk, type WalkAd, type WalkDestination } from './site-walk.js';
@@ -198,7 +199,7 @@ const SECTION_ORDER: Array<Pick<AuditSection, 'key' | 'title' | 'status'>> = [
   { key: 'message_match', title: 'Ad Promise vs Landing Page', status: 'pending' },
   { key: 'creative_analysis', title: 'Creative Performance & Angles', status: 'pending' },
   { key: 'funnel_read', title: 'Funnel Diagnosis', status: 'pending' },
-  { key: 'account_facts', title: 'Did You Know — six months of account texture', status: 'pending' },
+  { key: 'account_facts', title: 'Did You Know — the account texture', status: 'pending' },
   { key: 'account_activity', title: "Account Activity — change history & who's working the account", status: 'pending' },
   { key: 'competitor_teardown', title: 'Ads Library Landscape', status: 'pending' },
 ];
@@ -484,6 +485,24 @@ const daysAgoISO = (days: number): string => {
 
 const num = (v: unknown): number => (typeof v === 'number' ? v : Number(v) || 0);
 const round2 = (v: number): number => Math.round(v * 100) / 100;
+const r2 = round2;
+
+/**
+ * Which way a figure moved, in the word the section should print. A cost and a
+ * return move in opposite senses, and a move under 2% is noise: the live report
+ * called 19.57 against 19.63 "worse", which is neither the direction nor a move.
+ */
+export function directionOf(
+  now: number | null | undefined,
+  prior: number | null | undefined,
+  sense: 'lower_is_better' | 'higher_is_better',
+): 'better' | 'worse' | 'flat' | null {
+  if (now == null || prior == null || !(prior > 0) || !(now > 0)) return null;
+  const deltaPct = ((now - prior) / prior) * 100;
+  if (Math.abs(deltaPct) < 2) return 'flat';
+  const improved = sense === 'lower_is_better' ? now < prior : now > prior;
+  return improved ? 'better' : 'worse';
+}
 
 // ---------------------------------------------------------------------------
 // Section: dataset_health (B9 tool, unchanged)
@@ -571,6 +590,7 @@ async function runCreativeAnalysis(
   meter: CostMeter,
   client: { id: string; name: string; currency: string },
   synthSystem: string,
+  fatigueRows: FatigueDecayRow[] = [],
 ): Promise<Partial<AuditSection>> {
   const since = daysAgoISO(30);
   const rows = await pageAll<Record<string, unknown>>(
@@ -660,15 +680,22 @@ async function runCreativeAnalysis(
     logger.warn({ err }, 'creatives lookup failed (continuing without copy)');
   }
 
+  const decayByName = decayIndex(fatigueRows);
   const topWithCopy = top.map((a) => {
     const c = copyByAdId.get(a.ad_id);
+    const decay = decayByName.get(a.ad_name);
     return {
       ...a,
       format: c?.format ?? c?.ad_type ?? (a.is_video ? 'video' : 'static'),
-      headline: c?.headline ? String(c.headline).slice(0, 120) : undefined,
-      primary_text: c?.primary_text ? String(c.primary_text).slice(0, 220) : undefined,
+      // Named as FIELDS: the headline field and the words on the creative are
+      // different things, and the last report quoted one as the other.
+      headline_field: c?.headline ? String(c.headline).slice(0, 120) : undefined,
+      primary_text_field: c?.primary_text ? String(c.primary_text).slice(0, 220) : undefined,
       transcript_excerpt: c?.transcript ? String(c.transcript).slice(0, 350) : undefined,
       is_fatigued: c?.is_fatigued === true || undefined,
+      cost_per_lead_first_half: decay?.cpl_first_half ?? undefined,
+      cost_per_lead_last_14: decay?.cpl_last_14 ?? undefined,
+      cost_per_lead_decay_pct: decay?.decay_pct ?? undefined,
     };
   });
 
@@ -689,7 +716,12 @@ async function runCreativeAnalysis(
     'creative_analysis',
     synthSystem,
     `Account creative data (deterministic, from the Meta-synced warehouse):\n${JSON.stringify(facts, null, 1)}\n\n` +
-      `Write the "Creative Performance & Angles" audit section. Schema:\n` +
+      `Write the "Creative Performance & Angles" audit section.\n` +
+      `NAME THE SOURCE OF EVERY QUOTE: headline_field is the ad's headline FIELD, primary_text_field is its body copy, and a ` +
+      `transcript_excerpt is what is said in the video. Say which one a quote came from, because they are different things.\n` +
+      `A winner whose cost_per_lead_decay_pct is 25 or more is not simply cheap: state its cost_per_lead_first_half and its ` +
+      `cost_per_lead_last_14 in the same sentence.\n` +
+      `Schema:\n` +
       `{"summary": "2-3 sentences, must name at least one specific ad and number",` +
       `"winners": [up to 4 of {"ad_name","spend","key_stat","why"}] (key_stat quotes the ad's OWN number from the facts, e.g. "Meta ROAS 3.4", "Meta CPL 18.59" or "hook rate 38%" — never a metric the facts do not carry, and never a zero, why = one sharp sentence on WHY it wins, grounded in its copy/transcript when present),` +
       `"angle_patterns": [up to 4 of {"pattern","evidence"}] (messaging/format patterns across the spend-weighted inventory),` +
@@ -715,7 +747,7 @@ async function runCreativeAnalysis(
       top12_spend_share_pct: topShare,
       video_spend_share_pct: videoShare,
       currency: client.currency,
-      winners: synth.winners,
+      winners: annotateWinnerDecay(synth.winners ?? [], decayByName, client.currency),
       angle_patterns: synth.angle_patterns,
       gaps: synth.gaps,
     },
@@ -845,6 +877,97 @@ export function funnelDerived(
   return derived;
 }
 
+/**
+ * The money between where the account is and where its OWNER said it should be.
+ *
+ * This is the headline the live report never wrote: the owner had typed a 15 USD
+ * cost per lead into the funnel, the account was buying leads at 18.67, and
+ * nothing on the page multiplied the difference by the lead count. Every figure
+ * here is computed in TypeScript and quoted verbatim by the prompts, because a
+ * model asked to multiply 483 by 3.67 will sometimes answer 1,600.
+ *
+ * The recovery number is only offered when the cost-trend chapter actually found
+ * a HIGHER click-through rate this account already held: it prices the same
+ * spend at that rate, which is a recovery, not a projection. Both rates state
+ * their basis, since one is a 30-day measure and the other a weekly average.
+ */
+export interface TargetGap {
+  metric: string;
+  target: number;
+  cpl: number;
+  leads_30d: number;
+  monthly_over_target_usd: number;
+  formula: string;
+  recovery_cpl_usd?: number;
+  recovery_formula?: string;
+  ctr_now?: number;
+  ctr_now_basis?: string;
+  ctr_recoverable?: number;
+  ctr_recoverable_basis?: string;
+  currency: string;
+}
+
+export function computeTargetGap(args: {
+  metric: string | null | undefined;
+  target: number | null | undefined;
+  cpl: number | null | undefined;
+  leads30d: number | null | undefined;
+  currency: string;
+  ctrNow?: number | null;
+  ctrRecoverable?: number | null;
+}): TargetGap | null {
+  const { metric, target, cpl, leads30d } = args;
+  if (!metric || target == null || target <= 0) return null;
+  if (cpl == null || cpl <= 0 || leads30d == null || leads30d <= 0) return null;
+  // Under target there is no gap to price. The wins belong to the section that
+  // measures them, not to a headline about money the account is not losing.
+  if (cpl <= target) return null;
+
+  const gap: TargetGap = {
+    metric: metric.toLowerCase(),
+    target: r2(target),
+    cpl: r2(cpl),
+    leads_30d: Math.round(leads30d),
+    monthly_over_target_usd: Math.round((cpl - target) * leads30d),
+    formula: `${Math.round(leads30d)} leads x (${r2(cpl).toFixed(2)} - ${r2(target).toFixed(2)})`,
+    currency: args.currency,
+  };
+  const now = args.ctrNow;
+  const recoverable = args.ctrRecoverable;
+  if (now != null && now > 0 && recoverable != null && recoverable > now) {
+    gap.recovery_cpl_usd = r2(cpl * (now / recoverable));
+    gap.recovery_formula = `${r2(cpl).toFixed(2)} x (${r2(now)} / ${r2(recoverable)})`;
+    gap.ctr_now = r2(now);
+    gap.ctr_now_basis = 'measured link CTR over the last 30 days';
+    gap.ctr_recoverable = r2(recoverable);
+    gap.ctr_recoverable_basis = 'weekly average link CTR at the start of the cost-trend window';
+  }
+  return gap;
+}
+
+/** The gap in the words the synthesis must not paraphrase into new arithmetic. */
+export function targetGapBrief(gap: TargetGap): string {
+  const unit = gap.currency ? ` ${gap.currency}` : '';
+  const metric = gap.metric.toUpperCase();
+  const lines = [
+    `THE OWNER'S OWN TARGET AND WHAT THE GAP COSTS (computed, quote these figures verbatim and do NOT recompute or round them):`,
+    `Their stated target is ${metric} ${gap.target.toFixed(2)}${unit}. The account's measured cost per lead over the last 30 days is ` +
+      `${gap.cpl.toFixed(2)}${unit} across ${gap.leads_30d} leads, which is ${gap.monthly_over_target_usd}${unit} a month over their own target (${gap.formula}).`,
+  ];
+  if (gap.recovery_cpl_usd != null) {
+    lines.push(
+      `The cost-trend chapter found this account already held a ${gap.ctr_recoverable}% link CTR (${gap.ctr_recoverable_basis}) against ` +
+        `${gap.ctr_now}% now (${gap.ctr_now_basis}). At that rate the same spend prices a lead near ${gap.recovery_cpl_usd.toFixed(2)}${unit} ` +
+        `(${gap.recovery_formula}), which is a recovery of a rate they already achieved, never a projection.`,
+    );
+  }
+  lines.push(
+    `This gap IS the number one opportunity of this report: state it in money per month against their own target, and where the ` +
+      `recovery figure exists, name it as the path. Never invent a different figure for it.`,
+  );
+  return lines.join(' ');
+}
+
 async function runFunnelRead(
   clientCode: string,
   meter: CostMeter,
@@ -852,6 +975,7 @@ async function runFunnelRead(
   synthSystem: string,
   rows30Override?: Array<Record<string, unknown>>,
   auction?: AuctionContext | null,
+  ownerTarget?: { metric: string; value: number } | null,
 ): Promise<Partial<AuditSection>> {
   // Cold path injects the derived account rows (same columns as this select).
   const rows30 = rows30Override ?? await pageAll<Record<string, unknown>>(
@@ -873,6 +997,17 @@ async function runFunnelRead(
   const stages = funnel.stages;
   const purchaseGrammar = funnel.kind === 'ecommerce';
   const derived = funnelDerived(t30, funnel.kind);
+
+  // What the gap to the owner's own target costs per month, in money.
+  const targetGap = computeTargetGap({
+    metric: ownerTarget?.metric,
+    target: ownerTarget?.value,
+    cpl: derived.cost_per_lead,
+    leads30d: t30.leads,
+    currency: client.currency,
+    ctrNow: derived.ctr_link_pct,
+    ctrRecoverable: auction?.ctr_first ?? null,
+  });
 
   // Triple Whale blended view where wired (LA, PL) — best effort, never blocks
   let twSummary: string | undefined;
@@ -918,6 +1053,15 @@ async function runFunnelRead(
     // Measured once, by the cost-trend chapter. A click-rate claim here reads
     // from these figures rather than deriving a second set from the same days.
     auction_context: auction ?? undefined,
+    target_gap: targetGap ?? undefined,
+    // The model called 19.57 against 19.63 "worse" because lower is better for a
+    // cost and it had to work that out. It does not have to: the direction is
+    // computed, and a move under 2% is flat rather than a trend.
+    cost_per_lead_direction: directionOf(
+      t7.leads! > 0 ? t7.spend! / t7.leads! : null,
+      p7.leads! > 0 ? p7.spend! / p7.leads! : null,
+      'lower_is_better',
+    ),
     benchmark_heuristics:
       funnel.kind === 'ecommerce'
         ? 'Rough DTC heuristics, label as such: link CTR 1-2% healthy; content-view/link-click 70-85% (lower = slow LP or tracking gap); ATC/content-view 8-15%; purchase/link-click 1-3%. Judge against the account\'s own trend first.'
@@ -931,8 +1075,15 @@ async function runFunnelRead(
     `Account funnel data (deterministic):\n${JSON.stringify(facts, null, 1)}\n\n` +
       `Write the "Funnel Diagnosis" audit section. The stages in stages_30d ARE this account's funnel (funnel_kind=${funnel.kind}); ` +
       `name only those stages, and lead with ${facts.headline_kpi}.\n` +
+      (targetGap ? `${targetGapBrief(targetGap)}\n` : '') +
+      `Use cost_per_lead_direction for the week-over-week wording; do not decide the direction yourself. ` +
+      `When a measured rate sits outside a heuristic band, say it is above or below the band, never "at the top of" it. ` +
+      `Never say a problem is "entirely" upstream or downstream: another section reads the landing page itself, and a page-side ` +
+      `fix and an upstream fix are halves of the same click.\n` +
       (auction?.ctr_first != null && auction.ctr_last != null
-        ? `Click-rate context, already measured: link CTR ${auction.ctr_last}% now against ${auction.ctr_first}% at the start of the window. ` +
+        ? `Click-rate context, already measured. The account's CURRENT link CTR is ${derived.ctr_link_pct ?? 'unmeasured'}% over the last 30 days: ` +
+          `use that figure whenever you say "now". The cost-trend chapter's weekly buckets ran at ${auction.ctr_first}% as a weekly average ` +
+          `at the start of its window against ${auction.ctr_last}% in its last week; name those as weekly averages, never as "now". ` +
           `A rate this account already held is a recovery target, so say so instead of presenting it as new headroom.\n`
         : '') +
       `Schema:\n` +
@@ -945,6 +1096,7 @@ async function runFunnelRead(
   const data = {
     currency: client.currency,
     funnel_kind: funnel.kind,
+    target_gap: targetGap ?? undefined,
     off_platform_note: funnel.note,
     stages: stages,
     derived: derived,
@@ -1864,6 +2016,8 @@ export interface InsightGuardrails {
   lens: AccountLens | null;
   /** The cost-trend chapter's own figures. Nobody re-derives these. */
   auction?: AuctionContext | null;
+  /** The computed gap to the owner's own target. The report's #1 opportunity. */
+  targetGap?: TargetGap | null;
   /** The account's own 30d totals. Every superlative is checked against these. */
   totals30: { spend: number; leads: number; purchases: number; results: number } | null;
   /** The fatigue chapter's OWN classification. The ranker may not re-classify. */
@@ -1891,14 +2045,20 @@ export function buildInsightRules(g: InsightGuardrails): string {
       `A rate such as 0.06 results per unit of spend is not a cost per result and may never be relabelled as one, ` +
       `and you may not compute a percentage change between two figures unless the facts state that change.`,
   ];
+  if (g.targetGap) {
+    lines.push(targetGapBrief(g.targetGap));
+  }
   if (g.auction && (g.auction.ctr_delta_pct != null || g.auction.cpm_delta_pct != null)) {
     const a = g.auction;
     lines.push(
       `The cost-trend chapter already measured the auction over ${a.weeks ?? 'the'} weeks: CPM ${a.cpm_delta_pct ?? 'unmeasured'}%, ` +
         `link CTR ${a.ctr_delta_pct ?? 'unmeasured'}%` +
-        (a.ctr_first != null && a.ctr_last != null ? ` (${a.ctr_last}% now against ${a.ctr_first}% at the start of the window)` : '') +
-        `. Use those figures and do not recompute them. A CTR this account HELD earlier is a recovery target, so ` +
-        `frame a "double the CTR" opportunity as getting back to what it already did, never as a new ceiling.`,
+        (a.ctr_first != null && a.ctr_last != null
+          ? ` (weekly averages: ${a.ctr_first}% in the first week of that window, ${a.ctr_last}% in the last)`
+          : '') +
+        `. Use those figures and do not recompute them, and call a weekly average a weekly average rather than "now". ` +
+        `A CTR this account HELD earlier is a recovery target, so frame a "double the CTR" opportunity as getting back to ` +
+        `what it already did, never as a new ceiling.`,
     );
   }
   if (g.totals30) {
@@ -2368,6 +2528,49 @@ export async function runMagicAudit(
     return angleByAdIdShared;
   };
   const auditKpiMode = kpiMode(rows30);
+  /**
+   * The clause that caps the freshness grade: a top-3 spender whose own last
+   * fortnight costs materially more per result than its first half. Returns null
+   * when nothing in the top three decayed, so the grade stands on its own.
+   */
+  const decayingTopSpenders = (threshold = 25): string | null => {
+    const rows = fatigueRowsForCreative();
+    if (rows.length === 0) return null;
+    const spendByAd = new Map<string, number>();
+    for (const r of rows30) spendByAd.set(r.ad_id, (spendByAd.get(r.ad_id) ?? 0) + (r.spend || 0));
+    const topThree = [...spendByAd.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([id]) => id);
+    const decayed = rows
+      .filter((r) => topThree.includes(r.ad_id))
+      .map((r) => ({
+        name: r.ad_name,
+        pct:
+          r.cpl_first_half != null && r.cpl_first_half > 0 && r.cpl_last_14 != null
+            ? Math.round(((r.cpl_last_14 - r.cpl_first_half) / r.cpl_first_half) * 100)
+            : null,
+      }))
+      .filter((d): d is { name: string; pct: number } => d.pct != null && d.pct >= threshold);
+    if (decayed.length === 0) return null;
+    const worst = decayed.sort((a, b) => b.pct - a.pct)[0]!;
+    return decayed.length === 1
+      ? `"${worst.name}", one of your three biggest spenders, costs ${worst.pct}% more per lead in its last 14 days than in its own first half`
+      : `${decayed.length} of your three biggest spenders cost more per lead in their last 14 days than in their own first half, "${worst.name}" by ${worst.pct}%`;
+  };
+
+  /**
+   * The fatigue chapter's cost figures per ad, for the creative read. Runs later
+   * in SECTION_ORDER, so by then these rows exist or the chapter errored and the
+   * creative read simply has no decay to state.
+   */
+  const fatigueRowsForCreative = (): FatigueDecayRow[] => {
+    const rows = (sections['creative_fatigue']?.data as { ads?: Array<Record<string, unknown>> } | undefined)?.ads ?? [];
+    return rows.map((a) => ({
+      ad_id: String(a.ad_id ?? ''),
+      ad_name: String(a.ad_name ?? ''),
+      cpl_first_half: typeof a.cpl_first_half === 'number' ? a.cpl_first_half : null,
+      cpl_last_14: typeof a.cpl_last_14 === 'number' ? a.cpl_last_14 : null,
+    }));
+  };
+
   /** The cost-trend chapter's own figures, for the sections that discuss clicks. */
   const auctionContext = (): AuctionContext | null => {
     const d = sections['cost_trends']?.data as Record<string, unknown> | undefined;
@@ -2386,12 +2589,16 @@ export async function runMagicAudit(
   // The scatter's words: on a lead-gen account a dot is a cost per LEAD, and the
   // line it is read against is the owner's own stated target when they gave one
   // (never our estimate, never a borrowed 1.0x).
+  // What the owner said a result should cost. One resolution, read by the
+  // scatter's dashed line and by the funnel's target-gap arithmetic, so the two
+  // can never cite different targets.
+  const ownerTarget =
+    cold?.goalValue != null && typeof cold.goalMetric === 'string' && /^(cpl|cpa|cost_per_lead|cost_per_result)$/i.test(cold.goalMetric)
+      ? { metric: cold.goalMetric.toLowerCase(), value: cold.goalValue }
+      : null;
   const scatterLens: ScatterLens = {
     resultNoun: lensRead?.lens === 'lead_gen' ? 'lead' : undefined,
-    costTarget:
-      cold?.goalValue != null && typeof cold.goalMetric === 'string' && /^(cpl|cpa|cost_per_lead|cost_per_result)$/i.test(cold.goalMetric)
-        ? { metric: cold.goalMetric.toLowerCase(), value: cold.goalValue }
-        : null,
+    costTarget: ownerTarget,
   };
 
   // ONE own-page Ads Library scrape per audit, memoized: competitor_teardown
@@ -2582,7 +2789,7 @@ export async function runMagicAudit(
       });
     },
     creative_analysis: async () => {
-      const s = await runCreativeAnalysis(code, meter, client, synthSystem);
+      const s = await runCreativeAnalysis(code, meter, client, synthSystem, fatigueRowsForCreative());
       // 9:16 creative tiles (design "done 2026-06-25"): give each winner its
       // thumbnail + delivery stats so the page renders tiles, not a row list.
       try {
@@ -2619,7 +2826,7 @@ export async function runMagicAudit(
       }
       return s;
     },
-    funnel_read: () => runFunnelRead(code, meter, client, synthSystem, cold ? accFull30 : undefined, auctionContext()),
+    funnel_read: () => runFunnelRead(code, meter, client, synthSystem, cold ? accFull30 : undefined, auctionContext(), ownerTarget),
     account_facts: async () => {
       const partnershipIds = await fetchPartnershipAdIds(code, client.adAccountId, coldToken);
       let partnershipPct: number | null = null;
@@ -2717,7 +2924,14 @@ export async function runMagicAudit(
         | { fresh_cohort_share_pct?: number; window_too_short?: boolean }
         | undefined;
       if (typeof cohortsData?.fresh_cohort_share_pct === 'number' && cohortsData.window_too_short !== true) {
-        inputs.freshness = { value: cohortsData.fresh_cohort_share_pct };
+        // Freshness measures how RECENTLY creative launched, so a young and
+        // decaying portfolio scores high on it. The live report graded "A
+        // strength" over two of the three biggest spenders costing materially
+        // more per lead than they did in their own first half.
+        const decay = decayingTopSpenders();
+        inputs.freshness = decay
+          ? { value: cohortsData.fresh_cohort_share_pct, capBand: 'middle' as const, capReason: decay }
+          : { value: cohortsData.fresh_cohort_share_pct };
       }
       const concData = sections['spend_concentration']?.data as { top3_share_pct?: number } | undefined;
       if (typeof concData?.top3_share_pct === 'number') inputs.concentration = { value: concData.top3_share_pct };
@@ -2866,6 +3080,7 @@ export async function runMagicAudit(
           partial = await Promise.race([
             runColdCreativeAnalysis({
               meter,
+              fatigueRows: fatigueRowsForCreative(),
               accessToken: cold.accessToken,
               storeMedia: cold.storeMedia ?? null,
               accountName: client.name,
@@ -2958,6 +3173,7 @@ export async function runMagicAudit(
       currency: client.currency,
       lens: lensRead?.lens ?? null,
       auction: auctionContext(),
+      targetGap: ((sections['funnel_read']?.data as { target_gap?: TargetGap } | undefined)?.target_gap) ?? null,
       totals30: accountTotals30
         ? {
             spend: accountTotals30.spend ?? 0,

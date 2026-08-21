@@ -225,7 +225,9 @@ describe('winners synthesis inputs + fallback', () => {
     expect(facts.ads_with_spend).toBe(3);
     expect(facts.video_spend_share_pct).toBe(69);
     const first = facts.top_ads[0]!;
-    expect(first.primary_text).toBe('Primary text of ad one');
+    // Named as a FIELD: the body copy and the words on the image are different
+    // things, and the report quoted one as the other.
+    expect(first.primary_text_field).toBe('Primary text of ad one');
     expect(first.hook_rate_pct).toBe(31);
     expect((first.creative_read as Record<string, unknown>).hook_first_3s).toContain('threw out');
     expect((first.creative_read as Record<string, unknown>).media_source).toBe('library_video');
