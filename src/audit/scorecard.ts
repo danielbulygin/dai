@@ -80,8 +80,19 @@ export interface ScorecardInputs {
   /** Spend-weighted hook rate %, and the per-account cohort values (rates cross accounts safely). */
   hooks?: { value: number; cohortValues: number[]; cohortLabel: string; impressions30?: number };
   hold?: { value: number; cohortValues: number[]; cohortLabel: string };
-  /** From the cohort report: % of this month's spend on creatives launched in the last ~2 months. Omit on a short window. */
-  freshness?: { value: number };
+  /**
+   * From the cohort report: % of this month's spend on creatives launched in
+   * the last ~2 months. Omit on a short window.
+   *
+   * `capBand: 'middle'` is a CEILING, not an override: freshness measures how
+   * recently creative launched, so a portfolio whose recent launches are
+   * already getting more expensive scores high on the very number that must
+   * not be handed to a reader as something working. With the cap set the entry
+   * can never grade strong, and its wording follows from the cap rather than
+   * from the value. `capReason` is the caller's own citable clause (it has the
+   * rows); without one the entry states the cap without naming a cause.
+   */
+  freshness?: { value: number; capBand?: 'middle'; capReason?: string };
   /** From concentration: top-3 spend share %. */
   concentration?: { value: number };
   /** From cost trend: CPM delta % over the window, exactly as that section computed it. Never re-derived here. */
@@ -162,19 +173,33 @@ export function buildScorecard(inp: ScorecardInputs): ScorecardEntry[] {
   }
   if (inp.freshness) {
     const v = inp.freshness.value;
-    const band: ScorecardEntry['band'] = v >= 40 ? 'strong' : v >= 15 ? 'middle' : 'weak';
+    const valueBand: ScorecardEntry['band'] = v >= 40 ? 'strong' : v >= 15 ? 'middle' : 'weak';
+    // The cap is a ceiling: a value that would grade weak stays weak, and only
+    // the entry sitting AT the ceiling explains itself from the cap.
+    const capped = inp.freshness.capBand === 'middle' && valueBand !== 'weak';
+    const band: ScorecardEntry['band'] = capped ? 'middle' : valueBand;
+    const capReason = inp.freshness.capReason?.trim();
+    const capClause = capReason && capReason.length > 0 ? capReason : 'the performance behind that spend does not support a higher grade';
+    const baseDerivation = `The share of this month's spend on creatives that first spent in the last ~2 months — full method in the launch-cohorts report below.`;
     entries.push({
       key: 'freshness', dimension: 'Creative freshness', value: r1(v), unit: '% of spend on recent launches',
       band,
-      position:
-        band === 'strong' ? `Creative freshness — healthy refresh rhythm (${r1(v)}% of this month's spend on recent launches)`
+      position: capped
+        ? `Creative freshness — recent launches carry ${r1(v)}% of this month's spend, graded middle and no higher: ${capClause}.`
+        : band === 'strong' ? `Creative freshness — healthy refresh rhythm (${r1(v)}% of this month's spend on recent launches)`
         : band === 'middle' ? `Creative freshness — modest refresh rhythm (${r1(v)}%)`
         : `Creative freshness — the account is living off old creative (${r1(v)}% of spend on recent launches)`,
-      lever: 'How quickly new creative earns budget.',
-      next_step: band === 'weak' ? `Set a monthly launch quota — the fatigue cliff builds exactly here.` : band === 'middle' ? `Nudge the launch cadence up; watch the cohort chart month over month.` : `Keep the cadence.`,
+      lever: capped
+        ? 'How quickly new creative earns budget, and whether it holds its cost once it does.'
+        : 'How quickly new creative earns budget.',
+      next_step: capped
+        ? `Fix the cost on the launches already carrying the spend before briefing more of them.`
+        : band === 'weak' ? `Set a monthly launch quota — the fatigue cliff builds exactly here.` : band === 'middle' ? `Nudge the launch cadence up; watch the cohort chart month over month.` : `Keep the cadence.`,
       section_key: 'creative_cohorts',
       cohort: null,
-      derivation: `The share of this month's spend on creatives that first spent in the last ~2 months — full method in the launch-cohorts report below.`,
+      derivation: capped
+        ? `${baseDerivation} Held at middle whatever the share is: ${capClause}.`
+        : baseDerivation,
     });
   }
   if (inp.concentration) {

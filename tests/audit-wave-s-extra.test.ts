@@ -286,7 +286,7 @@ describe('buildScorecard — the cost trajectory states the figure it was given'
   });
 });
 
-describe('computeAccountFacts — every sentence carries its own window', () => {
+describe('computeAccountFacts — every sentence carries its own window, named ONE way', () => {
   const dayISO = (i: number): string => new Date(Date.UTC(2026, 3, 1) + i * 86_400_000).toISOString().slice(0, 10);
   /** A lead-gen account with 139 days of visible history: 200/day on the hero, a late test at 20/day. */
   const leadHistory = (spanDays: number) => [
@@ -306,8 +306,8 @@ describe('computeAccountFacts — every sentence carries its own window', () => 
     expect(d.delivery_days).toBe(139);
     expect(d.window_start).toBe(dayISO(0));
     expect(d.window_end).toBe(dayISO(138));
-    expect(s.summary).toContain('in the 139 days of history we can see');
-    expect(s.derivation).toContain('139 days');
+    expect(s.summary).toContain('the 139 days we can read');
+    expect(s.derivation).toContain('the 139 days we can read');
     expect(s.derivation).not.toContain('~6 months');
   });
 
@@ -322,7 +322,7 @@ describe('computeAccountFacts — every sentence carries its own window', () => 
     expect(Math.abs(d.daily_avg * d.window_days - d.window_spend)).toBeLessThanOrEqual(d.window_days);
     const avgLine = d.facts.find((f) => f.detail.includes('Daily average'))!;
     expect(avgLine.detail).toContain('203 USD');
-    expect(avgLine.detail).toContain('28,200 USD across the 139 days of this window');
+    expect(avgLine.detail).toContain('28,200 USD across the 139 days we can read');
   });
 
   it('every fact names the window it was measured over', () => {
@@ -337,17 +337,38 @@ describe('computeAccountFacts — every sentence carries its own window', () => 
     for (const f of facts) {
       expect(f.fact, f.fact).toMatch(/139 days|last 30 days/);
     }
-    expect(facts.some((f) => f.fact.includes('live 138 days, out of the 139 days of history we can see, and it is still spending'))).toBe(true);
+    expect(facts.some((f) => f.fact.includes('live 138 days, out of the 139 days we can read, and it is still spending'))).toBe(true);
     expect(facts.some((f) => f.fact.includes("of the last 30 days' spend runs on creative that first went live"))).toBe(true);
     expect(facts.some((f) => f.fact.includes("12% of the last 30 days' spend runs through partnership"))).toBe(true);
-    expect(facts.some((f) => f.fact.includes('in the 139 days of history we can see; '))).toBe(true);
+    expect(facts.some((f) => f.fact.includes('in the 139 days we can read; '))).toBe(true);
   });
 
-  it('a genuinely six-month window says months, from the rows and not from a constant', () => {
+  it('a long window still states DAYS, never a month count (the live section named one window three ways)', () => {
     const s = computeAccountFacts({ rows180: leadHistory(180), adNames: new Map(), partnershipSpendPct: null, currency: 'USD' });
     expect((s.data as { window_days: number }).window_days).toBe(180);
-    expect(s.summary).toContain('over the last 6 months');
+    const facts = (s.data as { facts: Array<{ fact: string }>; }).facts;
+    const section = [s.summary, s.next_step, s.derivation ?? '', ...facts.flatMap((f) => [f.fact, f.detail])].join(' ');
+    expect(section).toContain('the 180 days we can read');
+    expect(section).not.toMatch(/six months|months|month window|month-window/i);
+    // "90 days ago" and "the last 30 days" are OTHER windows and stay as they are.
+    expect(section).toContain('90 days ago');
+  });
+
+  it('the long window is named the SAME way in every sentence of the section', () => {
+    const s = computeAccountFacts({
+      rows180: leadHistory(179),
+      adNames: new Map([['lead-hero', 'Quote Form v3']]),
+      partnershipSpendPct: 12,
+      currency: 'USD',
+    });
+    expect((s.data as { window_days: number }).window_days).toBe(179);
     const facts = (s.data as { facts: Array<{ fact: string }> }).facts;
-    expect(facts.some((f) => f.fact.includes('over the last 6 months'))).toBe(true);
+    const strings = [s.summary, s.next_step, s.derivation ?? '', ...facts.flatMap((f) => [f.fact, f.detail])];
+    for (const str of strings) {
+      expect(str, str).not.toMatch(/months?\b/i);
+      // every mention of the long span uses the one phrase
+      if (/179/.test(str)) expect(str, str).toContain('the 179 days we can read');
+    }
+    expect(strings.join(' ')).toContain('the 179 days we can read');
   });
 });

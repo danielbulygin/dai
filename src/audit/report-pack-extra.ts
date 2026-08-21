@@ -978,8 +978,11 @@ export function computeAccountFacts(inp: AccountFactsInputs): PackSection {
   const deliveryDays = days.length;
   const windowSpend = total;
   const dailyAvg = windowSpend / Math.max(1, windowDays);
-  const windowPhrase =
-    windowDays >= 150 ? `over the last ${Math.round(windowDays / 30)} months` : `in the ${windowDays} days of history we can see`;
+  // ONE name for this window everywhere in the section. A month count is a
+  // rounding of the span we actually have, and the live report proved that a
+  // second name for the same window reads as a second window.
+  const windowNoun = `the ${windowDays} days we can read`;
+  const windowPhrase = `in ${windowNoun}`;
 
   const facts: Array<{ fact: string; detail: string }> = [];
 
@@ -988,7 +991,7 @@ export function computeAccountFacts(inp: AccountFactsInputs): PackSection {
   const longest = longestStillSpendingSpan(rows180);
   if (longest && longest.spanDays >= 30) {
     facts.push({
-      fact: `Your longest-running ad has been live ${longest.spanDays} days, out of the ${windowDays} days of history we can see, and it is still spending.`,
+      fact: `Your longest-running ad has been live ${longest.spanDays} days, out of ${windowNoun}, and it is still spending.`,
       detail: `${adNames.get(longest.adId) ?? longest.adId} (first seen ${longest.first} in this window). Check the fatigue report: if its number holds, that's an evergreen, not a liability.`,
     });
   }
@@ -1017,7 +1020,7 @@ export function computeAccountFacts(inp: AccountFactsInputs): PackSection {
   facts.push({
     fact: `Your biggest single day ${windowPhrase}: ${money(biggest[1], currency)} on ${biggest[0]}.`,
     detail:
-      `Daily average is ${money(dailyAvg, currency)}: ${money(windowSpend, currency)} across the ${windowDays} days of this window` +
+      `Daily average is ${money(dailyAvg, currency)}: ${money(windowSpend, currency)} across ${windowNoun}` +
       (deliveryDays < windowDays ? `, ${deliveryDays} of which had delivery.` : '.'),
   });
 
@@ -1046,7 +1049,7 @@ export function computeAccountFacts(inp: AccountFactsInputs): PackSection {
   });
 
   return {
-    summary: `${facts.length} things about this account most people running it couldn't quote, read ${windowPhrase}.`,
+    summary: `${facts.length} things about this account most people running it couldn't quote, measured across ${windowNoun}.`,
     next_step: `None of these demand action alone — they're the texture behind the reports above. The ones that do demand action are flagged there.`,
     data: {
       facts: facts.slice(0, 6),
@@ -1059,7 +1062,7 @@ export function computeAccountFacts(inp: AccountFactsInputs): PackSection {
       currency,
     },
     derivation:
-      `Computed from the ${windowDays} days of ad-level delivery history we can see (${firstDay} to ${lastDay}, ` +
+      `Computed from ${windowNoun} of ad-level delivery history (${firstDay} to ${lastDay}, ` +
       `${rows180.length.toLocaleString('en-US')} ad-day rows) — first/last spend day per ad, daily totals, weekend split, and the ` +
       `branded-content flag read live from Meta's creative metadata. The daily average is this window's own spend divided by its ` +
       `own ${windowDays} days, which is why it will not match a shorter window's total. ` +
