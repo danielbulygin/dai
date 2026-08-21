@@ -103,7 +103,7 @@ vi.stubGlobal('fetch', async (url: string, init?: { method?: string; headers?: R
 });
 
 import { runBridgedColdAudit } from '../src/audit/tinkers-bridge.js';
-import { seamGapFor } from '../src/audit/tinkers-reads.js';
+import { seamGapFor, type TinkersSeamReads } from '../src/audit/tinkers-reads.js';
 import {
   fetchTinkersActivity,
   fetchTinkersAdDays,
@@ -859,5 +859,28 @@ describe('the account-structure reads', () => {
     const read = await fetchTinkersPixels('aud_1');
     expect(read.state).toBe('failed');
     expect(state.calls).toHaveLength(0);
+  });
+});
+
+describe('runBridgedColdAudit hands the reads to the audit', () => {
+  it('the cold injection carries the six seam reads, still with no credential', async () => {
+    for (let i = 0; i < 12; i += 1) state.responses.push({ json: { received: true, recorded: true } });
+    await runBridgedColdAudit({ organizationId: 'org_1', auditId: 'aud_1' });
+    const cold = state.magicAuditOptions?.cold as Record<string, unknown>;
+    const seam = cold.seam as Record<string, unknown>;
+    expect(Object.keys(seam).sort()).toEqual(['activity', 'adSetInsights', 'adSets', 'breakdown', 'pixels', 'targeting']);
+    for (const fn of Object.values(seam)) expect(typeof fn).toBe('function');
+    expect(cold.accessToken).toBeNull();
+  });
+
+  it('the reads are bound to the audit id the trigger named', async () => {
+    for (let i = 0; i < 12; i += 1) state.responses.push({ json: { received: true, recorded: true } });
+    await runBridgedColdAudit({ organizationId: 'org_1', auditId: 'aud_42' });
+    const seam = (state.magicAuditOptions?.cold as { seam: TinkersSeamReads }).seam;
+    state.reads.pixels = { json: { ok: true, pixels: [], partial: false } };
+    await seam.pixels();
+    // The audit id is the tenant capability: a read bound to another one could
+    // not resolve a tenant at all.
+    expect(state.calls.at(-1)!.url).toBe('https://tinkers.test/api/generation/aud_42/pixels');
   });
 });

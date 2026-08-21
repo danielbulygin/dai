@@ -64,7 +64,35 @@ GET {TINKERS_BASE_URL}/api/generation/:auditId/creative-media?adIds=<top 12>
      30-minute signed URLs onto their media store — their connect burst
      downloads the real files at Meta connect (full images, playable mp4s),
      where ads_read Graph would give us a 64×64 thumbnail
+GET {TINKERS_BASE_URL}/api/generation/:auditId/ad-sets
+  → { ok, adSets: [{ adsetId, name, effectiveStatus, optimizationGoal,
+                     promotedObjectEventType, campaignId }], partial }
+GET {TINKERS_BASE_URL}/api/generation/:auditId/adset-insights
+      ?since&until&granularity=total|weekly
+  → { ok, granularity, rows: [normalized ad-SET rows], partial }
+     `weekly` is the provider's own time increment, not our arithmetic over
+     daily rows: a week's rates rebuilt from seven days of rates is an average
+     of averages
+GET {TINKERS_BASE_URL}/api/generation/:auditId/breakdown
+      ?dimension=placement|age_gender|country|user_segment&since&until
+  → { ok, dimension, rows: [normalized account rows], partial }
+     a composite dimension answers in `breakdownParts` ([{dimension,value}], in
+     query order) and a single one in `breakdownValue`; `user_segment` rows come
+     back verbatim, `unknown` keys included
+GET {TINKERS_BASE_URL}/api/generation/:auditId/activity?since&until
+  → { ok, changes: [normalized change rows], partial }
+GET {TINKERS_BASE_URL}/api/generation/:auditId/targeting
+  → { ok, adSets: [{ adsetId, adsetName, targetingClass, signals }],
+      audiences: [{ id, name, subtype }], partial }
+GET {TINKERS_BASE_URL}/api/generation/:auditId/pixels
+  → { ok, pixels: [{ id, name, lastFiredTime, automaticMatchingEnabled,
+                     automaticMatchingFields, matchRateApprox, diagnostics }],
+      partial }
 ```
+
+All six share the ad-day read's window rules where they take one: **31 days
+maximum, REFUSED rather than truncated**, so a ninety-day history is three
+requests and the slicing is the contract.
 
 `toRawAdDay` maps their normalized rows onto the raw Graph row shape
 `buildColdRows` consumes (loose on purpose: a field the mapper cannot place
@@ -72,15 +100,76 @@ costs that field, never the row; thruplays land back under the `video_view`
 action type Meta itself uses, and `video_view` is re-injected from `videoPlays`
 so hook rates survive).
 
-**Tokenless sections.** Sections whose reads only a connection token could
-serve run as `planned` (TOKENLESS_SKIP_SECTIONS in magic-audit.ts):
-placement_breakdown, audience_breakdown, saturation, optimization_events,
-learning_limited, targeting_split, account_activity, competitor_teardown. An
-honest gap, not an error — and the road back is more generation endpoints, not
-a credential. The gate matters twice: `metaTokenFor('')` falls back to the
-AGENCY token, so a tokenless cold run passes `''` (falsy) to every per-section
-Graph helper — probing a stranger's account with our own credential is the one
-call this path must never make.
+**Tokenless sections, and what stopped being one.** The road back was always
+more generation endpoints rather than a credential, and six of them landed.
+What remains tokenless:
+
+* `saturation` — needs Meta's own DEDUPLICATED weekly account reach, and no
+  read on the seam carries it. Ad-set reach summed across ad sets counts one
+  person once per ad set, so a frequency built from it is understated by an
+  unknown amount, and understating frequency is exactly the direction that
+  invents headroom an account does not have. It stays `planned` until a weekly
+  account-reach read exists.
+* `competitor_teardown` — resolving the account's own public page needs a token.
+
+The gate still matters twice: `metaTokenFor('')` falls back to the AGENCY token,
+so a tokenless cold run passes `''` (falsy) to every per-section Graph helper —
+probing a stranger's account with our own credential is the one call this path
+must never make. Every seam-fed runner branches on the injected reads BEFORE any
+Graph helper is reachable, so on this path no Graph URL is built at all.
+
+### The three answers a seam read can give
+
+`src/audit/tinkers-reads.ts` is the pure half: the wire schemas, the mappers
+into the shapes the report engines already eat, and `seamGapFor`, which is where
+these three stay apart. Collapsing any two of them is how a section says
+something it cannot back:
+
+| Read outcome | Section becomes | Why |
+|---|---|---|
+| **404 on the path** | `planned` | The endpoint is not deployed yet. It is the honest gap the section already was, and never an error on the report of a customer who did nothing wrong. |
+| **`ok: false, reason`** | `skipped`, with `data.unavailable_reason` | The read exists and cannot be served for this account. The reason travels as DATA so it is diagnosable without parsing a sentence, and stays out of the sentence the customer reads. |
+| **anything else** | `error` | A 500, a dead socket or a contract we cannot parse is the honest failure a failed pull has always been. |
+
+`partial: true` adds one warning line to the section that read short, and
+nothing else: a figure that is a floor has to say so where it is printed.
+
+A revoked or expired audit id is also 404 on these paths, so mid-run revocation
+reads as "not deployed". Deliberate and harmless: the account read at the top of
+the run already proved the id, and a revoked audit has nowhere to write back to.
+
+### Which section reads what
+
+| Section | Read | Notes |
+|---|---|---|
+| `placement_breakdown` | `breakdown?dimension=placement` | `breakdownParts` read by dimension NAME, never by position. |
+| `audience_breakdown` | `breakdown?dimension=age_gender` + `country` | Age and gender are one read; a failed country read costs the country table, not the chapter. |
+| `audience_segments` | `breakdown?dimension=user_segment` | New section. Core window first, widened backwards up to two 31-day slices when it comes back empty. |
+| `optimization_events` | `ad-sets` + `adset-insights` (total, core window) | Ad-set spend from their own figure; a failed spend read falls back to the ad-level sum, which the pull already carries. |
+| `learning_limited` | `ad-sets` + `adset-insights` (weekly, last 28 days) | Counts the action matching each ad set's OWN configured event, and averages over the buckets that ad set actually has rather than a flat four. |
+| `targeting_split` | `targeting` | Their class decides and our flags follow (see below), plus the ad-set-name promise check. |
+| `account_activity` | `activity` × 3 slices of 30 days | The first slice decides the section; a failed older slice shortens the window we claim. **No actor crosses this seam**, so the section reports what changed and when and says so. |
+| `pixel_health` | `pixels` | New section. |
+
+The ad-set and ad-set-spend reads are memoized per audit: three sections need
+them, and three copies of one request are three chances for two sections to
+disagree about the same account.
+
+**Targeting: their class decides, our flags follow.** `toTargetingSpecs` maps
+their `targetingClass` onto the booleans our own classifier reads, rather than
+re-deriving a class from the signals. Their side holds the account's saved
+audience list and therefore knows a lookalike from an audience it could not
+place; ours would read "has custom audiences, no lookalikes" and file an
+unplaceable audience as retargeting, which is the exact guess the audience list
+exists to prevent.
+
+**The ad-set-name promise check** rides inside `targeting_split`
+(`readNamePromises`): each SPENDING ad set's name against what its spec holds.
+Only a name making a checkable claim is judged — lookalike, retargeting, broad,
+interests, or one of the account's own saved audience names — and the verdict
+never says which half is stale, because a renamed ad set and a rebuilt audience
+look identical from here. An ad set called "Q3 test 4" claims nothing and is
+never mentioned.
 
 **creative_analysis runs**, tokenless, off the store media: the winners' words
 come with the media payload, `pickMedia` prefers a stored playable mp4 or full
@@ -558,6 +647,74 @@ that reading:
 A recognition read that FAILED leaves the lens null, and a null lens skips
 nothing: "we could not read the account" is not the same claim as "the account
 is ambiguous", and only the second may cost the reader a section.
+
+## The sections this wave added
+
+Three new keys in `SECTION_ORDER`. Two of them exist only on the seam (no other
+path has the read) and are `planned` elsewhere; the third needs the six-month
+per-ad inventory, which only the cold and bridged pulls build.
+
+* **`audience_segments` — "Audience Segments: who the budget actually reaches".**
+  Two findings, and they are different sentences. With real segment keys it is a
+  share: "X% of the spend went to people who have never heard of you", with the
+  money behind it. With every row coming back `unknown` it is the ABSENCE: no
+  engaged or existing audiences are defined, which most accounts never do, and
+  until they exist nobody can read the split. Meta does not error on the second
+  case — it answers unknown for everything — so the distinction is drawn here.
+  Keys are placed by their own words (`new` is tested before `existing`, because
+  "non-customer" contains "customer"); a key we cannot place is reported under
+  its own name. The next step is the owner DEFINING audiences: creating one is a
+  write, and nothing here offers it.
+* **`pixel_health` — "Tracking Setup: what your pixel is set up to send".**
+  Advanced Matching on or off with its field count, the last event's recency,
+  and any diagnostic whose result is not "passed" quoted BY NAME in Meta's own
+  result word. `matchRateApprox` null means no rate is ever mentioned. **There is
+  no score**, and `data.match_quality_score` is a null nobody may fill:
+  `event_match_quality` is not a field on that node, so a grade could only be
+  invented, and it would be the most quotable wrong thing an audit can say about
+  somebody's tracking (their docs/decisions/0066 reaches the same conclusion
+  from the other side). An empty pixel list is the account having no pixel, which
+  is a real finding — a read that FAILED is reported as a failed read instead.
+* **`launch_discipline` — "Launching and Testing: how much new creative you
+  ship".** New ads per month from first-spend-day cohorts against a spend-scaled
+  expectation (one new ad per 3,000 of monthly spend, floor two a month), plus
+  "N ads never got a fair test" — ads that stopped spending having taken under
+  three times the owner's OWN stated cost per result. The benchmark states its
+  basis in the sentence that uses it: it is the rate this desk plans to, currency
+  naive like the other floors, and not derived from the account. The read's FIRST
+  month is dropped from the cadence, because every ad already running when the
+  window opens has its first spending day inside it and would be counted as a
+  launch.
+
+## Checks added over the rows we already had
+
+No new data behind any of these.
+
+* **"Never found traction"** in the fatigue chapter: an ad at least 5 days old
+  whose spend never cleared the assessment floor and which produced no measured
+  result. It is deliberately NOT a fatigue class — fatigue is a number coming
+  down and these never got up — and before it existed those ads appeared nowhere
+  in the report, since they clear neither the trend floor nor the
+  suppressed-no-results count. The existing classifier is untouched.
+* **"Watched and not clicked"**, same chapter: three-second plays on 15% or more
+  of impressions with link clicks on 0.2% or fewer, past 1,000 impressions. It
+  needs per-ad link clicks, which only the cold and bridged pulls carry
+  (`PackAdRow.link_clicks`, optional): **undefined means unread, never zero**, so
+  on a warehouse account the check stays silent rather than reporting every ad as
+  entertainment. `toRawAdDay` re-injects `link_click` from their `linkClicks`
+  when the actions list does not carry one, the same trick already used for
+  `video_view`.
+* **The underfunded winner** is now a lead-insight candidate, read off the
+  scatter's OWN starved verdict rather than recomputed: the ad name, its cost per
+  result against the plotted set's line, and its share of the spend. A second
+  opinion here could circle an ad the chart does not.
+* **The 1-in-20 base rate** lands on the empty protect list, which is where a
+  reader concludes something is wrong with their creative. It is stated as a
+  planning rate this desk works to, never as a measurement of the account.
+* **Section titles carry no em or en dash.** They are customer-facing strings and
+  the deep dash scrub rewrote a dashed title into two sentences on its way to the
+  row ("Placements. Where the spend actually goes"), which is not a title. Colons
+  now, same meaning.
 
 ## Env
 

@@ -21,10 +21,16 @@ import {
   computePlacementBreakdown, computeAudienceBreakdown, computeTargetingSplit, computeLearningLimited,
   computeSaturation, computeCreativeDiversity, computeCohortWave, computeWhatsWorking, computeLandingPages,
   computeAccountFacts, longestStillSpendingSpan, classifyDestination, computeAccountActivity,
-  rankDestinationsBySpend,
+  rankDestinationsBySpend, computeAudienceSegments, computePixelHealth, computeLaunchDiscipline,
   type PlacementInsightRow, type DemoInsightRow, type GeoInsightRow, type TargetingSpecLite,
   type WeeklyReachRow, type LandingAdRow, type DeadUrlCheck, type ActivityEvent,
 } from './report-pack-extra.js';
+import {
+  partialWarning, readAudiences, readClassifiedAdSets, readNamePromises, seamGapFor, toActivityEvents,
+  toAdsetConfigs, toAdsetSpend, toAdsetWeeklyEvents, toDemoRows, toGeoRows, toPixelLites,
+  toPlacementRows, toSegmentRows, toTargetingSpecs,
+  type SeamAdSet, type TinkersRead, type TinkersSeamReads,
+} from './tinkers-reads.js';
 import {
   buildAccountModel, mergeAccountModel, readAccountLens,
   type AccountModel, type AccountModelInputs, type AccountLensRead, type AccountLens,
@@ -129,6 +135,15 @@ export interface ColdInjection {
   /** ad id → its FULL landing url. `rows.landing30` carries the path only, and
    *  a path cannot be fetched: the site walk needs the host too. */
   landingUrls?: Record<string, string> | null;
+  /**
+   * The account-structure reads, INJECTED (tinkers-bridge builds them; that
+   * module imports this one, so nothing here may import it back).
+   *
+   * Present, the sections that need to know how the account is CONFIGURED read
+   * it through the seam instead of a credential. Absent, they are planned, which
+   * is what a tokenless run without a seam has always been.
+   */
+  seam?: TinkersSeamReads | null;
 }
 
 /** Sections that read warehouse tables a stranger doesn't have.
@@ -170,10 +185,37 @@ export function lensSkipReason(lens: AccountLensRead['lens']): string | null {
   return null;
 }
 
-const TOKENLESS_SKIP_SECTIONS = [
-  'placement_breakdown', 'audience_breakdown', 'saturation', 'optimization_events',
-  'learning_limited', 'targeting_split', 'account_activity', 'competitor_teardown',
+/**
+ * Sections a tokenless run cannot serve FROM ANY SOURCE.
+ *
+ * Saturation needs Meta's own deduplicated WEEKLY account reach, and the
+ * generation seam has no read that carries it: ad-set reach summed across ad
+ * sets counts the same person once per ad set, so a frequency built from it
+ * would be understated by an unknown amount, and understating frequency is
+ * exactly the direction that invents headroom an account does not have. The
+ * road back is one more endpoint (weekly account reach), not an approximation.
+ * The competitor teardown needs a token to resolve the account's own page.
+ */
+const TOKENLESS_SKIP_SECTIONS = ['saturation', 'competitor_teardown'];
+
+/**
+ * Sections whose reads a connection token OR the generation seam can serve.
+ * On a tokenless run they are skipped only when no seam was injected.
+ */
+const SEAM_FED_SECTIONS = [
+  'placement_breakdown', 'audience_breakdown', 'optimization_events',
+  'learning_limited', 'targeting_split', 'account_activity',
 ];
+
+/** Sections that exist ONLY on the seam: nothing else has the read. */
+const SEAM_ONLY_SECTIONS = ['audience_segments', 'pixel_health'];
+
+/**
+ * Sections built from the six-month per-ad inventory, which only the cold and
+ * bridged pulls produce (`ColdRows.sixMonthAds`). A warehouse run has no
+ * equivalent row set, so they are planned there rather than half-built.
+ */
+const COLD_ONLY_SECTIONS = ['launch_discipline'];
 
 export interface LeadInsight {
   headline: string;
@@ -185,31 +227,38 @@ export interface LeadInsight {
 // Fast (deterministic, zero-LLM) sections run FIRST — they land in seconds,
 // so the first screen already shows real findings while Opus sections cook
 // (Dan 2026-07-02: speed to the first magic moment correlates with conversion).
+// Titles carry no em or en dash. They are customer-facing strings like any
+// other, and the deep dash scrub rewrites a dashed one into two sentences on
+// its way to the row ("Placements. Where the spend actually goes"), which is
+// not a title. A colon says the same thing and survives the gate unchanged.
 const SECTION_ORDER: Array<Pick<AuditSection, 'key' | 'title' | 'status'>> = [
-  { key: 'dataset_health', title: 'Data Foundation — pixel, CAPI & match quality', status: 'pending' },
-  { key: 'account_structure', title: 'Account Structure & Spend Concentration', status: 'pending' },
+  { key: 'dataset_health', title: 'Data Foundation: pixel, CAPI and match quality', status: 'pending' },
+  { key: 'account_structure', title: 'Account Structure and Spend Concentration', status: 'pending' },
   { key: 'spend_concentration', title: 'Budget Concentration: how much rides on one ad', status: 'pending' },
-  { key: 'creative_fatigue', title: 'Creative Fatigue & Runway', status: 'pending' },
-  { key: 'budget_scatter', title: 'Budget — spend vs return per ad', status: 'pending' },
-  { key: 'creative_cohorts', title: 'Creative Cohorts — living off old creative?', status: 'pending' },
-  { key: 'cost_trends', title: 'CPM & Auction Pressure', status: 'pending' },
+  { key: 'creative_fatigue', title: 'Creative Fatigue and Runway', status: 'pending' },
+  { key: 'budget_scatter', title: 'Budget: spend vs return per ad', status: 'pending' },
+  { key: 'creative_cohorts', title: 'Creative Cohorts: living off old creative?', status: 'pending' },
+  { key: 'launch_discipline', title: 'Launching and Testing: how much new creative you ship', status: 'pending' },
+  { key: 'cost_trends', title: 'CPM and Auction Pressure', status: 'pending' },
   { key: 'timing_patterns', title: 'Day-of-Week Pattern', status: 'pending' },
-  { key: 'how_you_compare', title: 'How You Compare — hook & hold vs the desk', status: 'pending' },
-  { key: 'placement_breakdown', title: 'Placements — where the spend actually goes', status: 'pending' },
-  { key: 'audience_breakdown', title: 'Audience Delivery — age, gender, geography', status: 'pending' },
-  { key: 'saturation', title: 'Audience Saturation — how much headroom is left?', status: 'pending' },
-  { key: 'concept_roas', title: 'Creative Angles — spend vs return by concept', status: 'pending' },
-  { key: 'creative_diversity', title: 'Creative Diversity — how fragile is the portfolio?', status: 'pending' },
-  { key: 'whats_working', title: "What's Working — the protect list", status: 'pending' },
-  { key: 'optimization_events', title: 'Optimization Events — is Meta hunting the right thing?', status: 'pending' },
-  { key: 'learning_limited', title: 'Learning Phase — is the structure starving Meta?', status: 'pending' },
-  { key: 'targeting_split', title: 'Targeting — broad vs interests vs audiences', status: 'pending' },
-  { key: 'landing_pages', title: 'Landing Pages — spend by destination + dead-URL check', status: 'pending' },
+  { key: 'how_you_compare', title: 'How You Compare: hook and hold vs the desk', status: 'pending' },
+  { key: 'pixel_health', title: 'Tracking Setup: what your pixel is set up to send', status: 'pending' },
+  { key: 'placement_breakdown', title: 'Placements: where the spend actually goes', status: 'pending' },
+  { key: 'audience_breakdown', title: 'Audience Delivery: age, gender and geography', status: 'pending' },
+  { key: 'audience_segments', title: 'Audience Segments: who the budget actually reaches', status: 'pending' },
+  { key: 'saturation', title: 'Audience Saturation: how much headroom is left?', status: 'pending' },
+  { key: 'concept_roas', title: 'Creative Angles: spend vs return by concept', status: 'pending' },
+  { key: 'creative_diversity', title: 'Creative Diversity: how fragile is the portfolio?', status: 'pending' },
+  { key: 'whats_working', title: "What's Working: the protect list", status: 'pending' },
+  { key: 'optimization_events', title: 'Optimization Events: is Meta hunting the right thing?', status: 'pending' },
+  { key: 'learning_limited', title: 'Learning Phase: is the structure starving Meta?', status: 'pending' },
+  { key: 'targeting_split', title: 'Targeting: broad vs interests vs audiences', status: 'pending' },
+  { key: 'landing_pages', title: 'Landing Pages: spend by destination plus the dead-URL check', status: 'pending' },
   { key: 'message_match', title: 'Ad Promise vs Landing Page', status: 'pending' },
-  { key: 'creative_analysis', title: 'Creative Performance & Angles', status: 'pending' },
+  { key: 'creative_analysis', title: 'Creative Performance and Angles', status: 'pending' },
   { key: 'funnel_read', title: 'Funnel Diagnosis', status: 'pending' },
-  { key: 'account_facts', title: 'Did You Know — the account texture', status: 'pending' },
-  { key: 'account_activity', title: "Account Activity — change history & who's working the account", status: 'pending' },
+  { key: 'account_facts', title: 'Did You Know: the account texture', status: 'pending' },
+  { key: 'account_activity', title: "Account Activity: change history and who's working the account", status: 'pending' },
   { key: 'competitor_teardown', title: 'Ads Library Landscape', status: 'pending' },
 ];
 
@@ -1443,6 +1492,23 @@ async function fetchPartnershipAdIds(clientCode: string, adAccountId: string | n
  */
 const ACTIVITY_PAGE_CAP = 20; // 20 × 500 = up to 10k events before we call it a floor
 
+/**
+ * The generation seam refuses a window over 31 days rather than truncating it,
+ * so the same ninety-day history is three requests there. 30 keeps each slice
+ * inside their cap with a day to spare.
+ */
+const ACTIVITY_SLICE_DAYS = 30;
+const ACTIVITY_SLICES = 3;
+
+/**
+ * The audience-segment read's windows. The core window first, because every
+ * other figure in the report is read over it; then up to two 31-day slices
+ * further back, which is the widest a single request may ask for.
+ */
+const SEGMENT_WINDOW_DAYS = 30;
+const SEGMENT_SLICE_DAYS = 31;
+const SEGMENT_WIDEN_SLICES = 2;
+
 async function fetchAccountActivities(
   clientCode: string,
   adAccountId: string | null,
@@ -2068,6 +2134,22 @@ export function workLineFor(key: string, s: AuditSection): string | null {
       const page = d.page as { url?: string } | undefined;
       return page?.url ? `Opened the landing page your top ad points at and read what it promises` : null;
     }
+    case 'audience_segments': {
+      const n = (d.segments as unknown[] | undefined)?.length ?? 0;
+      if (d.segments_defined === false) return `Checked which audience segments this account defines, and found none`;
+      return n ? `Split the spend across ${n} of Meta's own audience segments` : null;
+    }
+    case 'pixel_health': {
+      const n = typeof d.pixel_count === 'number' ? d.pixel_count : 0;
+      return n
+        ? `Read the setup on ${n} pixel${n === 1 ? '' : 's'}: Advanced Matching, last event, and Meta's own checks`
+        : `Checked the account for a pixel and found none`;
+    }
+    case 'launch_discipline': {
+      const months = typeof d.months_judged === 'number' ? d.months_judged : 0;
+      const launched = typeof d.launched_total === 'number' ? d.launched_total : 0;
+      return months ? `Dated every ad's first spending day across ${months} months and counted ${launched} launches` : null;
+    }
     case 'account_facts':
       return `Pulled six months of account texture, the "did you know" facts`;
     case 'competitor_teardown':
@@ -2263,7 +2345,15 @@ export async function runMagicAudit(
   // Cold path: warehouse-backed sections can't run for a stranger — mark them
   // planned via the existing skip machinery, never as errors.
   if (cold) for (const k of COLD_SKIP_SECTIONS) skip.add(k);
-  if (cold && !cold.accessToken) for (const k of TOKENLESS_SKIP_SECTIONS) skip.add(k);
+  if (cold && !cold.accessToken) {
+    for (const k of TOKENLESS_SKIP_SECTIONS) skip.add(k);
+    // The seam is what un-skipped these. Without it a tokenless run has no
+    // source for them at all, and they stay planned exactly as before.
+    if (!cold.seam) for (const k of SEAM_FED_SECTIONS) skip.add(k);
+  }
+  if (!cold?.seam) for (const k of SEAM_ONLY_SECTIONS) skip.add(k);
+  if (!cold) for (const k of COLD_ONLY_SECTIONS) skip.add(k);
+  const seam = cold?.seam ?? null;
   // On a cold run the connection token is the ONLY credential the per-section
   // Graph reads may use. A null cold token reaching the helpers as undefined
   // would let them fall back to the agency token via metaTokenFor('') — so a
@@ -2765,6 +2855,40 @@ export async function runMagicAudit(
     return ownLibraryPromise;
   };
 
+  // ONE ad-set read and ONE ad-set spend read per audit, memoized: the
+  // optimization report, the learning bar and the targeting split all need them,
+  // and three copies of the same request are three chances for two sections to
+  // disagree about the same account. A rejection memoizes too, which is what
+  // makes it one attempt.
+  let seamAdSetsPromise: Promise<TinkersRead<SeamAdSet[]>> | undefined;
+  const seamAdSetsRead = (reads: TinkersSeamReads): Promise<TinkersRead<SeamAdSet[]>> => {
+    seamAdSetsPromise ??= reads.adSets();
+    return seamAdSetsPromise;
+  };
+  let seamAdsetSpendPromise: Promise<TinkersRead<unknown[]>> | undefined;
+  const seamAdsetSpendRead = (reads: TinkersSeamReads): Promise<TinkersRead<unknown[]>> => {
+    seamAdsetSpendPromise ??= reads.adSetInsights({
+      since: coreCutISO,
+      until: auditWindow.anchorDate,
+      granularity: 'total',
+    });
+    return seamAdsetSpendPromise;
+  };
+
+  /** A read that came back short says so on its own section, and nowhere else. */
+  const withPartial = <T extends { warnings?: string[] }>(section: T, what: string): T => ({
+    ...section,
+    warnings: [...(section.warnings ?? []), partialWarning(what)],
+  });
+
+  /** Ad-set spend for the core window: the seam's own figure, else the ad-level sum. */
+  const seamSpendByAdset = async (reads: TinkersSeamReads): Promise<Map<string, number>> => {
+    const read = await seamAdsetSpendRead(reads);
+    // The ad-level pull already carries adset ids, so a failed ad-set read costs
+    // precision (an ad set whose ads fell out of the pull) and not the section.
+    return read.state === 'ok' ? toAdsetSpend(read.data) : spendByAdset;
+  };
+
   const RUNNERS: Record<string, () => Promise<Partial<AuditSection>>> = {
     dataset_health: () => runDatasetHealth(code),
     account_structure: () => runAccountStructure(code),
@@ -2795,6 +2919,16 @@ export async function runMagicAudit(
     // already-benchmarked rate dims into the dedicated band chapter; posts a stat.
     how_you_compare: async () => buildComparisonSection(savedScorecard ?? []),
     placement_breakdown: async () => {
+      if (seam) {
+        const read = await seam.breakdown({
+          dimension: 'placement',
+          since: coreCutISO,
+          until: auditWindow.anchorDate,
+        });
+        if (read.state !== 'ok') return seamGapFor(read, "where this account's spend was delivered");
+        const section = computePlacementBreakdown(toPlacementRows(read.data), client.currency);
+        return read.partial ? withPartial(section, 'placement') : section;
+      }
       const raw = await fetchInsightsBreakdown(code, client.adAccountId, 'publisher_platform,platform_position', '', coldToken);
       if (!raw) return { status: 'error', error: 'placement insights pull failed' };
       const rows: PlacementInsightRow[] = raw.map((r) => ({
@@ -2809,6 +2943,21 @@ export async function runMagicAudit(
       return computePlacementBreakdown(rows, client.currency);
     },
     audience_breakdown: async () => {
+      if (seam) {
+        const window = { since: coreCutISO, until: auditWindow.anchorDate };
+        const [demoRead, geoRead] = await Promise.all([
+          seam.breakdown({ dimension: 'age_gender', ...window }),
+          seam.breakdown({ dimension: 'country', ...window }),
+        ]);
+        if (demoRead.state !== 'ok') return seamGapFor(demoRead, "who this account's ads reached");
+        // Geography is the second half of this chapter, not its subject: a
+        // country read that could not answer costs the country table.
+        const geo = geoRead.state === 'ok' ? toGeoRows(geoRead.data) : [];
+        const section = computeAudienceBreakdown(toDemoRows(demoRead.data), geo, client.currency);
+        return demoRead.partial || (geoRead.state === 'ok' && geoRead.partial)
+          ? withPartial(section, 'audience')
+          : section;
+      }
       const [demoRaw, geoRaw] = await Promise.all([
         fetchInsightsBreakdown(code, client.adAccountId, 'age,gender', '', coldToken),
         fetchInsightsBreakdown(code, client.adAccountId, 'country', '', coldToken),
@@ -2851,15 +3000,50 @@ export async function runMagicAudit(
         sections['creative_cohorts']?.data as Parameters<typeof computeWhatsWorking>[4],
       ),
     optimization_events: async () => {
+      const totals = (): { purchases: number; leads: number; purchase_value: number } => {
+        const t = accountTotals30 ?? { purchases: 0, leads: 0, purchase_value: 0 };
+        return { purchases: t.purchases ?? 0, leads: t.leads ?? 0, purchase_value: t.purchase_value ?? 0 };
+      };
+      if (seam) {
+        const adSets = await seamAdSetsRead(seam);
+        if (adSets.state !== 'ok') return seamGapFor(adSets, 'how this account\'s ad sets are configured');
+        adsetConfigsForModel = toAdsetConfigs(adSets.data);
+        const section = computeOptimizationEvents(
+          adsetConfigsForModel,
+          await seamSpendByAdset(seam),
+          totals(),
+          client.currency,
+        );
+        return adSets.partial ? withPartial(section, 'ad set') : section;
+      }
       adsetConfigsForModel = await fetchAdsetConfigs(code, client.adAccountId, coldToken);
-      const t = accountTotals30 ?? { purchases: 0, leads: 0, purchase_value: 0 };
-      return computeOptimizationEvents(adsetConfigsForModel, spendByAdset, {
-        purchases: t.purchases ?? 0,
-        leads: t.leads ?? 0,
-        purchase_value: t.purchase_value ?? 0,
-      }, client.currency);
+      return computeOptimizationEvents(adsetConfigsForModel, spendByAdset, totals(), client.currency);
     },
     learning_limited: async () => {
+      if (seam) {
+        // The provider's OWN weekly buckets over the window's last 28 days, and
+        // the event each ad set is actually optimizing for rather than whatever
+        // the account happens to record: an ad set told to find leads is not
+        // starved because the account books few purchases.
+        const [adSets, weekly] = await Promise.all([
+          seamAdSetsRead(seam),
+          seam.adSetInsights({
+            since: shiftISO(auditWindow.anchorDate, 27),
+            until: auditWindow.anchorDate,
+            granularity: 'weekly',
+          }),
+        ]);
+        if (adSets.state !== 'ok') return seamGapFor(adSets, 'how this account\'s ad sets are configured');
+        if (weekly.state !== 'ok') return seamGapFor(weekly, 'this account\'s week-by-week delivery per ad set');
+        const configs = adsetConfigsForModel.length ? adsetConfigsForModel : toAdsetConfigs(adSets.data);
+        const section = computeLearningLimited(
+          configs,
+          toAdsetWeeklyEvents(weekly.data, configs),
+          await seamSpendByAdset(seam),
+          client.currency,
+        );
+        return weekly.partial || adSets.partial ? withPartial(section, 'weekly ad set') : section;
+      }
       // Weekly optimization-event rate per ad set over the window's last 28 days.
       const cut = shiftISO(auditWindow.anchorDate, 28);
       const weekly = new Map<string, number>();
@@ -2872,8 +3056,6 @@ export async function runMagicAudit(
       return computeLearningLimited(adsets, weekly, spendByAdset, client.currency);
     },
     targeting_split: async () => {
-      const specs = await fetchTargetingSpecs(code, client.adAccountId, coldToken);
-      if (!specs) return { status: 'error', error: 'targeting spec pull failed' };
       const kpiByAdset = new Map<string, { value: number; results: number }>();
       for (const r of rows30) {
         if (!r.adset_id) continue;
@@ -2882,6 +3064,25 @@ export async function runMagicAudit(
         a.results += (auditKpiMode === 'roas' ? r.purchases : r.purchases || r.leads) || 0;
         kpiByAdset.set(String(r.adset_id), a);
       }
+      if (seam) {
+        const read = await seam.targeting();
+        if (read.state !== 'ok') return seamGapFor(read, 'who each ad set is told to reach');
+        // Their class travels with the signals it was decided from, so the
+        // name-versus-spec check is ours to write and their classification is
+        // what it is checked against.
+        const classified = readClassifiedAdSets(read.data.adSets);
+        const section = computeTargetingSplit(
+          toTargetingSpecs(classified),
+          await seamSpendByAdset(seam),
+          kpiByAdset,
+          rows30,
+          client.currency,
+          readNamePromises(classified, readAudiences(read.data.audiences)),
+        );
+        return read.partial ? withPartial(section, 'targeting') : section;
+      }
+      const specs = await fetchTargetingSpecs(code, client.adAccountId, coldToken);
+      if (!specs) return { status: 'error', error: 'targeting spec pull failed' };
       return computeTargetingSplit(specs, spendByAdset, kpiByAdset, rows30, client.currency);
     },
     landing_pages: async () => {
@@ -2993,6 +3194,42 @@ export async function runMagicAudit(
       return computeAccountFacts({ rows180: packRows180, adNames, partnershipSpendPct: partnershipPct, currency: client.currency });
     },
     account_activity: async () => {
+      if (seam) {
+        // Their window caps at 31 days and is REFUSED rather than truncated, so
+        // ninety days is three requests. The first slice decides the section:
+        // if the most recent month cannot be read there is no history to report,
+        // while a failed older slice only shortens the window we claim.
+        const asOf = new Date().toISOString().slice(0, 10);
+        const changes: unknown[] = [];
+        let daysRead = 0;
+        let partial = false;
+        for (let slice = 0; slice < ACTIVITY_SLICES; slice += 1) {
+          const read = await seam.activity({
+            since: shiftISO(asOf, slice * ACTIVITY_SLICE_DAYS + (ACTIVITY_SLICE_DAYS - 1)),
+            until: shiftISO(asOf, slice * ACTIVITY_SLICE_DAYS),
+          });
+          if (read.state !== 'ok') {
+            if (slice === 0) return seamGapFor(read, "this account's change history");
+            partial = true;
+            break;
+          }
+          changes.push(...read.data);
+          daysRead += ACTIVITY_SLICE_DAYS;
+          if (read.partial) partial = true;
+        }
+        return computeAccountActivity({
+          events: toActivityEvents(changes),
+          currency: client.currency,
+          monthlyRetainer: null,
+          partial,
+          asOf,
+          windowDays: daysRead,
+          // The normalized rows carry what changed and when, and no actor at
+          // all. One "unattributed" bucket over every change would read as a
+          // finding about a person nobody named.
+          actorsAvailable: false,
+        });
+      }
       // Change history reads live from Meta's activities edge on BOTH paths
       // (cold connection token or the agency token) — no warehouse dependency.
       const res = await fetchAccountActivities(code, client.adAccountId, coldToken);
@@ -3006,6 +3243,77 @@ export async function runMagicAudit(
         currency: client.currency,
         monthlyRetainer,
         partial: res.partial,
+      });
+    },
+    audience_segments: async () => {
+      if (!seam) return { status: 'planned' };
+      const dimension = 'user_segment' as const;
+      const first = await seam.breakdown({ dimension, since: coreCutISO, until: auditWindow.anchorDate });
+      if (first.state !== 'ok') return seamGapFor(first, "how Meta splits this account's audience");
+      let rows = first.data;
+      let windowDays = SEGMENT_WINDOW_DAYS;
+      let partial = first.partial;
+      let widened = false;
+      // Meta only reports segments where it has them, and on a quiet or newer
+      // account the core window can come back with nothing while a longer range
+      // has rows. An empty window is widened backwards a slice at a time rather
+      // than reported as "no segments": those are different findings.
+      for (let slice = 1; slice <= SEGMENT_WIDEN_SLICES && rows.length === 0; slice += 1) {
+        const more = await seam.breakdown({
+          dimension,
+          since: shiftISO(coreCutISO, slice * SEGMENT_SLICE_DAYS),
+          until: shiftISO(coreCutISO, (slice - 1) * SEGMENT_SLICE_DAYS + 1),
+        });
+        if (more.state !== 'ok') break;
+        rows = more.data;
+        windowDays = SEGMENT_SLICE_DAYS;
+        widened = true;
+        partial = partial || more.partial;
+      }
+      const section = computeAudienceSegments({
+        rows: toSegmentRows(rows),
+        currency: client.currency,
+        windowDays,
+        widened,
+      });
+      return partial ? withPartial(section, 'audience segment') : section;
+    },
+    pixel_health: async () => {
+      if (!seam) return { status: 'planned' };
+      const read = await seam.pixels();
+      if (read.state !== 'ok') return seamGapFor(read, "this account's pixels");
+      const section = computePixelHealth({
+        pixels: toPixelLites(read.data),
+        asOf: new Date().toISOString().slice(0, 10),
+      });
+      return read.partial ? withPartial(section, 'pixel') : section;
+    },
+    launch_discipline: async () => {
+      const ads = cold?.rows.sixMonthAds ?? [];
+      if (ads.length === 0) {
+        return {
+          status: 'skipped',
+          skip_reason: 'This read holds no per-ad history to date launches from, so there is no launch cadence to judge.',
+        };
+      }
+      const monthly = new Map<string, number>();
+      for (const r of packRows180) {
+        const month = r.date.slice(0, 7);
+        monthly.set(month, (monthly.get(month) ?? 0) + (r.spend || 0));
+      }
+      return computeLaunchDiscipline({
+        ads: ads.map((a) => ({
+          ad_id: a.ad_id,
+          ad_name: a.ad_name,
+          spend: a.spend,
+          first_spend_date: a.first_spend_date,
+          last_spend_date: a.last_spend_date,
+        })),
+        monthlySpend: [...monthly.entries()].map(([month, spend]) => ({ month, spend })),
+        anchorDate: auditWindow.anchorDate,
+        currency: client.currency,
+        costTarget: ownerTarget,
+        resultNoun: lensRead?.lens === 'lead_gen' ? 'lead' : 'result',
       });
     },
     competitor_teardown: () => {
@@ -3124,6 +3432,10 @@ export async function runMagicAudit(
         scorecard,
         sections['creative_fatigue']?.data as { ads?: FatigueAd[] } | undefined,
         sections['spend_concentration']?.data as Record<string, never> | undefined,
+        // The scatter runs earlier in SECTION_ORDER, so its own starved-winner
+        // verdict is already stored: the strip names the ad the chart circled
+        // rather than picking one of its own.
+        sections['budget_scatter']?.data as Parameters<typeof buildProvisionalInsights>[3],
       );
       if (provisional.length) {
         await updateRow({ lead_insights: provisional.map((i) => houseWords(scrubInsightProse(i))) });

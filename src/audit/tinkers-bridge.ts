@@ -894,6 +894,13 @@ async function runBridged(args: {
       interview: leadContext?.interview ?? null,
       storeMedia,
       landingUrls,
+      // The account-structure reads, bound to this audit id. With them the
+      // sections that used to run `planned` on this path (placements, audience
+      // delivery, optimization events, the learning bar, targeting, change
+      // history) read the account through the seam instead of a credential —
+      // and each one still degrades on its own: an endpoint that is not
+      // deployed leaves its section planned, exactly as before.
+      seam: tinkersSeamReads(auditId),
     },
   });
 
