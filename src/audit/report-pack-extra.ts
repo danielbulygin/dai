@@ -20,6 +20,9 @@ const pct = (num: number, den: number): number => (den > 0 ? r1((num / den) * 10
 const div = (num: number, den: number): number => (den > 0 ? num / den : 0);
 const money = (v: number, currency: string): string =>
   `${Math.round(v).toLocaleString('en-US')}${currency ? ` ${currency}` : ''}`;
+/** Two decimals kept: a cost per lead of 18.59 must not read as 19. */
+const moneyExact = (v: number, currency: string): string =>
+  `${v.toFixed(2)}${currency ? ` ${currency}` : ''}`;
 
 // ---------------------------------------------------------------------------
 // A. Placement breakdown — where the spend actually goes (design §2, Dan
@@ -41,8 +44,7 @@ export function computePlacementBreakdown(rows: PlacementInsightRow[], currency:
   if (totalSpend < 100 || rows.length === 0) {
     return {
       summary: 'Not enough placement-level delivery in the window to read a split.',
-      next_step: 'Re-audit once the account has meaningful spend in the last 30 days.',
-      data: { platforms: [], positions: [] },
+      data: { platforms: [], positions: [], signal: false },
       warnings: ['Thin placement data — read suppressed rather than guessed.'],
     };
   }
@@ -91,18 +93,24 @@ export function computePlacementBreakdown(rows: PlacementInsightRow[], currency:
     );
   }
 
+  // The only ask this chapter has: Audience Network taking a real slice of
+  // budget with a readable number beside it. Without that there is nothing to
+  // do, and a reminder to "re-check after a placement change" is not an action.
+  const anActionable = !!an && an.spend_share_pct >= 3 && an.kpi != null;
   const top = platforms[0]!;
   return {
     summary:
       `${top.platform} carries ${top.spend_share_pct}% of spend` +
       (platforms.length > 1 ? `; ${platforms.length} platforms deliver in total.` : '.') +
       (an && an.spend_share_pct >= 1 ? ` Audience Network takes ${an.spend_share_pct}%.` : ' No meaningful Audience Network spend — good.'),
-    next_step:
-      an && an.spend_share_pct >= 3 && an.kpi != null
-        ? `Audience Network is ${an.spend_share_pct}% of budget — compare its ${kpiLabel} (${an.kpi}) against your feed placements and cap it if it underperforms.`
-        : `The split looks sane — re-check after any placement-strategy change; Advantage+ shifts this quietly.`,
+    ...(anActionable
+      ? {
+          next_step: `Audience Network is ${an!.spend_share_pct}% of budget. Compare its ${kpiLabel} (${an!.kpi}) against your feed placements and cap it if it underperforms.`,
+        }
+      : {}),
     data: {
       window_days: 30,
+      signal: anActionable || rewardedSpendPct >= 0.5,
       kpi_mode: mode,
       kpi_label: kpiLabel,
       total_spend: Math.round(totalSpend),
@@ -148,8 +156,7 @@ export function computeAudienceBreakdown(demo: DemoInsightRow[], geo: GeoInsight
   if (totalSpend < 100) {
     return {
       summary: 'Not enough delivery in the window for an audience split.',
-      next_step: 'Re-audit once the account has meaningful spend in the last 30 days.',
-      data: { age_bands: [], genders: [], countries: [] },
+      data: { age_bands: [], genders: [], countries: [], signal: false },
       warnings: ['Thin demographic data — read suppressed rather than guessed.'],
     };
   }
@@ -215,11 +222,17 @@ export function computeAudienceBreakdown(demo: DemoInsightRow[], geo: GeoInsight
         : `Delivery is spread across age bands.`) +
       (underfunded ? ` ${underfunded.key} returns better (${kpiLabel} ${underfunded.kpi}) on ${underfunded.spend_share_pct}% of spend — underfunded.` : '') +
       (countries.length > 1 ? ` Top market: ${countries[0]!.key} at ${countries[0]!.spend_share_pct}% of spend.` : ''),
-    next_step: underfunded
-      ? `Meta allocates inside your targeting — don't force it with age splits, but DO brief creative that speaks to ${underfunded.key} and watch whether Advantage+ follows the signal.`
-      : `Budget already follows the best-returning demographics — nothing to force here.`,
+    // Budget already following the best-returning cells is the chapter reading
+    // clean. It used to carry "nothing to force here", which is a sentence with
+    // no number in it and the page rendered it as a finding.
+    ...(underfunded
+      ? {
+          next_step: `Meta allocates inside your targeting, so don't force it with age splits. Brief creative that speaks to ${underfunded.key} and watch whether Advantage+ follows.`,
+        }
+      : {}),
     data: {
       window_days: 30,
+      signal: !!underfunded,
       kpi_mode: mode,
       kpi_label: kpiLabel,
       currency,
@@ -275,8 +288,7 @@ export function computeTargetingSplit(
   if (spending.length === 0 || totalSpend < 100) {
     return {
       summary: 'No ad sets with meaningful spend to classify.',
-      next_step: 'Re-audit once the account is delivering.',
-      data: { classes: [] },
+      data: { classes: [], signal: false },
       warnings: ['No spending ad sets in the window — read suppressed.'],
     };
   }
@@ -322,15 +334,19 @@ export function computeTargetingSplit(
   }
 
   const top = classes[0]!;
+  const interestHeavy = classes.find((c) => c.class === 'Interest-targeted' && c.spend_share_pct >= 20) != null;
   return {
     summary:
-      `${classes.length} targeting style${classes.length > 1 ? 's' : ''} carry spend — biggest: ${top.class} ` +
+      `${classes.length} targeting style${classes.length > 1 ? 's' : ''} carry spend. The biggest is ${top.class} ` +
       `(${top.spend_share_pct}% of spend${top.kpi != null ? `, ${kpiLabel} ${top.kpi}` : ''}).`,
-    next_step:
-      classes.find((c) => c.class === 'Interest-targeted' && c.spend_share_pct >= 20) != null
-        ? `A real slice of budget still runs on interest stacks — current-era accounts usually beat them with broad + strong creative. Test broad against your best interest ad set head-to-head.`
-        : `The split is current-era sane. Judge classes by their ${kpiLabel} above before moving budget.`,
-    data: { window_days: 30, kpi_mode: mode, kpi_label: kpiLabel, currency, classes, total_spend: Math.round(totalSpend) },
+    // "Judge classes by their number above before moving budget" is the reader
+    // reading the section, not a step they can take, so a sane split is quiet.
+    ...(interestHeavy
+      ? {
+          next_step: `A real slice of budget still runs on interest stacks, and current-era accounts usually beat them with broad plus strong creative. Test broad against your best interest ad set head to head.`,
+        }
+      : {}),
+    data: { window_days: 30, signal: interestHeavy, kpi_mode: mode, kpi_label: kpiLabel, currency, classes, total_spend: Math.round(totalSpend) },
     warnings: warnings.length ? warnings : undefined,
     derivation:
       `Every spending ad set's live targeting spec read from Meta and classified by a fixed rule: Advantage+ audience flag → ` +
@@ -362,8 +378,7 @@ export function computeLearningLimited(
   if (active.length === 0 || totalSpend < 100) {
     return {
       summary: 'No active spending ad sets to check against the learning bar.',
-      next_step: 'Re-audit once the account is delivering.',
-      data: { rows: [] },
+      data: { rows: [], signal: false },
       warnings: ['No active delivery — read suppressed.'],
     };
   }
@@ -395,12 +410,17 @@ export function computeLearningLimited(
         ? `All ${rows.length} currently active ad sets with spend clear Meta's ~50-events-a-week learning bar — the algorithm has enough signal everywhere.${scopeClause}`
         : `${starved.length} of the ${rows.length} currently active ad sets with spend run below Meta's ~50-events-a-week learning bar — ` +
           `${starvedSharePct}% of active spend (${money(starvedSpend, currency)}/30d) is optimizing on thin signal.${scopeClause}`,
-    next_step:
-      starved.length === 0
-        ? `Keep new ad sets consolidated enough to clear the bar — splitting budgets thinner than ~50 events/week re-enters learning.`
-        : `Consolidate: merge the starved ad sets into fewer, broader ones so Meta gets ≥50 events a week per set — fragmentation is paying learning tax on ${starvedSharePct}% of spend.`,
+    // Every ad set clearing the bar is this chapter reading clean. The old
+    // "keep new ad sets consolidated" line asked for nothing that is not
+    // already true of the account.
+    ...(starved.length === 0
+      ? {}
+      : {
+          next_step: `Consolidate: merge the starved ad sets into fewer, broader ones so Meta gets at least 50 events a week per set. Fragmentation is paying learning tax on ${starvedSharePct}% of spend.`,
+        }),
     data: {
       window_days: 30,
+      signal: starved.length > 0,
       bar_per_week: BAR,
       currency,
       rows: rows.slice(0, 15),
@@ -442,9 +462,8 @@ export interface WeeklyReachRow {
 export function computeSaturation(weeks: WeeklyReachRow[], currency: string): PackSection {
   if (weeks.length < 8) {
     return {
-      summary: 'Not enough weekly history for a saturation read (need ~8 weeks).',
-      next_step: 'Re-audit in a few weeks — the reach curve needs history to mean anything.',
-      data: { weeks: [] },
+      summary: 'Not enough weekly history for a saturation read (need ~8 weeks). The reach curve needs history before it means anything.',
+      data: { weeks: [], signal: false },
       warnings: ['Thin history — saturation read suppressed rather than guessed.'],
     };
   }
@@ -471,10 +490,15 @@ export function computeSaturation(weeks: WeeklyReachRow[], currency: string): Pa
     summary: saturating
       ? `Saturation signal: weekly frequency is up ${freqDeltaPct}% while reach per ${currency || 'unit'} spent fell ${Math.abs(reachEffDeltaPct)}% — you're paying more to show the same people the same things.`
       : `No saturation squeeze: frequency ${freqDeltaPct >= 0 ? `up ${freqDeltaPct}%` : `down ${Math.abs(freqDeltaPct)}%`} and reach efficiency ${reachEffDeltaPct >= 0 ? `up ${reachEffDeltaPct}%` : `down ${Math.abs(reachEffDeltaPct)}%`} across the window — the audience still has room.`,
-    next_step: saturating
-      ? `Before raising budgets, widen the pool: new creative angles reach new people better than higher bids reach the same ones.`
-      : `Scaling headroom exists — watch this read again after any big budget step.`,
+    // Headroom left is the chapter reading clean: "watch this again after a
+    // budget step" is a diary note, not an action for today.
+    ...(saturating
+      ? {
+          next_step: `Before raising budgets, widen the pool: new creative angles reach new people better than higher bids reach the same ones.`,
+        }
+      : {}),
     data: {
+      signal: saturating,
       weeks: rows,
       early_frequency: r2(earlyFreq),
       late_frequency: r2(lateFreq),
@@ -508,8 +532,7 @@ export function computeCreativeDiversity(rows30: PackAdRow[], angleByAdId: Map<s
   if (byAngle.size === 0 || coverage < 25) {
     return {
       summary: `Not enough angle-tagged creative for a diversity read (${coverage}% of spend tagged).`,
-      next_step: 'Run the creative-intelligence analyzer across active ads, then re-audit.',
-      data: { coverage_pct: coverage, angles: 0 },
+      data: { coverage_pct: coverage, angles: 0, signal: false },
       warnings: ['Thin angle coverage — diversity read suppressed.'],
     };
   }
@@ -528,11 +551,14 @@ export function computeCreativeDiversity(rows30: PackAdRow[], angleByAdId: Map<s
     summary: fragile
       ? `The portfolio is concentrated: ${byAngle.size} angle${byAngle.size > 1 ? 's' : ''} in market and "${topAngle}" carries ${topShare}% of tagged spend — one fatiguing concept takes the account with it.`
       : `${byAngle.size} distinct angles carry spend; the biggest ("${topAngle}") holds ${topShare}% of tagged spend — a workable spread.`,
-    next_step: fragile
-      ? `Brief 2 genuinely different angles (not variations of "${topAngle}") — diversity is the hedge against the fatigue report above.`
-      : `Keep the exploration rhythm — retire the weakest angle's budget toward a new test lane each month.`,
+    ...(fragile
+      ? {
+          next_step: `Brief 2 genuinely different angles, not variations of "${topAngle}". Diversity is the hedge against the fatigue report above.`,
+        }
+      : {}),
     data: {
       window_days: 30,
+      signal: fragile,
       coverage_pct: coverage,
       angles: byAngle.size,
       top_angle: topAngle,
@@ -589,14 +615,88 @@ export function computeCohortWave(rows180: Array<Pick<PackAdRow, 'ad_id' | 'date
 //    too, not only problems; evergreen rule)
 // ---------------------------------------------------------------------------
 
+/**
+ * The fatigue chapter's own rows, which is the only place an evergreen verdict
+ * is made. There is no `evergreen` list on that wire: the class sits on each
+ * ad, beside `evergreen_count`. Reading a field the fatigue report never emits
+ * is how this protect list came out empty on an account that had evergreen
+ * winners in it, so the shape here is the shape that chapter actually sends.
+ */
+export interface FatigueReadForProtect {
+  ads?: Array<{
+    ad_name?: string;
+    /** 90-day spend. `spend_30d` is the recent figure this list quotes. */
+    spend?: number;
+    spend_30d?: number;
+    in_window_age_days?: number;
+    class?: string;
+    trend_pct?: number;
+    kpi_first_half?: number;
+    kpi_recent?: number;
+    cpl_first_half?: number | null;
+    cpl_last_14?: number | null;
+  }>;
+  kpi_mode?: string;
+}
+
+interface ProtectedAd {
+  ad_name: string;
+  spend: number;
+  days_running?: number;
+  /** The two figures behind "its number is still holding", so a reader can check it. */
+  proof?: string;
+}
+
+/**
+ * Why this ad is on the list, in its own numbers. "Its number is still
+ * holding" is a claim nobody can check; the level it ran at and the level it
+ * runs at now is the same claim with the evidence attached.
+ */
+function evergreenProof(
+  ad: NonNullable<FatigueReadForProtect['ads']>[number],
+  mode: 'roas' | 'cpr' | null,
+  costLabel: string,
+  currency: string,
+): string | undefined {
+  if (mode === 'roas' && typeof ad.kpi_first_half === 'number' && typeof ad.kpi_recent === 'number') {
+    return `Meta ROAS ${ad.kpi_first_half.toFixed(2)}× then ${ad.kpi_recent.toFixed(2)}×`;
+  }
+  if (mode === 'cpr' && typeof ad.cpl_first_half === 'number' && typeof ad.cpl_last_14 === 'number') {
+    return `${costLabel} ${moneyExact(ad.cpl_first_half, currency)} then ${moneyExact(ad.cpl_last_14, currency)}`;
+  }
+  if (typeof ad.trend_pct === 'number') {
+    return ad.trend_pct >= 0
+      ? `its number is ${r1(ad.trend_pct)}% up on the first half of its run`
+      : `its number is within ${r1(Math.abs(ad.trend_pct))}% of the first half of its run`;
+  }
+  return undefined;
+}
+
 export function computeWhatsWorking(
-  fatigueData: { evergreen?: Array<{ ad_name: string; spend: number; roas_read?: string; days_running?: number }> } | undefined,
+  fatigueData: FatigueReadForProtect | undefined,
   conceptData: { angles?: Array<{ angle: string; kpi: number | null; spend_share_pct: number; below_floor: boolean }>; kpi_mode?: string; kpi_label?: string } | undefined,
   scorecard: Array<{ key?: string; dimension: string; band: string; position: string }> | undefined,
   currency: string,
   cohortData?: { window_too_short?: boolean; days_covered?: number },
 ): PackSection {
-  const evergreen = fatigueData?.evergreen ?? [];
+  const fatigueMode: 'roas' | 'cpr' | null =
+    fatigueData?.kpi_mode === 'roas' ? 'roas' : fatigueData?.kpi_mode === 'cpr' ? 'cpr' : null;
+  const costLabel = conceptData?.kpi_label ?? (fatigueMode === 'roas' ? 'Meta ROAS' : 'cost per result');
+  const evergreen: ProtectedAd[] = (fatigueData?.ads ?? [])
+    .filter((a) => a.class === 'evergreen')
+    .map((a) => ({
+      ad_name: typeof a.ad_name === 'string' ? a.ad_name : '',
+      spend: typeof a.spend_30d === 'number' ? a.spend_30d : (a.spend ?? 0),
+      ...(typeof a.in_window_age_days === 'number' ? { days_running: a.in_window_age_days } : {}),
+      ...(() => {
+        const proof = evergreenProof(a, fatigueMode, costLabel, currency);
+        return proof ? { proof } : {};
+      })(),
+    }))
+    // An ad that has stopped spending is not something to protect NOW, which is
+    // the same 30-day gate the fatigue chapter's dragging list uses.
+    .filter((e) => e.ad_name.length > 0 && e.spend > 0)
+    .sort((a, b) => b.spend - a.spend);
   // On a window shorter than the launch-cohort read needs, creative freshness
   // comes out ~100% by construction: every ad in view launched inside it. That
   // is arithmetic, not a strength, so it is withheld rather than graded.
@@ -609,13 +709,15 @@ export function computeWhatsWorking(
   const bestAngle = assessed.length
     ? [...assessed].sort((a, b) => (mode === 'roas' ? (b.kpi ?? 0) - (a.kpi ?? 0) : (a.kpi ?? Infinity) - (b.kpi ?? Infinity)))[0]
     : null;
-  const biggestEvergreen = evergreen.length ? [...evergreen].sort((a, b) => (b.spend || 0) - (a.spend || 0))[0]! : null;
+  const biggestEvergreen = evergreen[0] ?? null;
   const cohortDaysCovered = typeof cohortData?.days_covered === 'number' ? cohortData.days_covered : null;
 
   if (evergreen.length === 0 && strongDims.length === 0 && !bestAngle) {
     return {
-      summary: 'Nothing in the window clears the bar as a proven, protected winner yet — that itself is the finding.',
-      next_step: 'The fastest path to a protect-list is creative volume: more genuinely different tests.',
+      // The same word the creative chips use for the same thing: a winner. The
+      // page had one vocabulary for the chips and another for this list.
+      summary: 'No ad in the window is a proven winner we would protect yet, and that itself is the finding.',
+      next_step: 'The fastest path to a protect list is creative volume: more genuinely different tests.',
       data: {
         evergreen: [],
         strong_dimensions: [],
@@ -623,6 +725,10 @@ export function computeWhatsWorking(
         best_angle: null,
         freshness_withheld: freshnessWithheld,
         cohort_days_covered: cohortDaysCovered,
+        currency,
+        // Either there is a protect list or there is not, and the absence is
+        // stated as the finding with a real ask under it. Never a quiet row.
+        signal: true,
       },
     };
   }
@@ -631,10 +737,11 @@ export function computeWhatsWorking(
   if (biggestEvergreen) {
     const evSpend = evergreen.reduce((s, e) => s + (e.spend || 0), 0);
     const age = biggestEvergreen.days_running ? `${biggestEvergreen.days_running} days live` : '60+ days live';
+    const proof = biggestEvergreen.proof ? `, ${biggestEvergreen.proof}` : '';
     parts.push(
       evergreen.length === 1
-        ? `"${biggestEvergreen.ad_name}" is the evergreen winner: ${money(biggestEvergreen.spend, currency)} of recent spend, ${age}, and its number is still holding`
-        : `${evergreen.length} evergreen winners hold ${money(evSpend, currency)} of recent spend. The biggest is "${biggestEvergreen.ad_name}" at ${money(biggestEvergreen.spend, currency)}, ${age}, with its number still holding`,
+        ? `"${biggestEvergreen.ad_name}" is the evergreen winner: ${money(biggestEvergreen.spend, currency)} of recent spend, ${age}${proof}, and its number is still holding`
+        : `${evergreen.length} evergreen winners hold ${money(evSpend, currency)} of recent spend. The biggest is "${biggestEvergreen.ad_name}" at ${money(biggestEvergreen.spend, currency)}, ${age}${proof}, with its number still holding`,
     );
   }
   if (strongDims.length > 0) parts.push(`${strongDims.length} benchmarked dimension${strongDims.length > 1 ? 's' : ''} in the strong band`);
@@ -649,7 +756,7 @@ export function computeWhatsWorking(
     next_step:
       biggestEvergreen
         ? `Do NOT refresh "${biggestEvergreen.ad_name}" on a calendar. It retires when its number declines, not when it ages. Mine it: its hook and structure are the starting point for the next briefs.`
-        : `Protect the strong dimensions while fixing the weak ones — don't churn what already works.`,
+        : `Protect the strong dimensions while fixing the weak ones. Don't churn what already works.`,
     data: {
       evergreen: evergreen.slice(0, 8),
       top_evergreen: biggestEvergreen
@@ -657,6 +764,7 @@ export function computeWhatsWorking(
             ad_name: biggestEvergreen.ad_name,
             spend: Math.round(biggestEvergreen.spend || 0),
             days_running: biggestEvergreen.days_running ?? null,
+            proof: biggestEvergreen.proof ?? null,
           }
         : null,
       strong_dimensions: strongDims.map((d) => ({ dimension: d.dimension, position: d.position })),
@@ -664,9 +772,10 @@ export function computeWhatsWorking(
       freshness_withheld: freshnessWithheld,
       cohort_days_covered: cohortDaysCovered,
       currency,
+      signal: true,
     },
     derivation:
-      `Assembled from reports above, no new pulls: the fatigue report's evergreen set (60+ days running, return holding — the ` +
+      `Assembled from reports above, no new pulls: the fatigue report's evergreen set (60+ days running, return holding, the ` +
       `binding rule is decline-based, never age-based), the scorecard's strong-band dimensions, and the best assessed creative ` +
       `angle. If it's listed here, the data says protect it.` +
       (freshnessWithheld
@@ -819,9 +928,8 @@ export function computeLandingPages(rows: LandingAdRow[], checks: DeadUrlCheck[]
 
   if (paths.length === 0) {
     return {
-      summary: 'No landing-page destinations recorded against spending ads in the window.',
-      next_step: 'Nothing to rank — destination data is missing from the sync for this account.',
-      data: { paths: [], dead_checks: checks },
+      summary: 'No landing-page destinations recorded against spending ads in the window. Destination data is missing from the sync for this account.',
+      data: { paths: [], dead_checks: checks, signal: false },
       warnings: ['No destination mapping — read suppressed.'],
     };
   }
@@ -856,6 +964,11 @@ export function computeLandingPages(rows: LandingAdRow[], checks: DeadUrlCheck[]
 
   const top = paths[0]!;
   const topFigure = `${top.path} (${top.spend_share_pct}%${top.kpi != null ? `, ${kpiLabel} ${top.kpi}` : ''})`;
+  // Homepage advice is one piece of advice, and the ad-promise chapter gives
+  // the same click a sharper read. Flagged here so the orchestrator can hand
+  // the call to that chapter once it has a verdict, instead of the reader
+  // getting "move off the homepage" beside "fix the homepage line".
+  const homepageAdvice = !!homepage && homepage.spend_share_pct >= 5 && dead.length === 0;
   return {
     summary:
       (paths.length === 1
@@ -864,14 +977,19 @@ export function computeLandingPages(rows: LandingAdRow[], checks: DeadUrlCheck[]
       (dead.length > 0
         ? `${dead.length} spending URL${dead.length > 1 ? 's are' : ' is'} DEAD right now (~${money(burn, currency)}/day burning).`
         : `Every checked live destination loads.`),
-    next_step:
-      dead.length > 0
-        ? `Pause the ${deadAdCount === 1 ? 'ad' : 'ads'} pointing at the dead URL${dead.length > 1 ? 's' : ''} today — that's ${money(burn * 30, currency)}/month recovered with zero downside.`
-        : homepage && homepage.spend_share_pct >= 5
-          ? `Move the homepage traffic to the closest converting page and re-measure — the homepage almost never closes cold traffic.`
-          : `Ranking looks healthy — shift test budget toward the best-returning underfunded destination.`,
+    ...(dead.length > 0
+      ? {
+          next_step: `Pause the ${deadAdCount === 1 ? 'ad' : 'ads'} pointing at the dead URL${dead.length > 1 ? 's' : ''} today. That is ${money(burn * 30, currency)}/month recovered with zero downside.`,
+        }
+      : homepageAdvice
+        ? {
+            next_step: `Move the homepage traffic to the closest converting page and re-measure. The homepage almost never closes cold traffic.`,
+          }
+        : {}),
     data: {
       window_days: 30,
+      signal: dead.length > 0 || homepageAdvice || redirects.length > 0,
+      homepage_advice: homepageAdvice || undefined,
       kpi_mode: mode,
       kpi_label: kpiLabel,
       currency,
@@ -1049,8 +1167,12 @@ export function computeAccountFacts(inp: AccountFactsInputs): PackSection {
   });
 
   return {
-    summary: `${facts.length} things about this account most people running it couldn't quote, measured across ${windowNoun}.`,
-    next_step: `None of these demand action alone — they're the texture behind the reports above. The ones that do demand action are flagged there.`,
+    summary:
+      `${facts.length} things about this account most people running it couldn't quote, measured across ${windowNoun}. ` +
+      `These are the texture behind the reports above; the ones that demand action are flagged there.`,
+    // No next step, and no `signal` either: this chapter never claimed to be a
+    // finding, so it is neither an action row nor part of the quiet pile. The
+    // line that used to sit here said in an action row that there was no action.
     data: {
       facts: facts.slice(0, 6),
       window_days: windowDays,
@@ -1329,11 +1451,16 @@ export function computeAccountActivity(inp: AccountActivityInputs): PackSection 
     warnings.push(`No changes in this window are attributed to a named person — Meta returned only app/system-level actors, so "who acted" can't be broken down by individual.`);
   }
 
+  // A managed account changing every week is the log reading normal: the old
+  // "cross-check this against the results" line asked the reader to go and
+  // think, which is not a step. A quiet account, or a near-quiet one, is.
+  const activitySignal = count30 === 0 || actionsPerWeek < 1;
   return {
     summary: summaryParts.join(' '),
-    next_step: nextStep,
+    ...(activitySignal ? { next_step: nextStep } : {}),
     data: {
       window_days: windowDays,
+      signal: activitySignal,
       no_activity: false,
       total_window: totalWindow,
       total_30d: count30,

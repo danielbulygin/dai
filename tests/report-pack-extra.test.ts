@@ -190,7 +190,7 @@ describe('computeCohortWave', () => {
 describe('computeWhatsWorking', () => {
   it('assembles the protect list and forbids calendar refreshes (evergreen rule)', () => {
     const s = computeWhatsWorking(
-      { evergreen: [{ ad_name: 'hero', spend: 9000, days_running: 80 }] },
+      { ads: [{ ad_name: 'hero', spend_30d: 9000, in_window_age_days: 80, class: 'evergreen' }], kpi_mode: 'roas' },
       { angles: [{ angle: 'education', kpi: 3.2, spend_share_pct: 40, below_floor: false }], kpi_mode: 'roas', kpi_label: 'Meta ROAS' },
       [{ dimension: 'Hooks', band: 'strong', position: 'top quartile' }],
       'EUR',

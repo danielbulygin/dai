@@ -112,7 +112,10 @@ describe('computeWhatsWorking — the protect list names what it protects', () =
 
   it('names the single evergreen ad, its spend, its age and the best angle with its labelled figure', () => {
     const s = computeWhatsWorking(
-      { evergreen: [{ ad_name: 'Quote Form v3', spend: LEAD_SPEND, days_running: 74 }] },
+      {
+        ads: [{ ad_name: 'Quote Form v3', spend_30d: LEAD_SPEND, in_window_age_days: 74, class: 'evergreen' }],
+        kpi_mode: 'cpr',
+      },
       leadConcept,
       [{ key: 'hooks', dimension: 'Hooks (3s view rate)', band: 'strong', position: 'Hooks (3s view rate) — top of the desk' }],
       'USD',
@@ -126,20 +129,21 @@ describe('computeWhatsWorking — the protect list names what it protects', () =
     expect(s.next_step).toContain('Quote Form v3');
     expect(s.next_step).toContain('NOT refresh');
     const d = s.data as {
-      top_evergreen: { ad_name: string; spend: number; days_running: number | null } | null;
+      top_evergreen: { ad_name: string; spend: number; days_running: number | null; proof: string | null } | null;
       best_angle: { angle: string; kpi: number | null; spend_share_pct: number } | null;
     };
-    expect(d.top_evergreen).toEqual({ ad_name: 'Quote Form v3', spend: LEAD_SPEND, days_running: 74 });
+    expect(d.top_evergreen).toEqual({ ad_name: 'Quote Form v3', spend: LEAD_SPEND, days_running: 74, proof: null });
     expect(d.best_angle).toEqual({ angle: 'peace of mind', kpi: 18.59, spend_share_pct: 62 });
   });
 
   it('with several evergreens it names the biggest one by spend', () => {
     const s = computeWhatsWorking(
       {
-        evergreen: [
-          { ad_name: 'Quote Form v3', spend: 2_000, days_running: 74 },
-          { ad_name: 'Family Cover UGC', spend: 6_960, days_running: 91 },
+        ads: [
+          { ad_name: 'Quote Form v3', spend_30d: 2_000, in_window_age_days: 74, class: 'evergreen' },
+          { ad_name: 'Family Cover UGC', spend_30d: 6_960, in_window_age_days: 91, class: 'evergreen' },
         ],
+        kpi_mode: 'cpr',
       },
       leadConcept,
       [],
@@ -152,7 +156,12 @@ describe('computeWhatsWorking — the protect list names what it protects', () =
   });
 
   it('an evergreen with no measured age still names the ad', () => {
-    const s = computeWhatsWorking({ evergreen: [{ ad_name: 'Quote Form v3', spend: LEAD_SPEND }] }, undefined, [], 'USD');
+    const s = computeWhatsWorking(
+      { ads: [{ ad_name: 'Quote Form v3', spend_30d: LEAD_SPEND, class: 'evergreen' }] },
+      undefined,
+      [],
+      'USD',
+    );
     expect(s.summary).toContain('"Quote Form v3"');
     expect(s.summary).toContain('60+ days live');
   });
@@ -206,7 +215,10 @@ describe('computeWhatsWorking — a short window cannot produce a freshness stre
 
   it('a lead-gen protect list keeps the evergreen and the angle while the freshness grading goes', () => {
     const s = computeWhatsWorking(
-      { evergreen: [{ ad_name: 'Quote Form v3', spend: LEAD_SPEND, days_running: 74 }] },
+      {
+        ads: [{ ad_name: 'Quote Form v3', spend_30d: LEAD_SPEND, in_window_age_days: 74, class: 'evergreen' }],
+        kpi_mode: 'cpr',
+      },
       { angles: [{ angle: 'peace of mind', kpi: 18.59, spend_share_pct: 62, below_floor: false }], kpi_mode: 'cpr', kpi_label: 'cost per lead' },
       [{ key: 'freshness', dimension: 'Creative freshness', band: 'strong', position: 'Creative freshness — 100%' }],
       'USD',
@@ -363,7 +375,7 @@ describe('computeAccountFacts — every sentence carries its own window, named O
     });
     expect((s.data as { window_days: number }).window_days).toBe(179);
     const facts = (s.data as { facts: Array<{ fact: string }> }).facts;
-    const strings = [s.summary, s.next_step, s.derivation ?? '', ...facts.flatMap((f) => [f.fact, f.detail])];
+    const strings = [s.summary, s.next_step ?? '', s.derivation ?? '', ...facts.flatMap((f) => [f.fact, f.detail])];
     for (const str of strings) {
       expect(str, str).not.toMatch(/months?\b/i);
       // every mention of the long span uses the one phrase
