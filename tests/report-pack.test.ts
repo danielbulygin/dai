@@ -360,8 +360,12 @@ describe('creative fatigue — margin re-basing (stated-economics, 2026-07-04)',
     const at45 = computeFatigue(decliner, 2.22, 'GBP', 45);
     const a1 = (at1.data.ads as FatigueAd[]).find((a) => a.ad_id === 'r1')!;
     const a45 = (at45.data.ads as FatigueAd[]).find((a) => a.ad_id === 'r1')!;
-    // recent ≈2.72: not near a 1.0× floor (stable), but well inside 1.5× of 2.22× (fatiguing)
-    expect(a1.class).toBe('stable');
+    // recent ≈2.72: not near a 1.0× floor, but well inside 1.5× of 2.22× (fatiguing).
+    // Against the 1.0× line the ad is NOT stable: it is 25.4% down over its run,
+    // which is exactly the decline the fatiguing test refused to confirm, so the
+    // honest class is declining_unconfirmed. The old vocabulary called it stable
+    // and the report printed a hold on an ad losing a quarter of its return.
+    expect(a1.class).toBe('declining_unconfirmed');
     expect(a45.class).toBe('fatiguing');
     expect((at45.data as { fatiguing_daily_burn: number }).fatiguing_daily_burn).toBe(300);
     expect((at1.data as { fatiguing_daily_burn: number }).fatiguing_daily_burn).toBe(0);

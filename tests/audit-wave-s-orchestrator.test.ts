@@ -24,6 +24,7 @@ const guardrails = (over: Partial<InsightGuardrails> = {}): InsightGuardrails =>
     kpi_mode: 'cpr',
     assessed_ads: 9,
     fatiguing: [{ ad_name: 'SB-Video-Calculator', stat: 'Meta CPL 41.20 USD', spend_30d: 117 }],
+    declining_unconfirmed: ['ASH', 'SB-parents'],
     evergreen: ['SB-Image-Life cover calculator'],
     ...(over.fatigue ?? {}),
   },
@@ -35,8 +36,11 @@ describe('the lead-insight ranker may not overrule the sections', () => {
     const rules = buildInsightRules(guardrails());
     expect(rules).toContain('"SB-Video-Calculator" (Meta CPL 41.20 USD)');
     expect(rules).toContain('EVERGREEN: "SB-Image-Life cover calculator"');
-    expect(rules).toContain('ONLY if it is on that FATIGUING list');
-    expect(rules).toContain('The biggest spender not being on it is not a hint that it is');
+    expect(rules).toContain('ONLY if it is on the FATIGUING list');
+    expect(rules).toContain("the biggest spender's absence is not a hint");
+    // The new middle class may be described, in its own words, and no further.
+    expect(rules).toContain('DECLINING BUT NOT CONFIRMED: "ASH", "SB-parents"');
+    expect(rules).toContain('never as fatiguing, past peak or worth cutting');
   });
 
   it('says plainly that no fatigue claim is allowed when nothing was classified', () => {

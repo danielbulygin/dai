@@ -358,6 +358,49 @@ opportunity is this gap stated in money against their own target.
   decaying portfolio scores high on it, which is the wrong thing to hand a reader
   as a strength.
 
+### The fatigue vocabulary, sim round two
+
+`FatigueAd.class` values changed, because the old words claimed verdicts the
+rules had refused (a 17-day ad whose cost per lead went 16.68 to 23.65 was
+labelled `fresh`, and a 25.6% decliner `stable`):
+
+| class | means |
+|---|---|
+| `fatiguing` | confirmed: declining AND confirmed on the recent window. Unchanged rule. |
+| `declining_unconfirmed` | **new middle class**: down 25% or more, but too young or too thin to confirm. Describable as declining and unconfirmed. NOT a cut call. |
+| `too_young_to_call` | was `fresh`. Under 21 days and not declining. |
+| `stable` | now EARNED: the confirmation window holds within 25% of the first half. |
+| `evergreen` | unchanged. |
+
+Also on the fatigue data: `last_spend_date`, `days_since_last_spend`,
+`still_spending`, `confirmation_days` per row; `assessed_spend`,
+`daily_basis: "active_days"`, `sorted_by: "spend_30d"`, `ads_shown`, and the
+three class counts on the section. `fatiguing_daily_burn` now counts only
+still-spending ads, `ads` is ordered by 30-day spend, an ad with no 30-day spend
+can never appear in `dragging`, and `signal` includes the unconfirmed decliners
+so a section carrying an action row is not marked quiet. **Every per-ad daily
+figure is that ad's own average while it was running, so the rows do not add up
+to the account's daily spend** — the section says so once, and the page must not
+sum them.
+
+Cost trend now carries BOTH bases, each labelled: `cpm_delta_pct`/`ctr_delta_pct`
+(`delta_basis: "thirds_average"`, with `delta_first_weeks`/`delta_last_weeks`)
+and `cpm_chart_delta_pct`/`ctr_chart_delta_pct`
+(`chart_delta_basis: "last_bucket_vs_first_bucket"`). **Label the chart's
+endpoints from the chart deltas and the sentence from the thirds deltas**: the
+live page mixed them (+23% on the chart, +6.8% in the prose). Every CTR level in
+that section is named as a weekly average with its window.
+
+Scatter: `plotted_set_label`, `flagged_off_chart`, `flagged_off_chart_reasons`.
+A "the red dots are the past-peak ads" claim is only true when
+`flagged_off_chart` is absent.
+
+Day of week: a budget shift may only be built from `shift_advice` +
+`shift_from_day` + `shift_to_day`, which exist only when the two days differ by
+25% or more. `best_day`/`worst_day`/`gap_pct` stay as table facts;
+`shift_withheld_reason` says why there is no advice. The live report moved budget
+on a 2.5% spread.
+
 ## Two rules the report page depends on
 
 **A quiet section carries no next step.** `data.signal === false` is a section

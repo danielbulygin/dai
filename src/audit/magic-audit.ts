@@ -2024,6 +2024,8 @@ export interface InsightGuardrails {
   fatigue: {
     kpi_mode: string;
     fatiguing: Array<{ ad_name: string; stat: string | null; spend_30d: number | null }>;
+    /** Down 25% or more, and NOT confirmed: too young or too thin to call. */
+    declining_unconfirmed: string[];
     evergreen: string[];
     assessed_ads: number;
   } | null;
@@ -2038,8 +2040,13 @@ export function buildInsightRules(g: InsightGuardrails): string {
             ? g.fatigue.fatiguing.map((a) => `"${a.ad_name}"${a.stat ? ` (${a.stat})` : ''}`).join(', ')
             : 'none'
         }. EVERGREEN: ${g.fatigue.evergreen.length ? g.fatigue.evergreen.map((n) => `"${n}"`).join(', ') : 'none'}. ` +
-        `You may call an ad fatiguing, past peak, declining or burning out ONLY if it is on that FATIGUING list. ` +
-        `The biggest spender not being on it is not a hint that it is: say nothing about its trend.`
+        (g.fatigue.declining_unconfirmed.length
+          ? ` DECLINING BUT NOT CONFIRMED: ${g.fatigue.declining_unconfirmed.map((n) => `"${n}"`).join(', ')} ` +
+            `(down 25% or more, too young or too thin to confirm). These may be described as declining and unconfirmed, ` +
+            `in those words, and never as fatiguing, past peak or worth cutting.`
+          : '') +
+        ` You may call an ad fatiguing, past peak or worth cutting ONLY if it is on the FATIGUING list. ` +
+        `An ad on neither list has nothing said about its trend: the biggest spender's absence is not a hint.`
       : 'No fatigue classification was produced, so no insight may claim an ad is fatiguing, past peak or declining.',
     `Every per-ad cost you quote is a MONEY figure taken verbatim from the facts (for example "Meta CPL 18.59 ${g.currency || 'USD'}"). ` +
       `A rate such as 0.06 results per unit of spend is not a cost per result and may never be relabelled as one, ` +
@@ -3193,6 +3200,9 @@ export async function runMagicAudit(
                 stat: statOf(a),
                 spend_30d: typeof a.spend_30d === 'number' ? a.spend_30d : null,
               })),
+            declining_unconfirmed: fatigueAds
+              .filter((a) => a.class === 'declining_unconfirmed')
+              .map((a) => String(a.ad_name ?? 'unnamed ad')),
             evergreen: fatigueAds.filter((a) => a.class === 'evergreen').map((a) => String(a.ad_name ?? 'unnamed ad')),
           }
         : null,

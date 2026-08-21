@@ -112,7 +112,13 @@ describe('the dragging list is built here, not derived by the page (T1)', () => 
       1.0,
       'USD',
     );
-    expect(s.data.ads[0]!.ad_id).toBe('early'); // biggest over 90 days
+    // The rows are ranked by the figure each row SHOWS: last-30-day spend, with
+    // the 90-day sum only as a tie-break. 'early' is the bigger 90-day spender
+    // (12,000 against 7,500) but it spent 1,500 in the last 30 days against
+    // 6,000, and a list labelled by 30-day spend has to be ordered by it.
+    expect(s.data.ads[0]!.ad_id).toBe('late');
+    expect(s.data.ads[1]!.ad_id).toBe('early');
+    expect(s.data.sorted_by).toBe('spend_30d');
     const drag = draggingOf(s);
     expect(drag.map((d) => d.ad_id)).toEqual(['late', 'early']);
     expect(drag[0]!.spend_30d).toBe(6_000);

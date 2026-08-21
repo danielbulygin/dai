@@ -206,7 +206,18 @@ export interface FatigueAd {
   kpi_recent: number;
   trend_pct: number; // second half vs first half, negative = worse
   avg_frequency: number | null;
-  class: 'evergreen' | 'fatiguing' | 'fresh' | 'stable';
+  /**
+   * The verdict, and it never claims more than the rule proved:
+   * - `fatiguing`: 25%+ down AND confirmed (near the floor, or 40%+ down) on a run old enough to read.
+   * - `declining_unconfirmed`: 25%+ down, or a recent level well off the first half, but the
+   *   confirmation the fatiguing call needs is not there (too young, thin confirmation window,
+   *   still far from the floor). It sits between stable and fatiguing, and it is NOT a kill call.
+   * - `too_young_to_call`: under 21 days and not declining. The old name for this was `fresh`,
+   *   which read as a verdict on the creative rather than on how much we can see.
+   * - `stable`: the confirmation window holds within 25% of the first half.
+   * - `evergreen`: 60+ days with the number holding (within 15%). Protected, never refreshed.
+   */
+  class: 'evergreen' | 'fatiguing' | 'declining_unconfirmed' | 'too_young_to_call' | 'stable';
   days_to_breakeven: number | null;
   low_frequency_acquisition_guard: boolean;
   /** Avg spend/day over the ad's last 14 active days — its CURRENT run-rate. */
@@ -226,6 +237,18 @@ export interface FatigueAd {
   cpl_first_half: number | null;
   /** Cost per result over the confirmation window, same rules as above. */
   cpl_last_14: number | null;
+  /**
+   * The ad's OWN last day with spend in the window. A stopped ad with a
+   * `spend_30d` of 0 next to a 141/day run rate reads as a bug; the date is
+   * what actually happened.
+   */
+  last_spend_date: string | null;
+  /** Days from that last spending day to the window's last day (0 = it spent on the final day). */
+  days_since_last_spend: number | null;
+  /** Whether the ad spent anything in the window's last 7 days. False = it is not spending now. */
+  still_spending: boolean;
+  /** How many days the confirmation window actually got. Under 14 means the read is thin. */
+  confirmation_days: number;
 }
 
 /**
@@ -346,17 +369,45 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currenc
     const spend30d = list
       .filter((r) => windowEndMs - Date.parse(r.date) < 30 * 86_400_000)
       .reduce((s, r) => s + (r.spend || 0), 0);
+    // An ad whose last spending day is more than 30 days back has a REAL
+    // spend_30d of 0. The date is what makes that readable next to a run rate.
+    const spentDates = sorted.filter((r) => (r.spend || 0) > 0).map((r) => r.date);
+    const lastSpendDate = spentDates.length ? spentDates[spentDates.length - 1]! : null;
+    const daysSinceLastSpend = lastSpendDate
+      ? Math.round((windowEndMs - Date.parse(lastSpendDate)) / 86_400_000)
+      : null;
+    const stillSpending = daysSinceLastSpend != null && daysSinceLastSpend <= 6;
     const freqVals = list.map((r) => r.frequency).filter((f): f is number => typeof f === 'number' && f > 0);
     const avgFreq = freqVals.length ? r2(freqVals.reduce((s, f) => s + f, 0) / freqVals.length) : null;
 
-    // Classification — TREND-driven, never age-driven (the binding rule).
+    // Classification — TREND-driven, never age-driven (the binding rule). The
+    // class words may not claim more than the rule proved: an ad 25%+ down that
+    // the fatiguing test refused is `declining_unconfirmed`, never `stable`, and
+    // a young ad is `too_young_to_call` rather than `fresh` (which read as a
+    // verdict on the creative, so a 17-day ad whose cost per lead went 16.68 →
+    // 23.65 was filed as healthy).
     const declining = trendPct <= -25;
     const nearFloor = mode === 'roas' ? recent < breakevenRoas * 1.5 : false;
+    const tooYoung = ageDays < 21;
+    const cplFirstHalf = costPer(sorted.slice(0, mid));
+    const cplLast14 = costPer(recentRows);
+    // "Stable" is a claim about where the ad is NOW, so it is earned on the
+    // confirmation window against the first half, not on the halves alone.
+    // A first half with no result to price is nothing to have declined from.
+    const holdsRecent =
+      mode === 'roas'
+        ? h1 <= 0 || recent >= h1 * 0.75
+        : cplFirstHalf == null
+          ? cplLast14 != null
+          : cplLast14 == null
+            ? false
+            : cplLast14 <= cplFirstHalf * 1.25;
     let cls: FatigueAd['class'];
-    if (ageDays < 21) cls = 'fresh';
-    else if (declining && (nearFloor || trendPct <= -40)) cls = 'fatiguing';
+    if (declining && !tooYoung && (nearFloor || trendPct <= -40)) cls = 'fatiguing';
+    else if (declining) cls = 'declining_unconfirmed';
+    else if (tooYoung) cls = 'too_young_to_call';
     else if (ageDays >= 60 && trendPct >= -15) cls = 'evergreen';
-    else cls = 'stable';
+    else cls = holdsRecent ? 'stable' : 'declining_unconfirmed';
 
     // Runway: only for ROAS mode, only when genuinely declining toward
     // breakeven — extrapolated from the RECENT level at the observed rate.
@@ -386,19 +437,45 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currenc
       low_frequency_acquisition_guard: lowFreqGuard,
       recent_daily_spend: Math.round(recentDailySpend),
       spend_30d: Math.round(spend30d),
-      cpl_first_half: costPer(sorted.slice(0, mid)),
-      cpl_last_14: costPer(recentRows),
+      cpl_first_half: cplFirstHalf,
+      cpl_last_14: cplLast14,
+      last_spend_date: lastSpendDate,
+      days_since_last_spend: daysSinceLastSpend,
+      still_spending: stillSpending,
+      confirmation_days: recentDays,
     });
   }
 
-  ads.sort((a, b) => b.spend - a.spend);
+  // The rows are ranked by the figure the row SHOWS (last-30-day spend), so a
+  // list labelled "the most spend" is true of its own order; the 90-day sum only
+  // breaks ties, which is what puts the stopped ads at the bottom.
+  ads.sort((a, b) => b.spend_30d - a.spend_30d || b.spend - a.spend);
   const spendOf = (cls: FatigueAd['class']) => ads.filter((a) => a.class === cls).reduce((s, a) => s + a.spend, 0);
   const assessedSpend = ads.reduce((s, a) => s + a.spend, 0);
   const fatiguingShare = pct(spendOf('fatiguing'), assessedSpend);
   const evergreenShare = pct(spendOf('evergreen'), assessedSpend);
   const fatiguing = ads.filter((a) => a.class === 'fatiguing');
+  const unconfirmed = ads.filter((a) => a.class === 'declining_unconfirmed');
   const evergreens = ads.filter((a) => a.class === 'evergreen');
   const soonest = fatiguing.filter((a) => a.days_to_breakeven != null).sort((a, b) => a.days_to_breakeven! - b.days_to_breakeven!)[0];
+  // Names the denominator wherever a share is printed: "1.3% of assessed spend"
+  // left the reader guessing whether it was the account's spend or ours.
+  const assessedWord = `the last 90 days' spend behind the ${ads.length} ad${ads.length === 1 ? '' : 's'} we could read`;
+  /** An ad with no last-30-day spend states its last spending day instead of a zero. */
+  const spendNote = (ad: FatigueAd): string =>
+    ad.spend_30d > 0
+      ? ''
+      : ad.last_spend_date
+        ? ` (nothing in the last 30 days, it last spent on ${ad.last_spend_date})`
+        : ` (nothing in the last 30 days)`;
+  /** The two levels behind a decline, in the account's own grammar. */
+  const levelsOf = (ad: FatigueAd): string => {
+    if (mode === 'roas') return ` at ${ad.kpi_first_half.toFixed(2)}× then ${ad.kpi_recent.toFixed(2)}×`;
+    if (ad.cpl_first_half != null && ad.cpl_last_14 != null)
+      return ` at ${moneyExact(ad.cpl_first_half, currency)} then ${moneyExact(ad.cpl_last_14, currency)}`;
+    if (ad.cpl_last_14 == null) return `, which booked no result at all in its last ${ad.confirmation_days} days`;
+    return ` at ${moneyExact(ad.cpl_last_14, currency)} now`;
+  };
 
   const kpiWord = mode === 'roas' ? 'ROAS' : 'results per spend';
   // Attribution rule (founder-sim debt, 2026-07-04): when the owner gave us
@@ -407,13 +484,18 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currenc
   // caveat that the true line is higher.
   const breakevenWord = grossMarginPct != null && breakevenRoas > 1.0 ? `its ${breakevenRoas}× breakeven` : 'breakeven';
   // The fatiguing set's CURRENT run-rate — the honest "money riding on declining
-  // creative" number (pro-trust layer). A run-rate, not a loss claim.
-  const fatiguingDailyBurn = Math.round(fatiguing.reduce((s, a) => s + a.recent_daily_spend, 0));
+  // creative" number (pro-trust layer). A run-rate, not a loss claim, and only
+  // the ads that are actually still spending: an ad that stopped six weeks ago
+  // still reports a run rate over its own last active days, and summing those
+  // into a "right now" figure printed 569/day on a 300/day account.
+  const fatiguingDailyBurn = Math.round(
+    fatiguing.filter((a) => a.still_spending).reduce((s, a) => s + a.recent_daily_spend, 0),
+  );
   // The list the page prints as "what is dragging the most spend". A guarded
-  // acquisition ad is not dragging anything, and the ranking is real 30-day
-  // spend, not a run-rate.
+  // acquisition ad is not dragging anything, an ad with no spend in the last 30
+  // days is not dragging anything NOW, and the ranking is real 30-day spend.
   const dragging: DraggingAd[] = fatiguing
-    .filter((a) => !a.low_frequency_acquisition_guard)
+    .filter((a) => !a.low_frequency_acquisition_guard && a.spend_30d > 0)
     .sort((a, b) => b.spend_30d - a.spend_30d)
     .slice(0, 3)
     .map((a) => ({
@@ -431,21 +513,41 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currenc
     // spend). Protect these" told a reader nothing they could act on.
     const biggestFatiguing = fatiguing[0]!;
     summaryParts.push(
-      `${fatiguing.length} ad${fatiguing.length > 1 ? 's' : ''} carrying ${fatiguingShare}% of assessed spend ` +
+      `${fatiguing.length} ad${fatiguing.length > 1 ? 's' : ''} carrying ${fatiguingShare}% of ${assessedWord} ` +
       `${fatiguing.length > 1 ? 'are' : 'is'} genuinely fatiguing (${kpiWord} down 25%+ from the first half of its run to the second)` +
       (fatiguing.length > 1 ? `, the biggest being "${biggestFatiguing.ad_name}"` : `: "${biggestFatiguing.ad_name}"`) +
+      spendNote(biggestFatiguing) +
       (soonest?.days_to_breakeven && soonest.days_to_breakeven > 1 ? `; at the current decline "${soonest.ad_name}" crosses ${breakevenWord} in roughly ${soonest.days_to_breakeven} days` : soonest?.days_to_breakeven === 1 ? `; at the current decline "${soonest.ad_name}" crosses ${breakevenWord} within a day` : '') + '.' +
-      (fatiguingDailyBurn > 0 ? ` Right now ≈${money(fatiguingDailyBurn, currency)}/day runs on this declining set, and that is the budget the replacements inherit.` : ''),
+      (fatiguingDailyBurn > 0 ? ` Right now ≈${money(fatiguingDailyBurn, currency)}/day runs on this declining set, and that is the budget the replacements inherit. Each daily figure is that ad's own average while it was running.` : ''),
     );
   } else {
-    summaryParts.push(`No ad with meaningful spend shows a real fatigue pattern right now (${kpiWord} trend, not age — long-running ads that still hold their number don't count).`);
+    summaryParts.push(`No ad with meaningful spend shows a confirmed fatigue pattern right now (${kpiWord} trend, not age: long-running ads that still hold their number don't count).`);
+  }
+  // The split, stated plainly, so the chart's colours and the verdict agree.
+  // "1 evergreen, everything else stable" hid the ads the rule had refused to
+  // clear: a 25%+ decline the confirmation test would not confirm is not stable.
+  if (unconfirmed.length) {
+    const biggestUnconfirmed = unconfirmed[0]!;
+    summaryParts.push(
+      (fatiguing.length
+        ? `${fatiguing.length} confirmed fatiguing; ${unconfirmed.length} more ${unconfirmed.length > 1 ? 'are' : 'is'} declining `
+        : `Nothing is confirmed fatiguing; ${unconfirmed.length} ad${unconfirmed.length > 1 ? 's are' : ' is'} declining `) +
+      `but too young or too thin to confirm; ` +
+      `the biggest of those is "${biggestUnconfirmed.ad_name}"${levelsOf(biggestUnconfirmed)}${spendNote(biggestUnconfirmed)}.`,
+    );
   }
   if (evergreens.length) {
     const biggestEvergreen = evergreens[0]!;
     summaryParts.push(
-      `${evergreens.length} evergreen winner${evergreens.length > 1 ? 's' : ''} (${evergreenShare}% of assessed spend), the biggest "${biggestEvergreen.ad_name}", running 60+ days with the number holding. Protect these; do not "refresh" them.`,
+      `${evergreens.length} evergreen winner${evergreens.length > 1 ? 's' : ''} (${evergreenShare}% of ${assessedWord}), the biggest "${biggestEvergreen.ad_name}", running 60+ days with the number holding. Protect these; do not "refresh" them.`,
     );
   }
+
+  // The style-guide clause only exists when there IS an evergreen list: the live
+  // report pointed a reader at one on an account with zero evergreen rows.
+  const evergreenGuideWord = evergreens.length
+    ? `, and the evergreen list is the style guide for what this account rewards`
+    : '';
 
   const warnings: string[] = [];
   if (suppressedNoResults > 0) {
@@ -464,27 +566,42 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currenc
     summary: summaryParts.join(' '),
     next_step: fatiguing.length
       ? ads.some((a) => a.days_to_breakeven != null)
-        ? `Brief replacements for the fatiguing ad(s) now — the runway number is the deadline, and the evergreen list is the style guide for what this account rewards.`
-        : `Brief replacements for the fatiguing ad(s) now, starting with "${(dragging[0] ?? fatiguing[0]!).ad_name}", and use the evergreen list as the style guide for what this account rewards.`
-      : `Nothing to refresh on trend. Re-check in 30 days — the runway math only means something when the decline is real.`,
+        ? `Brief replacements for the fatiguing ad(s) now: the runway number is the deadline${evergreenGuideWord}.`
+        : `Brief replacements for the fatiguing ad(s) now, starting with "${(dragging[0] ?? fatiguing[0]!).ad_name}"${evergreenGuideWord}.`
+      : unconfirmed.length
+        ? `Nothing is confirmed fatiguing yet, so don't cut anything on this chapter alone. Watch "${unconfirmed[0]!.ad_name}" and re-read this in two weeks, when its confirmation window is long enough to settle it.`
+        : `Nothing to refresh on trend. Re-check in 30 days: the runway math only means something when the decline is real.`,
     data: {
       window_days: 90,
       kpi_mode: mode,
       assessed_ads: ads.length,
+      /** The denominator under every share in this section: the 90-day spend of the assessed ads. */
+      assessed_spend: Math.round(assessedSpend),
+      // Every `recent_daily_spend` and the burn are averages over each ad's own
+      // ACTIVE days, so they do not sum to the account's calendar spend rate and
+      // must never be presented as if they did.
+      daily_basis: 'active_days',
+      sorted_by: 'spend_30d',
+      ads_shown: Math.min(20, ads.length),
       // An account with no purchase revenue has no breakeven and no margin line,
       // so neither figure is emitted for it (the scatter does the same).
       breakeven_roas: mode === 'roas' ? breakevenRoas : undefined,
       gross_margin_pct: mode === 'roas' ? (grossMarginPct ?? undefined) : undefined,
       fatiguing_spend_share_pct: fatiguingShare,
       evergreen_spend_share_pct: evergreenShare,
+      fatiguing_count: fatiguing.length,
+      declining_unconfirmed_count: unconfirmed.length,
+      evergreen_count: evergreens.length,
       fatiguing_daily_burn: fatiguingDailyBurn,
       currency: currency || undefined,
       ads_suppressed_no_results: suppressedNoResults || undefined,
-      signal: fatiguing.length > 0,
+      // A 25%+ decline the confirmation test could not confirm is still a
+      // finding: the section that reports one carries an action row.
+      signal: fatiguing.length > 0 || unconfirmed.length > 0,
       dragging,
       dragging_note: dragging.length
         ? undefined
-        : 'No ad clears the bar as dragging spend once the low-frequency acquisition ads are excluded. Budget concentration is covered in the concentration and budget chapters.',
+        : 'No ad clears the bar as dragging spend once the low-frequency acquisition ads are excluded. An ad with no spend in the last 30 days is not dragging anything now, so it is not on this list either. Budget concentration is covered in the concentration and budget chapters.',
       ads: ads.slice(0, 20),
     },
     warnings: warnings.length ? warnings : undefined,
@@ -492,6 +609,8 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currenc
       `For every ad with 10+ active days and real spend in the last 90 days, we split its run into a first and second half ` +
       `and compared ${kpiWord} between them — a 25%+ drop that also holds in the last 14 active days reads as fatigue. ` +
       `Age alone never flags an ad: old creative whose number still holds is evergreen and gets protected. ` +
+      `A 25%+ drop we cannot yet confirm (the run is under 21 days, or its confirmation window got fewer than 14 days) ` +
+      `is reported as declining and unconfirmed, never as stable and never as a reason to cut. ` +
       (mode === 'roas'
         ? grossMarginPct != null && breakevenRoas > 1.0
           ? `Breakeven line = ${breakevenRoas}× ROAS — your breakeven at the ${grossMarginPct}% gross margin you gave us (1 ÷ margin); runways and below-breakeven calls are measured against your line, not a generic 1.0×. `
@@ -502,8 +621,11 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currenc
       (ads.some((a) => a.days_to_breakeven != null)
         ? `The runway extrapolates the observed per-day decline from the ad's last-14-day level down to breakeven — a deadline estimate, not a guarantee. `
         : '') +
-      `The daily figure is each fatiguing ad's average spend over its own last 14 active days, summed (half its run when it has been live under 28 days). ` +
-      `The dragging list ranks the fatiguing ads that are NOT flagged as low-frequency acquisition by their real last-30-day spend.`,
+      `The daily figure is each fatiguing ad's average spend over its own last 14 ACTIVE days, summed across the ones still spending ` +
+      `(half its run when it has been live under 28 days). Because each one is that ad's own average while it was running, these ` +
+      `figures do not add up to the account's daily spend and are not meant to. ` +
+      `Rows are ranked by real last-30-day spend, the figure each row shows, and an ad that spent nothing in those 30 days states its last spending day instead. ` +
+      `The dragging list ranks the fatiguing ads that are NOT flagged as low-frequency acquisition, and still spending, by their real last-30-day spend.`,
   };
 }
 
@@ -671,6 +793,31 @@ export function computeBudgetScatter(
   const moveCount = dots.filter((d) => d.klass === 'move').length;
   const acqCount = dots.filter((d) => d.klass === 'acquisition').length;
   const dropped = all.length - plotted.length;
+  // A red dot can only be claimed when there IS one. The live report said "the
+  // red dots are your past-peak ads" on a chart whose only flagged ad sat under
+  // the plotting floor, so the reader looked for a dot that was never drawn.
+  const plottedIds = new Set(dots.map((d) => d.ad_id));
+  const flaggedOffChart = fatigueAds
+    .filter((f) => f.class === 'fatiguing' && !f.low_frequency_acquisition_guard && !plottedIds.has(f.ad_id))
+    .map((f) => f.ad_id);
+  const offChartReason = (adId: string): 'no_spend_30d' | 'below_plot_floor' | 'no_mapped_result' => {
+    const a = byAd.get(adId);
+    if (!a || a.spend <= 0) return 'no_spend_30d';
+    if (a.spend < floor) return 'below_plot_floor';
+    return 'no_mapped_result';
+  };
+  const offChartReasons = [...new Set(flaggedOffChart.map(offChartReason))];
+  const offChartWord = (): string => {
+    const many = flaggedOffChart.length > 1;
+    const subject = `${flaggedOffChart.length === 1 ? 'The one ad' : `The ${flaggedOffChart.length} ads`} flagged past peak in the fatigue chapter`;
+    if (offChartReasons.length > 1)
+      return `${subject} ${many ? 'get' : 'gets'} no dot here: between them they spend too little in the last 30 days to plot or carry no mapped result.`;
+    if (offChartReasons[0] === 'no_spend_30d')
+      return `${subject} ${many ? 'have' : 'has'} no spend at all in the last 30 days, so ${many ? 'they get' : 'it gets'} no dot here.`;
+    if (offChartReasons[0] === 'no_mapped_result')
+      return `${subject} ${many ? 'carry' : 'carries'} no mapped result in the last 30 days, so a cost per ${resultNoun} cannot be plotted for ${many ? 'them' : 'it'}.`;
+    return `${subject} ${many ? 'spend' : 'spends'} too little in the last 30 days to plot, so no dot on this chart is red.`;
+  };
   const cprValues = dots.map((d) => d.cpr_30d).filter((v): v is number => v != null).sort((x, y) => x - y);
   const spreadRatio =
     cprValues.length >= 2 && cprValues[0]! > 0 ? r2(cprValues[cprValues.length - 1]! / cprValues[0]!) : null;
@@ -689,12 +836,22 @@ export function computeBudgetScatter(
     } else if (ratio >= 1.5) {
       contrast =
         `"${starvedBest.ad_name}" buys a ${resultNoun} for ${money(starvedBest.cpr_30d ?? 0, currency)} on ${money(starvedBest.spend_30d, currency)} of spend, ` +
-        `while "${heaviestLaggard.ad_name}" pays ${money(heaviestLaggard.cpr_30d ?? 0, currency)} per ${resultNoun} on ` +
+        `while "${heaviestLaggard.ad_name}", the heaviest spender doing worse than that line, pays ${money(heaviestLaggard.cpr_30d ?? 0, currency)} per ${resultNoun} on ` +
         `${money(heaviestLaggard.spend_30d, currency)} — ${ratioWord}.`;
     }
   }
 
   const breakevenWord = grossMarginPct != null && breakevenRoas > 1.0 ? `your ${breakevenRoas}× breakeven` : 'the 1.0× line';
+  // The legend names only the colours actually on this chart: a "red = past peak"
+  // line over a chart with no red dot sends the reader hunting for it.
+  const colourLegendParts = [
+    ...(moveCount > 0 ? ['red = past-peak and still spending'] : []),
+    ...(acqCount > 0 ? ['blue = below breakeven but low-frequency (acquisition, not waste)'] : []),
+    ...(dots.some((d) => d.klass === 'evergreen') ? ['olive = evergreen'] : []),
+  ];
+  const colourLegend = colourLegendParts.length
+    ? colourLegendParts.join(', ')
+    : `no plotted ad carries a fatigue verdict, so no dot here is coloured`;
   const summaryParts: string[] = [];
   if (mode === 'roas') {
     summaryParts.push(
@@ -706,15 +863,19 @@ export function computeBudgetScatter(
         (cprLine != null ? `; the dashed line is ${cprLineWord}` : '') + `.`,
     );
     if (cprValues.length >= 2) {
+      // Name the SET: "the worst cost per lead in the set" was read as the whole
+      // account, when it is the dearest of the ads big enough to plot.
       summaryParts.push(
-        `Across the ${dots.length} plotted ads the cost per ${resultNoun} runs from ${money(cprValues[0]!, currency)} to ${money(cprValues[cprValues.length - 1]!, currency)}.`,
+        `Across the ${dots.length} biggest spenders of the last 30 days (the ads with enough spend to plot) the cost per ${resultNoun} ` +
+          `runs from ${money(cprValues[0]!, currency)} to ${money(cprValues[cprValues.length - 1]!, currency)}.`,
       );
     }
   }
   // Fatigue-driven, so it holds in either grammar: the colour is the trend, not
   // the return. The acquisition guard is a ROAS-mode read and stays there.
   if (moveCount > 0)
-    summaryParts.push(`${moveCount} ad${moveCount === 1 ? '' : 's'} sit in the danger zone — past peak and still spending (the same ${moveCount === 1 ? 'one' : 'ones'} flagged in the fatigue chapter).`);
+    summaryParts.push(`${moveCount} ad${moveCount === 1 ? '' : 's'} sit${moveCount === 1 ? 's' : ''} in the danger zone — past peak and still spending (the same ${moveCount === 1 ? 'one' : 'ones'} flagged in the fatigue chapter).`);
+  else if (flaggedOffChart.length > 0) summaryParts.push(offChartWord());
   if (mode === 'roas' && acqCount > 0)
     summaryParts.push(`${acqCount} below-breakeven ad${acqCount === 1 ? '' : 's'} run at low frequency — that reads as acquisition, not waste, so ${acqCount === 1 ? "it's" : "they're"} marked separately.`);
   if (contrast) summaryParts.push(contrast);
@@ -727,7 +888,7 @@ export function computeBudgetScatter(
       ? `Move budget off the danger-zone ads and into the ones sitting high on the chart — the fatigue chapter has the deadline.`
       : mode === 'cpr'
         ? cprValues.length >= 2
-          ? `Move budget from the ads near ${money(cprValues[cprValues.length - 1]!, currency)} per ${resultNoun} toward the ones near ${money(cprValues[0]!, currency)}, one step at a time, and re-read the chart in two weeks.`
+          ? `Among those ${dots.length} biggest spenders, move budget from the ads near ${money(cprValues[cprValues.length - 1]!, currency)} per ${resultNoun} toward the ones near ${money(cprValues[0]!, currency)}, one step at a time, and re-read the chart in two weeks.`
           : `Keep the current split; there are too few plotted ads to move budget between on this chart alone.`
         : `No ad on this chart is both clearly above ${breakevenWord} and starved of budget, and none is flagged past peak, so the current split stands. Re-read it next month.`;
 
@@ -753,8 +914,13 @@ export function computeBudgetScatter(
       total_spend: Math.round(total),
       ads_plotted: dots.length,
       ads_dropped_thin: dropped,
+      /** What the plotted set IS, for any label that compares within it. */
+      plotted_set_label: `the ${dots.length} biggest spenders of the last 30 days`,
       move_count: moveCount,
       acquisition_count: acqCount,
+      /** Ads the fatigue chapter flagged that have no dot here. A red-dot sentence is only true when this is empty. */
+      flagged_off_chart: flaggedOffChart.length || undefined,
+      flagged_off_chart_reasons: flaggedOffChart.length ? offChartReasons : undefined,
       starved_best_ad: starvedBest?.ad_name ?? undefined,
       contrast: contrast ?? undefined,
       dots_suppressed_no_results: suppressedNoResults || undefined,
@@ -774,13 +940,13 @@ export function computeBudgetScatter(
     derivation:
       mode === 'roas'
         ? `We summed each ad's spend and revenue over the last 30 days and plotted spend against ROAS, sizing each dot by its average frequency. ` +
-          `The colour is the SAME fatigue read from the chapter above — red = past-peak and still spending, blue = below breakeven but low-frequency (acquisition, not waste), ` +
-          `olive = evergreen. Gold rings mark ads earning well above ${breakevenWord} on a small slice of budget. ` +
+          `The colour is the SAME fatigue read from the chapter above: ${colourLegend}. ` +
+          `Gold rings mark ads earning well above ${breakevenWord} on a small slice of budget. ` +
           (grossMarginPct != null && breakevenRoas > 1.0
             ? `The dashed line is ${breakevenRoas}× — your breakeven at the ${grossMarginPct}% gross margin you gave us.`
             : `The dashed line is 1.0× — the honest default when we don't know your gross margin; your true breakeven sits higher, so dots just above the line may already be underwater after product cost.`)
         : `We summed each ad's spend and its recorded results over the last 30 days and plotted spend against cost per ${resultNoun}, sizing each dot by its average frequency. ` +
-          `The colour is the SAME fatigue read from the chapter above — red = past-peak and still spending, olive = evergreen. ` +
+          `The colour is the SAME fatigue read from the chapter above: ${colourLegend}. ` +
           // The line is never borrowed: this account's number is what it pays
           // for a result, so it is read against the owner's own target or the
           // account's own average, and against nothing else.
@@ -955,6 +1121,18 @@ export function computeCostTrend(accRows90: PackAccountRow[], currency = ''): Pa
   const ctrFirst = r2(ctrFirstRaw);
   const ctrLast = r2(ctrLastRaw);
   const cpmMoveWord = `${cpmDelta >= 0 ? '+' : ''}${r1(cpmDelta)}%`;
+  // The page labels the chart's own endpoints while the sentence quotes the
+  // thirds comparison, and the live report printed +23% CPM under a +6.8%
+  // sentence. Both bases are defensible; unlabelled they read as a contradiction,
+  // so BOTH are on the wire and each says what it is.
+  const firstBucket = series[0]!;
+  const lastBucket = series[series.length - 1]!;
+  const cpmChartDelta = firstBucket.cpm > 0 ? r1(pct(lastBucket.cpm - firstBucket.cpm, firstBucket.cpm)) : null;
+  const ctrChartDelta =
+    firstBucket.ctr_link_pct > 0 ? r1(pct(lastBucket.ctr_link_pct - firstBucket.ctr_link_pct, firstBucket.ctr_link_pct)) : null;
+  // The basis, in the words the summary uses, so the chapter and the chart label
+  // can never disagree about which comparison a number came from.
+  const basisWord = `averaging the first ${firstQ.length} weeks against the last ${lastQ.length}`;
 
   // Quantify the drift honestly (pro-trust layer): what the LAST quarter of
   // weeks' impressions actually cost vs what they'd have cost at the window's
@@ -969,7 +1147,10 @@ export function computeCostTrend(accRows90: PackAccountRow[], currency = ''): Pa
   // Decompose: CPM up + CTR holding = auction/market. CTR falling while CPM is
   // flat or up = the creative is earning worse auctions, which is a finding on
   // its own — the live report called a 62% CTR slide "flat, no action needed".
-  const ctrLevels = `${ctrLast}% now against ${ctrFirst}% at the start of the window`;
+  // Named as a weekly average, with the when: this account's measured 30-day
+  // link CTR is a different figure, and the two were being quoted side by side.
+  const ctrLevels =
+    `${ctrLast}% as a weekly average over the last ${lastQ.length} weeks, against ${ctrFirst}% over the first ${firstQ.length}`;
   let verdict: 'cpm_up_ctr_down' | 'ctr_down_cpm_held' | 'cpm_up_ctr_held' | 'ctr_down_cpm_soft' | 'cpm_down' | 'flat';
   let read: string;
   if (cpmDelta > 10 && ctrReadable && ctrDelta < -10) {
@@ -982,7 +1163,9 @@ export function computeCostTrend(accRows90: PackAccountRow[], currency = ''): Pa
       `Delivery is not getting cheaper and the creative is earning worse auctions than it did`;
   } else if (cpmDelta > 10) {
     verdict = 'cpm_up_ctr_held';
-    read = `CPM is up ${r1(cpmDelta)}% while CTR held — that reads as auction/market pressure, not something your creative did wrong`;
+    read =
+      `CPM is up ${r1(cpmDelta)}% while link CTR held (${ctrLevels}), ` +
+      `which reads as auction/market pressure, not something your creative did wrong`;
   } else if (ctrReadable && ctrDelta < -10) {
     verdict = 'ctr_down_cpm_soft';
     read = `CPM moved ${cpmMoveWord} but link CTR is down ${r1(-ctrDelta)}% (${ctrLevels}), so delivery is holding while engagement slips`;
@@ -1002,7 +1185,7 @@ export function computeCostTrend(accRows90: PackAccountRow[], currency = ''): Pa
     verdict === 'cpm_up_ctr_down'
       ? `Treat this as a creative problem first: fresher hooks lift CTR, better CTR buys cheaper auctions. Re-check CPM two weeks after new creative lands.`
       : verdict === 'ctr_down_cpm_held'
-        ? `Rebuild the creative rather than waiting for CPM to come back down: at ${ctrLast}% link CTR the auction is pricing weaker engagement, not a pricier market. Brief new hooks this week and re-read this chart two weeks after they land.`
+        ? `Rebuild the creative rather than waiting for CPM to come back down: at a ${ctrLast}% weekly-average link CTR the auction is pricing weaker engagement, not a pricier market. It ran at ${ctrFirst}% over the first ${firstQ.length} weeks of this window, so that is the recovery target. Brief new hooks this week and re-read this chart two weeks after they land.`
         : verdict === 'cpm_up_ctr_held'
           ? `Nothing to fix on your side — budget for the pricier auction or shift spend toward the placements/dayparts where CPM held.`
           : verdict === 'ctr_down_cpm_soft'
@@ -1014,7 +1197,12 @@ export function computeCostTrend(accRows90: PackAccountRow[], currency = ''): Pa
               : undefined;
 
   return {
-    summary: `Over the last ${series.length} weeks: ${read}.${quantified}${ctrCaveat} (Weekly averages, account level.)`,
+    summary:
+      `Over the last ${series.length} weeks: ${read}.${quantified}${ctrCaveat} ` +
+      `(Account level, ${basisWord}. The chart's own first and last week move ` +
+      `${cpmChartDelta == null ? 'no readable amount' : `${cpmChartDelta >= 0 ? '+' : ''}${cpmChartDelta}%`} on CPM` +
+      `${ctrChartDelta == null ? '' : ` and ${ctrChartDelta >= 0 ? '+' : ''}${ctrChartDelta}% on link CTR`}, ` +
+      `which is the same series read end to end rather than averaged.)`,
     ...(next_step ? { next_step } : {}),
     data: {
       series,
@@ -1024,6 +1212,14 @@ export function computeCostTrend(accRows90: PackAccountRow[], currency = ''): Pa
       verdict,
       cpm_delta_pct: r1(cpmDelta),
       ctr_delta_pct: r1(ctrDelta),
+      /** What `cpm_delta_pct` / `ctr_delta_pct` are: the average of the first third of weeks against the last third. */
+      delta_basis: 'thirds_average',
+      delta_first_weeks: firstQ.length,
+      delta_last_weeks: lastQ.length,
+      /** The endpoints a chart label reads: the last plotted bucket against the first, same buckets as `series`. */
+      cpm_chart_delta_pct: cpmChartDelta ?? undefined,
+      ctr_chart_delta_pct: ctrChartDelta ?? undefined,
+      chart_delta_basis: 'last_bucket_vs_first_bucket',
       cpm_first: cpmFirst,
       cpm_last: cpmLast,
       ctr_first: ctrFirst,
@@ -1036,7 +1232,10 @@ export function computeCostTrend(accRows90: PackAccountRow[], currency = ''): Pa
     },
     derivation:
       `Daily account delivery is bucketed into calendar weeks; CPM = spend ÷ impressions × 1000 per week. ` +
-      `The trend compares the average of the first third of those ${series.length} weeks against the last third, for CPM and link CTR alike. ` +
+      `The trend compares the average of the first third of those ${series.length} weeks against the last third, for CPM and link CTR alike ` +
+      `(${basisWord}). The chart's own endpoints, the last week against the first, are a different comparison of the same series ` +
+      `and give a different number, so both are on the wire and each one says which comparison it came from. ` +
+      `Every CTR here is a weekly average from this account's own delivery, not the 30-day figure quoted elsewhere in the report. ` +
       (showsExtraCost
         ? `The cost figure prices the last ${recentWeeks} weeks' actual impressions at the opening CPM and takes the difference — ` +
           `"same impressions, opening prices". It shares the CPM's causes (market AND creative), so we never add it to other reports' numbers.`
@@ -1103,6 +1302,12 @@ export function computeDayOfWeek(accRows90: PackAccountRow[]): PackSection {
   const best = ranked[0]!;
   const worst = ranked[ranked.length - 1]!;
   const gap = mode === 'roas' ? pct(best.kpi - worst.kpi, worst.kpi || 1) : pct(worst.kpi - best.kpi, best.kpi || 1);
+  // The SHIFT PAIR is gated by the same 25% guard the next step uses. The live
+  // report advised moving budget off Saturday (17.44) onto Tuesday (17.31) — a
+  // 2.5% spread — because the page built the advice from the best/worst names
+  // itself. The names stay (they caption the table); the pair only exists when
+  // the gap is big enough to act on.
+  const shiftAdvice = gap >= 25;
 
   return {
     summary:
@@ -1120,6 +1325,14 @@ export function computeDayOfWeek(accRows90: PackAccountRow[]): PackSection {
       best_day: best.day,
       worst_day: worst.day,
       gap_pct: r1(gap),
+      /** Whether the best-to-worst spread clears the 25% guard. False = no budget-shift advice may be built from this section. */
+      shift_advice: shiftAdvice,
+      /** The only pair a shift may be built from, and it exists only when the guard clears. */
+      shift_from_day: shiftAdvice ? worst.day : undefined,
+      shift_to_day: shiftAdvice ? best.day : undefined,
+      shift_withheld_reason: shiftAdvice
+        ? undefined
+        : `The spread between ${best.day} and ${worst.day} is ${r1(gap)}%, under the 25% we need before moving budget between weekdays. The table stands; the advice does not.`,
       days_suppressed_no_results: suppressedDays || undefined,
       signal: gap >= 25,
     },
@@ -1132,7 +1345,8 @@ export function computeDayOfWeek(accRows90: PackAccountRow[]): PackSection {
       `90 days of account-level delivery grouped by weekday (~13 of each), ${kpiLabel} computed per weekday from the summed spend and ` +
       `that weekday's own ${mode === 'roas' ? 'purchases' : 'recorded results, the lead actions this account books'}. ` +
       `A weekday with no mapped result gets no ${kpiLabel} at all rather than showing its raw spend. ` +
-      `Gaps under 25% stay on the watchlist rather than becoming schedule advice.`,
+      `Gaps under 25% stay on the watchlist rather than becoming schedule advice: below that, the strongest and weakest weekday ` +
+      `are named as a fact about the table and no budget shift is proposed from them.`,
   };
 }
 
@@ -1470,7 +1684,7 @@ export function buildProvisionalInsights(
       const share = evergreens.reduce((s, a) => s + a.spend, 0);
       out.push({
         headline: `${evergreens.length} evergreen winner${evergreens.length > 1 ? 's' : ''} — 60+ days old and still holding their number`,
-        detail: `${Math.round(share).toLocaleString('en-US')} of assessed spend runs on proven creative that is NOT fatiguing. Protect these ads; whatever they do right is this account's style guide.`,
+        detail: `${Math.round(share).toLocaleString('en-US')} of the 90-day spend behind the ads we could read runs on proven creative that is NOT fatiguing. Protect these ads; whatever they do right is this account's style guide.`,
         severity: 'opportunity',
         section: 'creative_fatigue',
         provisional: true,
