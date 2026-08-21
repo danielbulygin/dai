@@ -1810,8 +1810,10 @@ export function computeOptimizationEvents(
 
   return {
     summary: xs === 0
-      ? `All ${rows.length} ad sets that spent in the last 30 days optimize for the right thing (${targetWord}-class events). This is the foundational setting most accounts get wrong — yours is clean.`
-      : `${xs} of the ${rows.length} ad sets that spent in the last 30 days optimize for the WRONG event — ${pct(misSpend, totalSpend)}% of spend (${money(misSpend, currency)} over 30 days) is telling Meta to hunt something other than ${targetWord.toLowerCase()}s.`,
+      ? rows.length === 1
+        ? `The one ad set that spent in the last 30 days optimizes for the right thing (${targetWord}-class events). This is the foundational setting most accounts get wrong — yours is clean.`
+        : `All ${rows.length} ad sets that spent in the last 30 days optimize for the right thing (${targetWord}-class events). This is the foundational setting most accounts get wrong — yours is clean.`
+      : `${xs} of the ${rows.length} ad set${rows.length === 1 ? '' : 's'} that spent in the last 30 days optimize${xs === 1 ? 's' : ''} for the WRONG event — ${pct(misSpend, totalSpend)}% of spend (${money(misSpend, currency)} over 30 days) is telling Meta to hunt something other than ${targetWord.toLowerCase()}s.`,
     next_step: xs === 0
       ? `Nothing to change here — keep new ad sets on the same optimization event.`
       : `Switch the flagged ad sets to ${targetWord} optimization (or fold their budget into the correctly-set ones). Expect a learning reset — do it per ad set, not all at once.`,

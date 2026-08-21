@@ -375,7 +375,7 @@ export function computeTargetingSplit(
   const interestHeavy = classes.find((c) => c.class === 'Interest-targeted' && c.spend_share_pct >= 20) != null;
   return {
     summary:
-      `${classes.length} targeting style${classes.length > 1 ? 's' : ''} carry spend. The biggest is ${top.class} ` +
+      `${classes.length} targeting style${classes.length > 1 ? 's' : ''} carr${classes.length === 1 ? 'ies' : 'y'} spend. The biggest is ${top.class} ` +
       `(${top.spend_share_pct}% of spend${top.kpi != null ? `, ${kpiLabel} ${top.kpi}` : ''}).` +
       (brokenPromises.length > 0
         ? ` ${brokenPromises.length} of ${spending.length} spending ad set${spending.length === 1 ? '' : 's'} carr${brokenPromises.length === 1 ? 'ies' : 'y'} a name that does not describe its targeting.`
@@ -461,13 +461,15 @@ export function computeLearningLimited(
 
   const scopeClause =
     inactiveSpenders > 0
-      ? ` (${spenders.length} ad sets spent in the last 30 days; ${inactiveSpenders} ${inactiveSpenders === 1 ? 'is' : 'are'} no longer active and ${inactiveSpenders === 1 ? 'is' : 'are'} excluded here — a paused set can't be in learning.)`
+      ? ` (${spenders.length} ad set${spenders.length === 1 ? '' : 's'} spent in the last 30 days; ${inactiveSpenders} ${inactiveSpenders === 1 ? 'is' : 'are'} no longer active and ${inactiveSpenders === 1 ? 'is' : 'are'} excluded here — a paused set can't be in learning.)`
       : '';
   return {
     summary:
       starved.length === 0
-        ? `All ${rows.length} currently active ad sets with spend clear Meta's ~50-events-a-week learning bar — the algorithm has enough signal everywhere.${scopeClause}`
-        : `${starved.length} of the ${rows.length} currently active ad sets with spend run below Meta's ~50-events-a-week learning bar — ` +
+        ? rows.length === 1
+          ? `The one currently active ad set with spend clears Meta's ~50-events-a-week learning bar — the algorithm has enough signal.${scopeClause}`
+          : `All ${rows.length} currently active ad sets with spend clear Meta's ~50-events-a-week learning bar — the algorithm has enough signal everywhere.${scopeClause}`
+        : `${starved.length} of the ${rows.length} currently active ad set${rows.length === 1 ? '' : 's'} with spend run${starved.length === 1 ? 's' : ''} below Meta's ~50-events-a-week learning bar — ` +
           `${starvedSharePct}% of active spend (${money(starvedSpend, currency)}/30d) is optimizing on thin signal.${scopeClause}`,
     // Every ad set clearing the bar is this chapter reading clean. The old
     // "keep new ad sets consolidated" line asked for nothing that is not
