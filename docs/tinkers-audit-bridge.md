@@ -397,7 +397,24 @@ what produced the wrong numbers on the live report.
 | `window_too_short`, `days_covered` | creative_cohorts | `true` means freshness is an artifact of a short read. The section is quiet, the scorecard drops the freshness grade, and the protect list withholds it (`whats_working.data.freshness_withheld`). |
 | `top_ads[].name_shared_with_other_ad` | spend_concentration | Two different ads share this name. Disambiguate the row. |
 | `top_evergreen`, `best_angle.spend_share_pct`, `freshness_withheld`, `cohort_days_covered` | whats_working | The protect list now names the ad and the angle it protects. |
+| `top_evergreen.proof`, `evergreen[].proof` | whats_working | The two figures behind "its number is holding", already worded ("cost per lead 20.00 USD then 19.40 USD"). Print it beside the ad; never re-derive it. Null when the fatigue row carried no levels to quote. |
+| `signal` | placement_breakdown, audience_breakdown, targeting_split, learning_limited, saturation, creative_diversity, landing_pages, account_activity | Now set on every one of these, the same contract report-pack.ts already had. False means the chapter ran clean, so it belongs in the "came back clean" pile and it carries NO next step (the write path drops one). account_facts sets no signal at all on purpose: it is texture, neither a finding nor a quiet row. |
+| `homepage_advice`, `homepage_advice_deferred_to` | landing_pages | `homepage_advice: true` means this chapter's next step IS the homepage call. Once the walk has a verdict of its own, the engine drops that row and sets `homepage_advice_deferred_to: "message_match"`, so exactly one chapter advises on the homepage. Render the landing chapter without an action row when that field is present. |
+| `aging_top_spender` | creative_cohorts | Present when the fatigue chapter has already called the biggest current spender fatiguing or declining. The cadence sentence names it instead of praising the refresh rhythm, and `signal` is true even on a 40%+ fresh share. The replacement deadline stays in the fatigue chapter. |
 | `window_days`, `window_start`, `window_end`, `delivery_days`, `window_spend`, `daily_avg` | account_facts | Every did-you-know sentence states its own window, and the daily average divides that window's spend by that window's days. `daily_avg * window_days` reconciles with `window_spend`. |
+
+### One cost word per report
+
+Every wording of the same cost metric is collapsed into ONE word before a
+section is written back: "cost per lead" on a lead-gen account, "Meta CPA" on an
+e-commerce one, and nothing rewritten at all when the account records both
+conversions or neither, because then no single word is true. The rewrite runs
+over every string at any depth of a section, `kpi_label` included, so a page
+that prints `kpi_label` prints the report's one word without doing anything.
+
+The page must not reintroduce a second wording: never build a label from
+"CPL", "Meta CPL", "cost per result", "cost per acquisition" or "cost per
+conversion" in its own copy. Read the label off the section.
 
 ### The target gap (`funnel_read.data.target_gap`)
 
