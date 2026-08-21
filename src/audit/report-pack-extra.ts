@@ -276,12 +276,36 @@ export function classifyTargeting(t: TargetingSpecLite): TargetingClass {
   return 'Broad';
 }
 
+/**
+ * One ad set whose NAME claims something its live targeting does not contain.
+ *
+ * The claim and the class travel separately from the sentence so a consumer can
+ * count them without parsing prose, and the sentence itself never says which
+ * half is wrong: a renamed ad set and a rebuilt audience look identical from
+ * here, and only the person who did it knows which one is stale.
+ */
+export interface AdSetNamePromise {
+  adset_id: string;
+  adset_name: string;
+  /** What the name reads as ("a lookalike", "retargeting", an audience name). */
+  claim: string;
+  /** The class its live spec was actually classified as. */
+  targeting_class: string;
+  detail: string;
+}
+
 export function computeTargetingSplit(
   specs: TargetingSpecLite[],
   spendByAdset: Map<string, number>,
   kpiByAdset: Map<string, { value: number; results: number }>,
   rows30ForMode: PackAdRow[],
   currency: string,
+  /**
+   * The name-versus-spec check, when the read that can answer it ran. Absent by
+   * default, so a caller without the account's audience list produces exactly
+   * the section it produced before this existed.
+   */
+  namePromises: AdSetNamePromise[] = [],
 ): PackSection {
   const spending = specs.filter((s) => (spendByAdset.get(s.adset_id) ?? 0) > 0);
   const totalSpend = spending.reduce((s, a) => s + (spendByAdset.get(a.adset_id) ?? 0), 0);
@@ -333,25 +357,60 @@ export function computeTargetingSplit(
     );
   }
 
+  // Only ad sets with spend are judged on their name: a paused ad set called
+  // "Lookalike 1%" is somebody's old test, and correcting its label buys the
+  // reader nothing.
+  const spendingIds = new Set(spending.map((s) => s.adset_id));
+  const brokenPromises = namePromises.filter((p) => spendingIds.has(p.adset_id));
+  if (brokenPromises.length > 0) {
+    const first = brokenPromises[0]!;
+    warnings.push(
+      brokenPromises.length === 1
+        ? `One spending ad set's name does not match what it targets. ${first.detail} Either the name or the audience is out of date, and both cost you the ability to read this account from its own labels.`
+        : `${brokenPromises.length} spending ad sets have names that do not match what they target. ${first.detail} Either the names or the audiences are out of date, and both cost you the ability to read this account from its own labels.`,
+    );
+  }
+
   const top = classes[0]!;
   const interestHeavy = classes.find((c) => c.class === 'Interest-targeted' && c.spend_share_pct >= 20) != null;
   return {
     summary:
       `${classes.length} targeting style${classes.length > 1 ? 's' : ''} carry spend. The biggest is ${top.class} ` +
-      `(${top.spend_share_pct}% of spend${top.kpi != null ? `, ${kpiLabel} ${top.kpi}` : ''}).`,
+      `(${top.spend_share_pct}% of spend${top.kpi != null ? `, ${kpiLabel} ${top.kpi}` : ''}).` +
+      (brokenPromises.length > 0
+        ? ` ${brokenPromises.length} of ${spending.length} spending ad set${spending.length === 1 ? '' : 's'} carr${brokenPromises.length === 1 ? 'ies' : 'y'} a name that does not describe its targeting.`
+        : ''),
     // "Judge classes by their number above before moving budget" is the reader
     // reading the section, not a step they can take, so a sane split is quiet.
     ...(interestHeavy
       ? {
           next_step: `A real slice of budget still runs on interest stacks, and current-era accounts usually beat them with broad plus strong creative. Test broad against your best interest ad set head to head.`,
         }
-      : {}),
-    data: { window_days: 30, signal: interestHeavy, kpi_mode: mode, kpi_label: kpiLabel, currency, classes, total_spend: Math.round(totalSpend) },
+      : brokenPromises.length > 0
+        ? {
+            next_step: `Open "${brokenPromises[0]!.adset_name}" and settle which half is stale: rename it to what it targets, or point it at the audience its name promises. Until then nobody can read this account from its own labels.`,
+          }
+        : {}),
+    data: {
+      window_days: 30,
+      signal: interestHeavy || brokenPromises.length > 0,
+      kpi_mode: mode,
+      kpi_label: kpiLabel,
+      currency,
+      classes,
+      total_spend: Math.round(totalSpend),
+      name_promises: brokenPromises,
+      name_promises_checked: namePromises.length > 0 || undefined,
+    },
     warnings: warnings.length ? warnings : undefined,
     derivation:
       `Every spending ad set's live targeting spec read from Meta and classified by a fixed rule: Advantage+ audience flag → ` +
       `Advantage+; custom audiences without lookalikes → retargeting; lookalikes → LAL; detailed interests → interest-targeted; ` +
-      `none of those → broad. Spend joins from the 30-day ad-level pull; ${kpiLabel} per class from that class's own results.`,
+      `none of those → broad. Spend joins from the 30-day ad-level pull; ${kpiLabel} per class from that class's own results.` +
+      (namePromises.length > 0
+        ? ` Each spending ad set's NAME was then read against that classification, and against the account's own list of saved audiences, ` +
+          `so a name claiming a lookalike or an audience the spec does not hold is reported. Only names that make a checkable claim are judged.`
+        : ''),
   };
 }
 
@@ -716,8 +775,17 @@ export function computeWhatsWorking(
     return {
       // The same word the creative chips use for the same thing: a winner. The
       // page had one vocabulary for the chips and another for this list.
-      summary: 'No ad in the window is a proven winner we would protect yet, and that itself is the finding.',
-      next_step: 'The fastest path to a protect list is creative volume: more genuinely different tests.',
+      //
+      // The base rate belongs HERE, on the empty list, because that is where a
+      // reader concludes something is wrong with their creative. About one ad in
+      // twenty earns a place on a list like this, so an empty list on five tests
+      // is arithmetic and an empty list on fifty is a problem.
+      summary:
+        'No ad in the window is a proven winner we would protect yet, and that itself is the finding. ' +
+        'Plan on roughly one ad in twenty earning a place on this list: that is the rate this desk works to, not a measurement of your account, ' +
+        'and it is why the number of genuinely different tests you run decides how many winners you end up with.',
+      next_step:
+        'The fastest path to a protect list is creative volume: more genuinely different tests. At one winner per twenty tests, twenty is the number to plan the next quarter around.',
       data: {
         evergreen: [],
         strong_dimensions: [],
@@ -1269,6 +1337,14 @@ export interface AccountActivityInputs {
   monthlyRetainer: number | null;
   /** True when the live pull hit its page cap — counts are a floor, not exact. */
   partial?: boolean;
+  /**
+   * Whether the source carried WHO made each change. False on a read whose rows
+   * have no actor on them at all (the generation seam's normalized history), and
+   * then the section reports what changed and when, and never a who: one
+   * "Unattributed" bucket holding every change reads as a finding about a person
+   * rather than as a gap in the data.
+   */
+  actorsAvailable?: boolean;
   /** Override "now" for deterministic tests. Defaults to current time. */
   asOf?: string;
   /** Lookback the fetch actually requested (days). Default 90. */
@@ -1404,8 +1480,11 @@ export function computeAccountActivity(inp: AccountActivityInputs): PackSection 
   const costPerChangeWindow = retainerOverWindow != null && totalWindow > 0 ? r2(retainerOverWindow / totalWindow) : null;
 
   const topCat = byCategory[0];
-  const topActor = byActor[0];
-  const namedActors = byActor.filter((a) => a.actor_id || !a.actor_name.startsWith('Unattributed'));
+  const actorsKnown = inp.actorsAvailable !== false;
+  const topActor = actorsKnown ? byActor[0] : undefined;
+  const namedActors = actorsKnown
+    ? byActor.filter((a) => a.actor_id || !a.actor_name.startsWith('Unattributed'))
+    : [];
 
   const summaryParts: string[] = [];
   summaryParts.push(
@@ -1447,7 +1526,14 @@ export function computeAccountActivity(inp: AccountActivityInputs): PackSection 
   if (inp.partial) {
     warnings.push(`The change-history pull hit its page cap — the ${windowDays}-day counts are a floor; the real totals are higher.`);
   }
-  if (namedActors.length === 0) {
+  if (!actorsKnown) {
+    // The seam's normalized history carries WHAT changed and WHEN, and no actor
+    // column at all. Reporting one "unattributed" bucket over every change
+    // would read as a finding about a person nobody named.
+    warnings.push(
+      `This account's change log reached us without the person or tool behind each change, so this section reports what changed and when, and says nothing about who did it.`,
+    );
+  } else if (namedActors.length === 0) {
     warnings.push(`No changes in this window are attributed to a named person — Meta returned only app/system-level actors, so "who acted" can't be broken down by individual.`);
   }
 
@@ -1468,9 +1554,10 @@ export function computeAccountActivity(inp: AccountActivityInputs): PackSection 
       days_since_last_change: daysSinceLastChange,
       longest_zero_streak_days: longestZeroStreak,
       by_category: byCategory,
-      by_actor: byActor,
+      by_actor: actorsKnown ? byActor : [],
       by_application: byApplication,
       named_actor_count: namedActors.length,
+      actor_attribution_available: actorsKnown,
       monthly_retainer: monthlyRetainer,
       cost_per_change_30d: costPerChange30d,
       cost_per_change_window: costPerChangeWindow,
@@ -1481,9 +1568,521 @@ export function computeAccountActivity(inp: AccountActivityInputs): PackSection 
     derivation:
       `Read the account's change history live from Meta's activities edge (act_<id>/activities, read-only under ads_read). ` +
       `Counted ${totalWindow.toLocaleString('en-US')} events over ${windowDays} days, bucketed each event_type into ${Object.keys(ACTIVITY_CATEGORY_LABEL).length} human categories, ` +
-      `aggregated by actor and by application, and measured gaps between change-days (trailing quiet counts; a leading gap is treated as possible missing data, not inactivity). ` +
+      (actorsKnown
+        ? `aggregated by actor and by application, and measured gaps between change-days (trailing quiet counts; a leading gap is treated as possible missing data, not inactivity). `
+        : `and measured gaps between change-days (trailing quiet counts; a leading gap is treated as possible missing data, not inactivity). The rows reached us without an actor on them, so nothing here is attributed to a person or a tool. `) +
       (monthlyRetainer != null
         ? `Cost-per-change divides the stated ${money(monthlyRetainer, currency)}/mo retainer by the change count.`
         : `No retainer was supplied, so no cost-per-change is claimed.`),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// L. Audience segments — who the budget actually reaches (the generation
+//    seam's user_segment breakdown; Meta's own Advantage+ segment keys)
+// ---------------------------------------------------------------------------
+
+export interface SegmentSpendRow {
+  /** The provider's own segment key, verbatim, `unknown` included. */
+  key: string;
+  spend: number;
+  impressions: number;
+  purchases: number;
+  purchase_value: number;
+  leads: number;
+}
+
+export type SegmentKind = 'new' | 'engaged' | 'existing' | 'unknown' | 'other';
+
+/**
+ * Which of the four things a segment key means, by the words in the key.
+ *
+ * Meta names these keys and renames them, so nothing here hardcodes a full
+ * string: a key it cannot place reads `other` and is reported under its own
+ * name rather than folded into a bucket it might not belong to. `new` is tested
+ * BEFORE `existing` on purpose, because "non-customer" contains "customer".
+ */
+export function classifySegmentKey(key: string): SegmentKind {
+  const k = (key || '').trim().toLowerCase();
+  if (!k || /^(unknown|n\/?a|not available|undefined)$/.test(k)) return 'unknown';
+  if (/\b(new|prospect\w*|cold|unengaged|non.?customer)\b/.test(k)) return 'new';
+  if (/engag/.test(k)) return 'engaged';
+  if (/exist\w*|customer|purchas\w*|repeat|retarget\w*/.test(k)) return 'existing';
+  return 'other';
+}
+
+const SEGMENT_LABEL: Record<SegmentKind, string> = {
+  new: 'people who have never heard of you',
+  engaged: 'people who engaged with you before',
+  existing: 'people who already bought from you',
+  unknown: 'a segment Meta did not name',
+  other: 'another segment',
+};
+
+export interface AudienceSegmentsInputs {
+  rows: SegmentSpendRow[];
+  currency: string;
+  /** The window the rows cover, for the sentence that quotes them. */
+  windowDays: number;
+  /**
+   * True when the core window held nothing and the read was widened backwards.
+   * Stated on the section, because a figure over a different window than the
+   * rest of the report has to say so.
+   */
+  widened?: boolean;
+}
+
+/**
+ * How much of the budget reaches people who already know the business.
+ *
+ * TWO findings live here and they are different sentences. On an account with
+ * real segment keys it is a share: what went to strangers versus to people who
+ * have met you. On an account where every impression comes back `unknown` it is
+ * the absence itself: no engaged or existing audiences are defined, which most
+ * accounts never do, and until they exist nobody can read this split. Meta does
+ * not error on the second case, it answers unknown for everything, so the
+ * distinction has to be drawn here.
+ */
+export function computeAudienceSegments(inp: AudienceSegmentsInputs): PackSection {
+  const { currency, windowDays } = inp;
+  const byKey = new Map<string, SegmentSpendRow>();
+  for (const row of inp.rows) {
+    const a = byKey.get(row.key) ?? { key: row.key, spend: 0, impressions: 0, purchases: 0, purchase_value: 0, leads: 0 };
+    a.spend += row.spend || 0;
+    a.impressions += row.impressions || 0;
+    a.purchases += row.purchases || 0;
+    a.purchase_value += row.purchase_value || 0;
+    a.leads += row.leads || 0;
+    byKey.set(row.key, a);
+  }
+  const rows = [...byKey.values()];
+  const totalSpend = rows.reduce((s, r) => s + r.spend, 0);
+  const windowWord = inp.widened
+    ? `the last ${windowDays} days this account actually spent in`
+    : `the last ${windowDays} days`;
+
+  if (rows.length === 0 || totalSpend < 100) {
+    return {
+      summary: `Meta reported no audience-segment delivery for ${windowWord}, so there is no split to read.`,
+      data: { segments: [], signal: false, window_days: windowDays, widened: !!inp.widened },
+      warnings: ['No segment rows with meaningful spend — read suppressed rather than guessed.'],
+    };
+  }
+
+  const mode = rows.some((r) => r.purchase_value > 0) ? 'roas' : 'cpr';
+  const kpiLabel = mode === 'roas' ? 'Meta ROAS' : 'cost per result';
+  const resultsOf = (r: SegmentSpendRow): number => (mode === 'roas' ? r.purchases : r.purchases || r.leads);
+  const kpiOf = (r: SegmentSpendRow): number | null =>
+    mode === 'roas' ? (r.spend > 0 ? r2(div(r.purchase_value, r.spend)) : null) : resultsOf(r) > 0 ? r2(div(r.spend, resultsOf(r))) : null;
+
+  const segments = rows
+    .map((r) => ({
+      key: r.key,
+      kind: classifySegmentKey(r.key),
+      spend: Math.round(r.spend),
+      spend_share_pct: pct(r.spend, totalSpend),
+      results: resultsOf(r),
+      kpi: kpiOf(r),
+    }))
+    .sort((a, b) => b.spend - a.spend);
+
+  const shareOf = (kind: SegmentKind): number =>
+    pct(
+      segments.filter((s) => s.kind === kind).reduce((s, x) => s + x.spend, 0),
+      totalSpend,
+    );
+
+  // Every impression under an unnamed segment IS the finding: it is what an
+  // account with no engaged or existing audiences defined looks like from here.
+  if (segments.every((s) => s.kind === 'unknown')) {
+    return {
+      summary:
+        `Every one of the ${money(totalSpend, currency)} spent in ${windowWord} comes back under a segment Meta could not name, ` +
+        `which is what an account with no engaged or existing audiences defined looks like. Most accounts never set these up, ` +
+        `so this is common rather than careless, and it means nobody can tell how much of this budget goes to people who already know you.`,
+      next_step:
+        `Define the two audiences that make this readable: a customer list of the people who already bought, and a website audience of ` +
+        `the people who visited and did not. Once they exist, this split says how much of the budget goes to strangers and how much to people who have met you.`,
+      data: {
+        window_days: windowDays,
+        widened: !!inp.widened,
+        signal: true,
+        segments_defined: false,
+        currency,
+        total_spend: Math.round(totalSpend),
+        segments,
+      },
+      derivation:
+        `One account-level insights read for ${windowWord}, split by Meta's own audience-segment key. ` +
+        `Every row came back under an unnamed segment, and that is reported as the absence of defined audiences rather than as a share of anything. ` +
+        `Meta does not refuse this read on an account without segments, it answers unknown for all of it, so the two cases are told apart here.`,
+    };
+  }
+
+  const newShare = shareOf('new');
+  const knownShare = shareOf('engaged') + shareOf('existing');
+  const newSegment = segments.find((s) => s.kind === 'new') ?? null;
+  const bestKnown = segments
+    .filter((s) => s.kind === 'engaged' || s.kind === 'existing')
+    .filter((s) => s.kpi != null && s.spend_share_pct >= 10)
+    .sort((a, b) => (mode === 'roas' ? (b.kpi ?? 0) - (a.kpi ?? 0) : (a.kpi ?? Infinity) - (b.kpi ?? Infinity)))[0];
+  const beatsCold =
+    bestKnown != null &&
+    newSegment?.kpi != null &&
+    bestKnown.kpi != null &&
+    (mode === 'roas' ? bestKnown.kpi >= newSegment.kpi * 1.25 : bestKnown.kpi <= newSegment.kpi * 0.75);
+
+  const summaryParts: string[] = [];
+  if (newSegment) {
+    summaryParts.push(
+      `${newShare}% of the spend in ${windowWord} went to people who have never heard of you ` +
+        `(${money(newSegment.spend, currency)} of ${money(totalSpend, currency)}${newSegment.kpi != null ? `, at ${kpiLabel} ${newSegment.kpi}` : ''}).`,
+    );
+  } else {
+    const top = segments[0]!;
+    summaryParts.push(
+      `The biggest segment in ${windowWord} is "${top.key}" at ${top.spend_share_pct}% of spend ` +
+        `(${money(top.spend, currency)}${top.kpi != null ? `, ${kpiLabel} ${top.kpi}` : ''}).`,
+    );
+  }
+  if (knownShare === 0) {
+    summaryParts.push(
+      `Nothing at all went to people who already know you: the segments exist and no budget is running against them.`,
+    );
+  } else if (beatsCold && bestKnown) {
+    summaryParts.push(
+      `"${bestKnown.key}" carries ${bestKnown.spend_share_pct}% of spend at ${kpiLabel} ${bestKnown.kpi}, against ${newSegment?.kpi} for the cold half.`,
+    );
+  }
+
+  const signal = knownShare === 0 || beatsCold;
+  return {
+    summary: summaryParts.join(' '),
+    ...(knownShare === 0
+      ? {
+          next_step:
+            `Run one small ad set against the people who already know you and compare its ${kpiLabel} to the ${newSegment?.kpi ?? 'cold'} you pay now. ` +
+            `A business spending everything on strangers is either growing on purpose or forgetting to ask its own customers twice.`,
+        }
+      : beatsCold && bestKnown
+        ? {
+            next_step: `Move a step of budget toward "${bestKnown.key}" and re-read this in two weeks: it is buying results at ${kpiLabel} ${bestKnown.kpi} on ${bestKnown.spend_share_pct}% of spend.`,
+          }
+        : {}),
+    data: {
+      window_days: windowDays,
+      widened: !!inp.widened,
+      signal,
+      segments_defined: true,
+      kpi_mode: mode,
+      kpi_label: kpiLabel,
+      currency,
+      total_spend: Math.round(totalSpend),
+      new_audience_spend_share_pct: newSegment ? newShare : null,
+      known_audience_spend_share_pct: knownShare,
+      segments,
+    },
+    derivation:
+      `One account-level insights read for ${windowWord}, split by Meta's own audience-segment key, with each key's spend, results and ${kpiLabel}. ` +
+      `Keys are placed into "never heard of you", "engaged before" and "already bought" by the words in the key itself; a key we cannot place is reported under its own name rather than folded into a bucket. ` +
+      `Shares are of the spend in this window only.`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// M. Pixel health — what the tracking is set up to send (docs/decisions/0066
+//    on the Tinkers side: no invented match-quality score, ever)
+// ---------------------------------------------------------------------------
+
+export interface PixelLite {
+  id: string;
+  name: string | null;
+  /** ISO instant of the last event received, when the provider reports one. */
+  last_fired_time: string | null;
+  automatic_matching_enabled: boolean | null;
+  automatic_matching_fields: string[];
+  /** Null whenever nothing was measured. A null rate is never mentioned. */
+  match_rate_approx: number | null;
+  /** The provider's own checks, with its own result word. */
+  diagnostics: Array<{ key: string; title: string; result: string }>;
+}
+
+export interface PixelHealthInputs {
+  pixels: PixelLite[];
+  /** The run day, so "last fired" can be stated in days. */
+  asOf: string;
+}
+
+/** A rate reported as a fraction on the node and as a percentage elsewhere. */
+function matchRatePct(value: number): number {
+  return r1(value <= 1 ? value * 100 : value);
+}
+
+/**
+ * What the account's tracking is set up to send, and what Meta says about it.
+ *
+ * There is deliberately NO score here. `event_match_quality` is not a field on
+ * this node, the approximate match rate is null whenever nothing was measured,
+ * and the diagnostics are a pass/fail checklist carrying Meta's own result
+ * word. A grade would be the most quotable wrong thing an audit could say about
+ * somebody's tracking, so the section reports the settings, the recency and the
+ * named checks that are not passing, and nothing else.
+ */
+export function computePixelHealth(inp: PixelHealthInputs): PackSection {
+  const asOfDay = String(inp.asOf).slice(0, 10);
+  const daysSince = (iso: string | null): number | null => {
+    if (!iso) return null;
+    const then = Date.parse(iso);
+    if (!Number.isFinite(then)) return null;
+    return Math.max(0, Math.round((Date.parse(`${asOfDay}T00:00:00Z`) - then) / 86_400_000));
+  };
+
+  if (inp.pixels.length === 0) {
+    return {
+      summary:
+        `Meta lists no pixel on this ad account, so nothing that happens after the click is measured here and every optimization runs on the click alone.`,
+      next_step:
+        `Create a pixel in Events Manager and put it on the site, then point the ad sets at the event that matters (a purchase or a lead). Until it exists there is no cost per result to optimize toward.`,
+      data: { signal: true, pixels: [], pixel_count: 0 },
+      derivation: `One read of the ad account's own pixel list. An empty list is the account having no pixel attached, not a read that failed: a failed read is reported as a failed read.`,
+    };
+  }
+
+  const rows = inp.pixels.map((p) => {
+    const failing = p.diagnostics.filter((d) => d.result.toLowerCase() !== 'passed');
+    return {
+      id: p.id,
+      name: p.name,
+      advanced_matching: p.automatic_matching_enabled,
+      advanced_matching_fields: p.automatic_matching_fields,
+      advanced_matching_field_count: p.automatic_matching_fields.length,
+      last_fired_days_ago: daysSince(p.last_fired_time),
+      match_rate_pct: p.match_rate_approx != null ? matchRatePct(p.match_rate_approx) : null,
+      failing_checks: failing.map((d) => ({ title: d.title || d.key, result: d.result })),
+      checks_read: p.diagnostics.length,
+    };
+  });
+
+  // The pixel that fired most recently is the one the account is actually
+  // running on; an older one is usually a leftover from a previous site.
+  const primary =
+    [...rows].sort((a, b) => (a.last_fired_days_ago ?? Number.MAX_SAFE_INTEGER) - (b.last_fired_days_ago ?? Number.MAX_SAFE_INTEGER))[0]!;
+  const primaryName = primary.name ? `"${primary.name}"` : `the pixel on this account`;
+
+  const parts: string[] = [];
+  parts.push(
+    rows.length === 1
+      ? `${primaryName} is the one pixel on this account.`
+      : `${primaryName} is the most recently active of the ${rows.length} pixels on this account.`,
+  );
+  if (primary.advanced_matching === true) {
+    parts.push(
+      primary.advanced_matching_field_count > 0
+        ? `Advanced Matching is on and sending ${primary.advanced_matching_field_count} customer field${primary.advanced_matching_field_count === 1 ? '' : 's'} (${primary.advanced_matching_fields.join(', ')}), which is what lets Meta match a sale back to the person who saw the ad.`
+        : `Advanced Matching is on and Meta reports no fields against it, so nothing extra is being matched.`,
+    );
+  } else if (primary.advanced_matching === false) {
+    parts.push(
+      `Advanced Matching is off, so Meta only matches a conversion when the browser hands it enough on its own. Every unmatched sale is a sale your ads do not get credited with.`,
+    );
+  } else {
+    parts.push(`Meta did not say whether Advanced Matching is on, so this report does not claim either way.`);
+  }
+  if (primary.last_fired_days_ago === null) {
+    parts.push(`Meta reports no last-fired time for it, so the recency of the last event is not on record.`);
+  } else if (primary.last_fired_days_ago === 0) {
+    parts.push(`It last received an event today.`);
+  } else {
+    parts.push(
+      `It last received an event ${primary.last_fired_days_ago} day${primary.last_fired_days_ago === 1 ? '' : 's'} ago.`,
+    );
+  }
+  if (primary.match_rate_pct != null) {
+    parts.push(`Meta puts its approximate match rate at ${primary.match_rate_pct}%.`);
+  }
+  const failing = rows.flatMap((r) => r.failing_checks.map((c) => ({ ...c, pixel: r.name ?? r.id })));
+  if (failing.length > 0) {
+    const named = failing.slice(0, 3).map((c) => `"${c.title}" (${c.result})`).join(', ');
+    parts.push(
+      `${failing.length} of Meta's own checks on ${failing.length === 1 ? 'it' : 'these pixels'} is not passing: ${named}. Those are Meta's words for its own checks, carried over unchanged.`,
+    );
+  } else if (rows.some((r) => r.checks_read > 0)) {
+    parts.push(`Every check Meta runs on it comes back passed.`);
+  }
+
+  const stale = primary.last_fired_days_ago != null && primary.last_fired_days_ago >= 7;
+  const signal = primary.advanced_matching === false || failing.length > 0 || stale;
+  const nextStep =
+    primary.advanced_matching === false
+      ? `Turn Advanced Matching on in Events Manager and let it send email and phone where the site already collects them. It is a settings change, and it usually recovers conversions the pixel is currently dropping.`
+      : failing.length > 0
+        ? `Open Events Manager and work through the check Meta names first: "${failing[0]!.title}". Every one of these is Meta telling you a specific thing about the setup, in its own words.`
+        : stale
+          ? `Nothing has reached this pixel in ${primary.last_fired_days_ago} days. Fire a test event from the site and confirm it lands, because a silent pixel makes every cost per result in this report a floor.`
+          : '';
+
+  return {
+    summary: parts.join(' '),
+    ...(nextStep ? { next_step: nextStep } : {}),
+    data: {
+      signal,
+      pixel_count: rows.length,
+      pixels: rows,
+      // Named so nobody adds one later: this section carries no score.
+      match_quality_score: null,
+    },
+    derivation:
+      `One read of the ad account's pixels: whether Advanced Matching is on and which customer fields it sends, when each pixel last received an event, ` +
+      `and Meta's own diagnostic checks with their result word carried verbatim. There is deliberately no match-quality score: Meta does not expose one on this node, ` +
+      `and the approximate match rate is only stated when Meta measured one.`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// N. Launching and testing — how much new creative ships, and how far each
+//    test gets before it stops
+// ---------------------------------------------------------------------------
+
+/** One ad's whole read, as the six-month inventory holds it. */
+export interface LaunchAdSpan {
+  ad_id: string;
+  ad_name: string | null;
+  spend: number;
+  first_spend_date: string | null;
+  last_spend_date: string | null;
+}
+
+export interface LaunchDisciplineInputs {
+  ads: LaunchAdSpan[];
+  /** Account spend per calendar month, ascending, from the six-month read. */
+  monthlySpend: Array<{ month: string; spend: number }>;
+  /** The window's last day: an ad still spending on it has not stopped. */
+  anchorDate: string;
+  currency: string;
+  /** The owner's own stated cost per result, when they gave one. */
+  costTarget: { metric: string; value: number } | null;
+  resultNoun: string;
+}
+
+/**
+ * The launch expectation, and it is a PLANNING RULE rather than a measurement:
+ * about one new ad a month per 3,000 of monthly spend, never fewer than two.
+ * Currency-naive, like every other floor in this file. It is stated in the
+ * section as what it is, because a benchmark a reader cannot source is a
+ * number they cannot argue with.
+ */
+export const SPEND_PER_NEW_AD = 3_000;
+export const MIN_NEW_ADS_PER_MONTH = 2;
+
+/** A test is fair once it has had about three times the target cost per result. */
+export const FAIR_TEST_TARGET_MULTIPLE = 3;
+
+export function computeLaunchDiscipline(inp: LaunchDisciplineInputs): PackSection {
+  const months = [...inp.monthlySpend].sort((a, b) => a.month.localeCompare(b.month));
+  // The read's FIRST month is dropped from the cadence: every ad already
+  // running when the window opens has its first spending day inside it, so that
+  // month reports launches that are really just the account's existing ads.
+  const judged = months.slice(1);
+  if (judged.length < 2) {
+    return {
+      summary: `The read covers too few months to judge a launch cadence: a rhythm needs at least two full months after the first one, which only shows the ads that were already running.`,
+      data: { signal: false, months: [], window_months: months.length },
+      warnings: ['Not enough monthly history for a launch cadence — read suppressed rather than guessed.'],
+    };
+  }
+
+  const monthOf = (date: string | null): string | null => (date ? date.slice(0, 7) : null);
+  const launchesByMonth = new Map<string, string[]>();
+  for (const ad of inp.ads) {
+    const month = monthOf(ad.first_spend_date);
+    if (!month) continue;
+    const list = launchesByMonth.get(month) ?? [];
+    list.push(ad.ad_name ?? ad.ad_id);
+    launchesByMonth.set(month, list);
+  }
+
+  const rows = judged.map((m) => {
+    const launched = launchesByMonth.get(m.month)?.length ?? 0;
+    const expected = Math.max(MIN_NEW_ADS_PER_MONTH, Math.round(m.spend / SPEND_PER_NEW_AD));
+    return { month: m.month, spend: Math.round(m.spend), launched, expected, short: launched < expected };
+  });
+
+  const totalLaunched = rows.reduce((s, r) => s + r.launched, 0);
+  const avgLaunched = r1(totalLaunched / rows.length);
+  const avgSpend = rows.reduce((s, r) => s + r.spend, 0) / rows.length;
+  const avgExpected = Math.max(MIN_NEW_ADS_PER_MONTH, Math.round(avgSpend / SPEND_PER_NEW_AD));
+  const shortMonths = rows.filter((r) => r.short).length;
+
+  // The fair-test bar only exists when the owner gave us a target: three times
+  // a number nobody stated is three times nothing.
+  const fairTestBar = inp.costTarget ? inp.costTarget.value * FAIR_TEST_TARGET_MULTIPLE : null;
+  const unfairlyTested = fairTestBar
+    ? inp.ads.filter(
+        (a) =>
+          a.spend > 0 &&
+          a.spend < fairTestBar &&
+          a.last_spend_date != null &&
+          a.last_spend_date < inp.anchorDate,
+      )
+    : [];
+
+  const parts: string[] = [];
+  parts.push(
+    `Across the ${rows.length} full months in this read you launched ${totalLaunched} new ad${totalLaunched === 1 ? '' : 's'}, ` +
+      `about ${avgLaunched} a month on ${money(avgSpend, inp.currency)} of monthly spend.`,
+  );
+  parts.push(
+    shortMonths > 0
+      ? `At one new ad per ${money(SPEND_PER_NEW_AD, inp.currency)} of monthly spend, with a floor of ${MIN_NEW_ADS_PER_MONTH} a month, that spend calls for about ${avgExpected}. ` +
+          `${shortMonths} of the ${rows.length} months came in under it. That number is the rate this desk plans to, not a measurement of your account.`
+      : `At one new ad per ${money(SPEND_PER_NEW_AD, inp.currency)} of monthly spend, with a floor of ${MIN_NEW_ADS_PER_MONTH} a month, that spend calls for about ${avgExpected}, and every month in the read clears it. ` +
+          `That number is the rate this desk plans to, not a measurement of your account.`,
+  );
+  if (fairTestBar != null && unfairlyTested.length > 0) {
+    parts.push(
+      `${unfairlyTested.length} ad${unfairlyTested.length === 1 ? '' : 's'} never got a fair test: ${unfairlyTested.length === 1 ? 'it' : 'each'} stopped spending having taken under ` +
+        `${money(fairTestBar, inp.currency)}, which is ${FAIR_TEST_TARGET_MULTIPLE} times the ${money(inp.costTarget!.value, inp.currency)} per ${inp.resultNoun} you told us you want. ` +
+        `Under that much spend one result is luck and none is not evidence.`,
+    );
+  }
+
+  const signal = shortMonths > rows.length / 2 || unfairlyTested.length > 0;
+  return {
+    summary: parts.join(' '),
+    ...(signal
+      ? {
+          next_step:
+            unfairlyTested.length > 0 && shortMonths > rows.length / 2
+              ? `Two things, in this order: launch about ${avgExpected} genuinely different ads a month at this spend, and give each one ${money(fairTestBar ?? 0, inp.currency)} before you judge it. Fewer tests, each funded properly, beats more tests nobody can read.`
+              : unfairlyTested.length > 0
+                ? `Give each new ad ${money(fairTestBar ?? 0, inp.currency)} before you decide about it. Stopping earlier than that is paying for a test and throwing away the answer.`
+                : `Raise the launch rate to about ${avgExpected} genuinely different ads a month at this spend. At one winner per twenty tests, the number of tests is what decides how many winners you get.`,
+        }
+      : {}),
+    data: {
+      signal,
+      window_months: months.length,
+      months_judged: rows.length,
+      months: rows,
+      launched_total: totalLaunched,
+      launched_per_month: avgLaunched,
+      expected_per_month: avgExpected,
+      months_below_expectation: shortMonths,
+      spend_per_new_ad_benchmark: SPEND_PER_NEW_AD,
+      min_new_ads_per_month: MIN_NEW_ADS_PER_MONTH,
+      fair_test_bar: fairTestBar,
+      fair_test_target_multiple: fairTestBar != null ? FAIR_TEST_TARGET_MULTIPLE : null,
+      ads_without_fair_test: unfairlyTested.length,
+      ads_without_fair_test_names: unfairlyTested.slice(0, 8).map((a) => a.ad_name ?? a.ad_id),
+      currency: inp.currency,
+    },
+    derivation:
+      `Every ad in the six-month read is dated by its FIRST spending day, which is when it launched as far as delivery is concerned, and counted into that month. ` +
+      `The read's first month is left out of the cadence: every ad already running when the window opens has its first spending day inside it, which would report old ads as new ones. ` +
+      `The expectation is one new ad per ${money(SPEND_PER_NEW_AD, inp.currency)} of that month's own spend with a floor of ${MIN_NEW_ADS_PER_MONTH} a month. ` +
+      `It is a planning rate this desk works to, currency-naive like the other floors in this report, and it is not derived from your account.` +
+      (fairTestBar != null
+        ? ` A fair test is ${FAIR_TEST_TARGET_MULTIPLE} times your own stated ${money(inp.costTarget!.value, inp.currency)} per ${inp.resultNoun}: an ad that stopped spending under that has not been given enough to read.`
+        : ` No cost target was given, so no fair-test bar is claimed and no ad is counted as under-tested.`),
   };
 }

@@ -266,6 +266,10 @@ export function buildColdRows(input: BuildColdRowsInput): ColdRows {
       hook_rate: n.hook_rate,
       hold_rate: n.hold_rate,
       leads: n.leads,
+      // Per-ad link clicks ride along on this path (the warehouse ad-level
+      // select has no column for them). It is what lets the fatigue read say an
+      // ad was watched and never clicked; absent, that check stays quiet.
+      link_clicks: n.link_clicks,
     }));
 
   const packRows180 = norm

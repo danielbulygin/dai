@@ -41,6 +41,16 @@ export interface PackAdRow {
    * result 30,480" = raw spend before this fallback, 2026-07-02).
    */
   leads?: number | null;
+  /**
+   * Ad-level link clicks, on the paths that have them per ad (the cold and
+   * bridged pulls extract `actions[link_click]`; the warehouse ad-level select
+   * does not carry a column for it).
+   *
+   * OPTIONAL and undefined-means-unread, never zero: the attention read below
+   * asks whether an ad was watched and not clicked, and an unread click count
+   * arriving as 0 would answer yes about every ad on a warehouse account.
+   */
+  link_clicks?: number | null;
 }
 
 export interface PackAccountRow {
@@ -299,6 +309,73 @@ export interface DraggingAd {
  */
 export const FATIGUE_FLOOR_CAP = 2_500;
 export const CONCEPT_FLOOR_CAP = 5_000;
+
+/**
+ * An ad that never found traction: old enough to have had its chance, never
+ * funded past the assessment floor, and never a single measured result.
+ *
+ * It is deliberately NOT a fatigue class. Fatigue is a number coming down from
+ * somewhere, and these ads never got up: they are invisible to the trend read
+ * (they never clear its floor) and to the suppressed-no-result count (which is
+ * for ads that DID clear it), so before this they were simply not in the report
+ * at all — which is how an account launches thirty ads, funds four and hears
+ * nothing about the other twenty-six.
+ */
+export interface DeadOnArrivalAd {
+  ad_id: string;
+  ad_name: string;
+  spend: number;
+  /** Days from its first spending day to its last, inside the window. */
+  age_days: number;
+  spend_days: number;
+  last_spend_date: string | null;
+}
+
+/** Minimum age before "it never got going" is a verdict rather than impatience. */
+export const DEAD_ON_ARRIVAL_MIN_DAYS = 5;
+
+/**
+ * An ad people watched and did not click: the plays are there, the link clicks
+ * are not. It reads as entertainment rather than as an ad, and it is only
+ * checkable where the rows carry per-ad link clicks.
+ */
+export interface AttentionWithoutActionAd {
+  ad_id: string;
+  ad_name: string;
+  spend: number;
+  impressions: number;
+  video_plays: number;
+  play_rate_pct: number;
+  link_clicks: number;
+  click_rate_pct: number;
+}
+
+export const ATTENTION_MIN_IMPRESSIONS = 1_000;
+/** Watched: three-second plays on at least this share of impressions. */
+export const ATTENTION_MIN_PLAY_RATE = 0.15;
+/** And not clicked: link clicks on at most this share of impressions. */
+export const ATTENTION_MAX_CLICK_RATE = 0.002;
+
+/**
+ * One ad's plays and link clicks, or null when the rows do not carry clicks at
+ * all. Null is the honest answer for the warehouse ad-level select, which has
+ * no per-ad click column: reading an absent count as zero would report every ad
+ * on the account as watched and never clicked.
+ */
+function readAttention(rows: PackAdRow[]): { impressions: number; plays: number; linkClicks: number } | null {
+  if (!rows.some((r) => typeof r.link_clicks === 'number')) return null;
+  let impressions = 0;
+  let plays = 0;
+  let linkClicks = 0;
+  for (const r of rows) {
+    impressions += r.impressions || 0;
+    // hook_rate is plays ÷ impressions as a fraction, so this recovers the count
+    // the rate was made from rather than needing a second column for it.
+    if (typeof r.hook_rate === 'number' && r.hook_rate > 0) plays += r.hook_rate * (r.impressions || 0);
+    if (typeof r.link_clicks === 'number') linkClicks += r.link_clicks;
+  }
+  return { impressions, plays: Math.round(plays), linkClicks };
+}
 const cappedFloor = (base: number, relative: number, cap: number): number =>
   Math.max(base, Math.min(relative, cap));
 
@@ -342,11 +419,56 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currenc
 
   const ads: FatigueAd[] = [];
   let suppressedNoResults = 0;
+  const deadOnArrival: DeadOnArrivalAd[] = [];
+  const attentionWithoutAction: AttentionWithoutActionAd[] = [];
+  const assessmentFloor = cappedFloor(200, totalSpend * 0.01, FATIGUE_FLOOR_CAP);
   for (const [adId, list] of byAd.entries()) {
     const spend = list.reduce((s, r) => s + r.spend, 0);
     const days = [...new Set(list.map((r) => r.date))].sort();
+    const adName = list.find((r) => r.ad_name)?.ad_name ?? adId;
+    const spentDays = [...new Set(list.filter((r) => (r.spend || 0) > 0).map((r) => r.date))].sort();
+    const ageDays = Math.max(
+      1,
+      Math.round((Date.parse(days[days.length - 1]!) - Date.parse(days[0]!)) / 86_400_000) + 1,
+    );
+
+    // Watched and not clicked. Judged on real money only, and only where the
+    // rows carry link clicks at all.
+    const attention = spend >= assessmentFloor ? readAttention(list) : null;
+    if (attention && attention.impressions >= ATTENTION_MIN_IMPRESSIONS) {
+      const playRate = attention.plays / attention.impressions;
+      const clickRate = attention.linkClicks / attention.impressions;
+      if (playRate >= ATTENTION_MIN_PLAY_RATE && clickRate <= ATTENTION_MAX_CLICK_RATE) {
+        attentionWithoutAction.push({
+          ad_id: adId,
+          ad_name: adName,
+          spend: Math.round(spend),
+          impressions: attention.impressions,
+          video_plays: attention.plays,
+          play_rate_pct: r1(playRate * 100),
+          link_clicks: attention.linkClicks,
+          click_rate_pct: r2(clickRate * 100),
+        });
+      }
+    }
+
     // Statistical floor: enough days AND enough money to say anything.
-    if (days.length < 10 || spend < cappedFloor(200, totalSpend * 0.01, FATIGUE_FLOOR_CAP)) continue;
+    if (days.length < 10 || spend < assessmentFloor) {
+      // The ads under that floor are not all the same. One that ran long enough
+      // to be read, never got past the floor and never produced a result never
+      // found traction, and saying so is the only way it appears in the report.
+      if (ageDays >= DEAD_ON_ARRIVAL_MIN_DAYS && spend > 0 && list.reduce((s, r) => s + resultOf(r), 0) === 0) {
+        deadOnArrival.push({
+          ad_id: adId,
+          ad_name: adName,
+          spend: Math.round(spend),
+          age_days: ageDays,
+          spend_days: spentDays.length,
+          last_spend_date: spentDays.length ? spentDays[spentDays.length - 1]! : null,
+        });
+      }
+      continue;
+    }
     // A cpr-mode ad with no mapped result anywhere in the window has no trend to
     // read: both halves rate 0.00, which files a 60-day ad as "evergreen" on flat
     // nothing. Leave it out and report the count instead of plotting the zero.
@@ -373,10 +495,6 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currenc
     const h1 = rate(sorted.slice(0, mid));
     const h2 = rate(sorted.slice(mid));
     const trendPct = h1 > 0 ? r1(((h2 - h1) / h1) * 100) : 0;
-    const ageDays = Math.max(
-      1,
-      Math.round((Date.parse(days[days.length - 1]!) - Date.parse(days[0]!)) / 86_400_000) + 1,
-    );
     // The half-window mean LAGS where the ad is NOW — a steady decliner can
     // average 1.65 while sitting at 1.2 today. Classify + runway off the
     // recent level (last 14 active days), trend off the halves.
@@ -447,7 +565,7 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currenc
 
     ads.push({
       ad_id: adId,
-      ad_name: list.find((r) => r.ad_name)?.ad_name ?? list[0]!.ad_id,
+      ad_name: adName,
       spend: Math.round(spend),
       in_window_age_days: ageDays,
       kpi_first_half: r2(h1),
@@ -565,6 +683,25 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currenc
       `${evergreens.length} evergreen winner${evergreens.length > 1 ? 's' : ''} (${evergreenShare}% of ${assessedWord}), the biggest "${biggestEvergreen.ad_name}", running 60+ days with the number holding. Protect these; do not "refresh" them.`,
     );
   }
+  // A separate class of ad and a separate sentence: these never came down from
+  // anywhere, so calling them fatiguing would be wrong in both directions.
+  const deadSpend = deadOnArrival.reduce((s, a) => s + a.spend, 0);
+  if (deadOnArrival.length) {
+    const biggestDead = [...deadOnArrival].sort((a, b) => b.spend - a.spend)[0]!;
+    summaryParts.push(
+      `${deadOnArrival.length} ad${deadOnArrival.length > 1 ? 's' : ''} never found traction: ${deadOnArrival.length > 1 ? 'each ran' : 'it ran'} for at least ${DEAD_ON_ARRIVAL_MIN_DAYS} days, ` +
+        `never got past ${money(assessmentFloor, currency)} of spend and never produced a measured result${deadOnArrival.length > 1 ? `, ${money(deadSpend, currency)} between them` : ''}. ` +
+        `The biggest is "${biggestDead.ad_name}" at ${money(biggestDead.spend, currency)} over ${biggestDead.age_days} days. That is a different problem from fatigue: these never got going.`,
+    );
+  }
+  if (attentionWithoutAction.length) {
+    const worst = [...attentionWithoutAction].sort((a, b) => b.spend - a.spend)[0]!;
+    summaryParts.push(
+      `${attentionWithoutAction.length} ad${attentionWithoutAction.length > 1 ? 's were' : ' was'} watched and not clicked: "${worst.ad_name}" got ${worst.video_plays.toLocaleString('en-US')} three-second plays on ` +
+        `${worst.impressions.toLocaleString('en-US')} impressions (${worst.play_rate_pct}%) and ${worst.link_clicks} link click${worst.link_clicks === 1 ? '' : 's'} (${worst.click_rate_pct}%), on ${money(worst.spend, currency)} of spend. ` +
+        `That is entertainment people sat through, not an ad that asked them for anything.`,
+    );
+  }
 
   // The style-guide clause only exists when there IS an evergreen list: the live
   // report pointed a reader at one on an account with zero evergreen rows.
@@ -593,7 +730,11 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currenc
         : `Brief replacements for the fatiguing ad(s) now, starting with "${(dragging[0] ?? fatiguing[0]!).ad_name}"${evergreenGuideWord}.`
       : unconfirmed.length
         ? `Nothing is confirmed fatiguing yet, so don't cut anything on this chapter alone. Watch "${unconfirmed[0]!.ad_name}" and re-read this in two weeks, when its confirmation window is long enough to settle it.`
-        : `Nothing to refresh on trend. Re-check in 30 days: the runway math only means something when the decline is real.`,
+        : deadOnArrival.length
+          ? `Nothing is fatiguing. The decision to make is about the ${deadOnArrival.length} ad${deadOnArrival.length > 1 ? 's' : ''} that never found traction: fund one of them properly or turn ${deadOnArrival.length > 1 ? 'them' : 'it'} off, because at ${money(assessmentFloor, currency)} nothing can be learned either way.`
+          : attentionWithoutAction.length
+            ? `Nothing is fatiguing. Rework the ask on "${attentionWithoutAction[0]!.ad_name}": people are watching it and not clicking, so the hook is doing its job and the rest of the ad is not.`
+            : `Nothing to refresh on trend. Re-check in 30 days: the runway math only means something when the decline is real.`,
     data: {
       window_days: 90,
       kpi_mode: mode,
@@ -619,8 +760,20 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currenc
       currency: currency || undefined,
       ads_suppressed_no_results: suppressedNoResults || undefined,
       // A 25%+ decline the confirmation test could not confirm is still a
-      // finding: the section that reports one carries an action row.
-      signal: fatiguing.length > 0 || unconfirmed.length > 0,
+      // finding: the section that reports one carries an action row. So is an ad
+      // that never got going, and so is one people watch without clicking.
+      signal:
+        fatiguing.length > 0 ||
+        unconfirmed.length > 0 ||
+        deadOnArrival.length > 0 ||
+        attentionWithoutAction.length > 0,
+      /** The floor an ad had to clear to be assessed at all, in the account's currency. */
+      assessment_floor: Math.round(assessmentFloor),
+      never_found_traction_count: deadOnArrival.length,
+      never_found_traction_spend: Math.round(deadSpend),
+      never_found_traction: deadOnArrival.sort((a, b) => b.spend - a.spend).slice(0, 10),
+      attention_without_action_count: attentionWithoutAction.length,
+      attention_without_action: attentionWithoutAction.sort((a, b) => b.spend - a.spend).slice(0, 10),
       dragging,
       dragging_note: dragging.length
         ? undefined
@@ -648,7 +801,13 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currenc
       `(half its run when it has been live under 28 days). Because each one is that ad's own average while it was running, these ` +
       `figures do not add up to the account's daily spend and are not meant to. ` +
       `Rows are ranked by real last-30-day spend, the figure each row shows, and an ad that spent nothing in those 30 days states its last spending day instead. ` +
-      `The dragging list ranks the fatiguing ads that are NOT flagged as low-frequency acquisition, and still spending, by their real last-30-day spend.`,
+      `The dragging list ranks the fatiguing ads that are NOT flagged as low-frequency acquisition, and still spending, by their real last-30-day spend. ` +
+      `Separately, every ad UNDER that assessment floor of ${money(assessmentFloor, currency)} was checked for one thing the trend read cannot see: at least ${DEAD_ON_ARRIVAL_MIN_DAYS} days between its first and last day, ` +
+      `spend that never cleared the floor, and no measured result at all. Those are reported as never having found traction, which is a different finding from a number coming down.` +
+      (attentionWithoutAction.length > 0
+        ? ` The watched-and-not-clicked read compares each ad's three-second plays against its link clicks over the same impressions, and only names an ad past ${ATTENTION_MIN_IMPRESSIONS.toLocaleString('en-US')} impressions ` +
+          `with plays on ${Math.round(ATTENTION_MIN_PLAY_RATE * 100)}% of them or more and link clicks on ${ATTENTION_MAX_CLICK_RATE * 100}% or fewer.`
+        : ''),
   };
 }
 
@@ -1697,10 +1856,33 @@ export interface ProvisionalInsight {
   provisional: true;
 }
 
+/**
+ * The scatter's own stored data, for the starved-winner insight. Read rather
+ * than recomputed: the chart already decided which dots are starved, and a
+ * second opinion here could circle an ad the chart does not.
+ */
+export interface ScatterReadForInsights {
+  dots?: Array<{
+    ad_name?: string;
+    spend_30d?: number;
+    roas_30d?: number | null;
+    cpr_30d?: number | null;
+    spend_share_pct?: number;
+    starved?: boolean;
+  }>;
+  kpi_mode?: string;
+  cpr_line?: number;
+  cpr_line_source?: string;
+  result_noun?: string;
+  currency?: string;
+  plotted_set_label?: string;
+}
+
 export function buildProvisionalInsights(
   scorecard: Array<{ dimension: string; band: string; position: string; lever: string; next_step: string; section_key: string }>,
   fatigueData: { ads?: FatigueAd[] } | undefined,
   concentrationData: { top3_share_pct?: number; band?: string; top_ads?: Array<{ ad_name: string; share_pct: number }> } | undefined,
+  scatterData?: ScatterReadForInsights,
 ): ProvisionalInsight[] {
   const out: ProvisionalInsight[] = [];
 
@@ -1740,6 +1922,36 @@ export function buildProvisionalInsights(
       section: 'spend_concentration',
       provisional: true,
     });
+  }
+
+  // The underfunded winner: an ad the chart already circled as doing better
+  // than the line on a small slice of budget. It is the one opportunity in the
+  // report that costs nothing to act on, so it earns a place beside the risks.
+  const starved = (scatterData?.dots ?? []).filter((d) => d.starved === true && typeof d.ad_name === 'string');
+  if (out.length < 3 && starved.length > 0) {
+    const cprMode = scatterData?.kpi_mode !== 'roas';
+    const best = [...starved].sort((a, b) =>
+      cprMode
+        ? (a.cpr_30d ?? Infinity) - (b.cpr_30d ?? Infinity)
+        : (b.roas_30d ?? 0) - (a.roas_30d ?? 0),
+    )[0]!;
+    const noun = scatterData?.result_noun ?? 'result';
+    const currency = scatterData?.currency ? ` ${scatterData.currency}` : '';
+    const share = typeof best.spend_share_pct === 'number' ? best.spend_share_pct : null;
+    const lineWord =
+      scatterData?.cpr_line != null
+        ? scatterData.cpr_line_source === 'owner_target'
+          ? `your stated target of ${scatterData.cpr_line}${currency}`
+          : `the ${scatterData.cpr_line}${currency} average across ${scatterData.plotted_set_label ?? 'the plotted ads'}`
+        : null;
+    const headline = cprMode
+      ? `"${best.ad_name}" buys a ${noun} for ${best.cpr_30d}${currency}${share != null ? ` on ${share}% of the spend` : ''}`
+      : `"${best.ad_name}" returns ${best.roas_30d}x${share != null ? ` on ${share}% of the spend` : ''}`;
+    const detail = cprMode
+      ? `It is one of the cheapest ads on the chart${lineWord ? ` against ${lineWord}` : ''} and it is getting ${share != null ? `${share}% of` : 'a small slice of'} the budget. ` +
+        `Give it a step more and re-read it: an ad already beating the line is the cheapest place a budget increase can go.`
+      : `It is earning well above the line on ${share != null ? `${share}% of` : 'a small slice of'} the budget. Give it a step more and re-read it before assuming it saturates.`;
+    out.push({ headline, detail, severity: 'opportunity', section: 'budget_scatter', provisional: true });
   }
 
   // Fallbacks so the strip still says something real on a healthy account.
