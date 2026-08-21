@@ -3332,14 +3332,18 @@ export async function runMagicAudit(
     } catch (err) {
       logger.warn({ err, auditId }, 'work ledger build failed (report still valid)');
     }
-    await updateRow({
-      recognition: {
-        ...recognition,
-        ...((rowState.recognition as object) ?? {}),
-        ...(connection ? { connection } : {}),
-        ...(work.length ? { work: anchorWords(work) } : {}),
-      },
-    });
+    // Nothing new to say means no write: a recognition patch with no new key
+    // is a redundant row update AND a redundant partial over the bridge.
+    if (connection || work.length) {
+      await updateRow({
+        recognition: {
+          ...recognition,
+          ...((rowState.recognition as object) ?? {}),
+          ...(connection ? { connection } : {}),
+          ...(work.length ? { work: anchorWords(work) } : {}),
+        },
+      });
+    }
   }
 
   await updateRow({ status: anyError ? 'error' : 'complete', cost_usd: round2(meter.spentUsd) });
