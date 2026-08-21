@@ -107,11 +107,6 @@ export function shortDay(iso: string): string {
   return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]}`;
 }
 
-/** "the 30 days ending 20 Jul", or "the last 30 days" when nothing is anchored. */
-export function windowPhrase(w: AuditWindow, days: 30 | 90): string {
-  return w.anchored ? `the ${days} days ending ${shortDay(w.anchorDate)}` : `the last ${days} days`;
-}
-
 /**
  * The one sentence the page states at the top when the window is anchored. It
  * has to name the date, because "the last 30 days" and "the 30 days ending

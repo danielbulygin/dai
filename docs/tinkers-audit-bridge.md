@@ -186,8 +186,99 @@ gets the old behavior exactly; `tests/magic-audit-row-mirror.test.ts` runs the
 same audit with and without the option and asserts the sequence of writes to
 `magic_audits` is identical.
 
-Nothing else in `magic-audit.ts` was touched: no section, no prompt, no cost
-meter, no ordering.
+Nothing about the section list, the cost meter or the ordering changed with the
+bridge. The reading window and the work ledger below are later changes and are
+described on their own.
+
+## The reading window (anchored to the last spending day)
+
+Every "30d" figure used to end on the calendar day the run happened. That reads
+correctly for an account spending today and wrongly for every other one: an
+account that stopped in July came out with no ads, no winners, no concentration
+and no funnel, which is a report about our calendar rather than about their
+business. Connected accounts with nothing in the last 30 days and real money
+spent earlier are common, so `audit-window.ts` decides the window instead:
+
+* `lastSpendDate` = the newest day the ACCOUNT spent anything, off the pull.
+* Inside a **three-day grace window**, nothing changes: `anchorDate` is today
+  and every figure is byte-identical to what it was. A weekend lull must not
+  churn a live account's numbers.
+* Past the grace window the account is **anchored**: the 30-day and 90-day
+  reads end on `lastSpendDate` and count back from there, and a window that
+  ends at the anchor also STOPS there (an impressions-only day afterwards is
+  not inside "the 30 days ending 20 Jul").
+* The **six-month read stays on the calendar**. It exists to place creative in
+  time, and sliding it back with the anchor would claim newer creative than the
+  account has.
+* The **warehouse path is deliberately not anchored**: its 30-day account rows
+  come from a 30-day query, so anchoring only the ad-level half would leave the
+  funnel and the concentration read sitting on different days.
+
+An anchored report says so in three places, and nowhere else (the page states a
+window once, at the top):
+
+1. `recognition` carries the window as fields plus one sentence.
+2. Every synthesis system prompt carries `anchoredWindowBrief`, so no section
+   writes "in the last 30 days", "currently" or "right now" about the numbers.
+3. `anchorWindowWords` rewrites the calendar phrasing inside FINISHED strings
+   (sections, scorecard, lead insights, work log) into "the 30 days ending
+   20 Jul". It is a no-op when nothing is anchored.
+
+### One pull, six months
+
+`fetchTinkersAdDays` pulls `SIX_MONTH_DAYS` (183) in 31-day slices: still SIX
+requests, so the wider read costs the same round trips the old 180/30 tiling
+did, and every window the audit reads is a filter over those same rows. The old
+tiling never reached its own 180-day floor (the last slice stopped at 179), so
+the six-month read was short of the window it claimed. `creative-media` is asked
+for the top spenders of the CORE window, which on a dormant account is not the
+last calendar month.
+
+`buildColdRows` also returns `sixMonthAds` (one row per ad: spend, spend inside
+the core window, results, first and last spending day, spend days) and `adNames`
+across the whole pull. That is what lets the creative section report an ad that
+**earned before and is not running now** with its own dates and its own cost per
+result, instead of dropping it because it did not spend this month. On a dormant
+account that category IS the creative story. Ads under 1% of the six-month spend
+are left out of the list as noise; the count and the total still state them.
+
+### `recognition` wire shape
+
+```jsonc
+{
+  "window_days": 90, "days_covered": 26, "spend_90d": 4820, "currency": "EUR",
+  "ads_count": 12,                       // lands seconds in
+  "data_window": "26 of the 30 days ending 20 Jul carry data",
+  "lens": "lead_gen", "read_as": "…",    // unchanged
+  "connection": "…",                     // unchanged, last to land
+
+  // the window, always present on the cold + bridged paths
+  "last_spend_date": "2026-07-20",       // null when the account never spent
+  "window_start": "2026-06-20",          // first day of the core window
+  "window_end": "2026-07-20",            // === today when not anchored
+  "window_anchored": true,
+  "window_note": "This account last spent on 20 Jul. Every 30-day figure reads the 30 days ending there, not the calendar month just gone.",
+                                         // ABSENT when window_anchored is false
+
+  // the settled work ledger (see below)
+  "work": [{ "line": "Read 42 ads across 183 days of delivery history", "n": 42 }]
+}
+```
+
+## The work ledger (`recognition.work`)
+
+`workLog` is the live feed: timestamped lines, ordered by when things happened,
+built for a progress narration while the run cooks. `recognition.work` is the
+other half, the settled summary the page shows once the report stops moving: at
+most **14** `{ line, n }` rows, deterministic, ordered by what a reader cares
+about rather than by clock time.
+
+Every row is derived from evidence the run left behind, and that is the whole
+constraint. A skipped walker means no "opened your landing page" row. A section
+that errored contributes nothing. The scorecard count is read off what was
+actually written to the row. `work` is absent when there is nothing to claim.
+Built by `buildWorkLedger` (pure, `work-ledger.ts`) and fail-soft at the call
+site, because a receipt is worth less than the report it describes.
 
 ## The owner's own answers
 
