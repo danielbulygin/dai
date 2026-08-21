@@ -103,8 +103,16 @@ vi.stubGlobal('fetch', async (url: string, init?: { method?: string; headers?: R
 });
 
 import { runBridgedColdAudit } from '../src/audit/tinkers-bridge.js';
+import { seamGapFor } from '../src/audit/tinkers-reads.js';
 import {
+  fetchTinkersActivity,
   fetchTinkersAdDays,
+  fetchTinkersAdSets,
+  fetchTinkersAdSetInsights,
+  fetchTinkersBreakdown,
+  fetchTinkersPixels,
+  fetchTinkersTargeting,
+  tinkersSeamReads,
   fetchTinkersDestinations,
   fetchTinkersLeadContext,
   fetchTinkersStoreMedia,
@@ -695,5 +703,161 @@ describe('runBridgedColdAudit idempotency', () => {
     state.responses.length = 0;
     for (let i = 0; i < 12; i += 1) state.responses.push({ json: { received: true, recorded: true } });
     await expect(runBridgedColdAudit({ organizationId: 'org_1', auditId: 'aud_1' })).resolves.toMatchObject({ status: 'complete' });
+  });
+});
+
+describe('the account-structure reads', () => {
+  const adSetsBody = {
+    ok: true,
+    adSets: [
+      { adsetId: 'as_1', name: 'Broad prospecting', effectiveStatus: 'ACTIVE', optimizationGoal: 'OFFSITE_CONVERSIONS', promotedObjectEventType: 'PURCHASE', campaignId: 'c_1' },
+      { adsetId: 'as_2', name: null, effectiveStatus: 'PAUSED', optimizationGoal: null, promotedObjectEventType: null, campaignId: null },
+    ],
+    partial: false,
+  };
+
+  it('every one of them is Bearer authorized, and none of them is signed', async () => {
+    state.reads['ad-sets'] = { json: adSetsBody };
+    state.reads['adset-insights'] = { json: { ok: true, rows: [], partial: false } };
+    state.reads.breakdown = { json: { ok: true, rows: [], partial: false } };
+    state.reads.activity = { json: { ok: true, changes: [], partial: false } };
+    state.reads.targeting = { json: { ok: true, adSets: [], audiences: [], partial: false } };
+    state.reads.pixels = { json: { ok: true, pixels: [], partial: false } };
+
+    await fetchTinkersAdSets('aud_1');
+    await fetchTinkersAdSetInsights('aud_1', { since: '2026-07-21', until: '2026-08-19', granularity: 'total' });
+    await fetchTinkersBreakdown('aud_1', { dimension: 'placement', since: '2026-07-21', until: '2026-08-19' });
+    await fetchTinkersActivity('aud_1', { since: '2026-07-21', until: '2026-08-19' });
+    await fetchTinkersTargeting('aud_1');
+    await fetchTinkersPixels('aud_1');
+
+    expect(state.calls.map((c) => c.url.replace('https://tinkers.test/api/generation/aud_1', ''))).toEqual([
+      '/ad-sets',
+      '/adset-insights?since=2026-07-21&until=2026-08-19&granularity=total',
+      '/breakdown?dimension=placement&since=2026-07-21&until=2026-08-19',
+      '/activity?since=2026-07-21&until=2026-08-19',
+      '/targeting',
+      '/pixels',
+    ]);
+    for (const call of state.calls) {
+      expect(call.method).toBe('GET');
+      expect(call.auth).toBe('Bearer seam-secret');
+      expect(call.signature).toBeNull();
+    }
+  });
+
+  it('hands the ad-set rows over with their nulls intact', async () => {
+    state.reads['ad-sets'] = { json: adSetsBody };
+    const read = await fetchTinkersAdSets('aud_1');
+    expect(read).toEqual({
+      state: 'ok',
+      partial: false,
+      data: [
+        { adsetId: 'as_1', name: 'Broad prospecting', effectiveStatus: 'ACTIVE', optimizationGoal: 'OFFSITE_CONVERSIONS', promotedObjectEventType: 'PURCHASE', campaignId: 'c_1' },
+        { adsetId: 'as_2', name: null, effectiveStatus: 'PAUSED', optimizationGoal: null, promotedObjectEventType: null, campaignId: null },
+      ],
+    });
+  });
+
+  it('surfaces the partial flag rather than reporting a short read as a whole one', async () => {
+    state.reads['ad-sets'] = { json: { ...adSetsBody, partial: true } };
+    state.reads.breakdown = { json: { ok: true, rows: [insightRow()], partial: true } };
+    state.reads.pixels = { json: { ok: true, pixels: [{ id: 'px' }], partial: true } };
+    expect((await fetchTinkersAdSets('aud_1')).partial).toBe(true);
+    expect((await fetchTinkersBreakdown('aud_1', { dimension: 'country', since: '2026-08-01', until: '2026-08-19' })).partial).toBe(true);
+    expect((await fetchTinkersPixels('aud_1')).partial).toBe(true);
+  });
+
+  it('a 404 is the endpoint not being deployed yet, and the section stays PLANNED', async () => {
+    // These six paths ship on Tinkers' own schedule. Until they land, the
+    // sections reading them must be the honest gap they already were, never an
+    // error on a customer's report.
+    for (const read of ['ad-sets', 'adset-insights', 'breakdown', 'activity', 'targeting', 'pixels']) {
+      state.reads[read] = { status: 404, json: { error: { code: 'NOT_FOUND' } } };
+    }
+    const reads = tinkersSeamReads('aud_1');
+    const outcomes = [
+      await reads.adSets(),
+      await reads.adSetInsights({ since: '2026-08-01', until: '2026-08-19', granularity: 'weekly' }),
+      await reads.breakdown({ dimension: 'user_segment', since: '2026-08-01', until: '2026-08-19' }),
+      await reads.activity({ since: '2026-08-01', until: '2026-08-19' }),
+      await reads.targeting(),
+      await reads.pixels(),
+    ];
+    expect(outcomes.map((o) => o.state)).toEqual(Array(6).fill('not_deployed'));
+    for (const outcome of outcomes) expect(seamGapFor(outcome as never, 'the read').status).toBe('planned');
+    expect(state.logs.some((l) => l.includes('not deployed yet'))).toBe(true);
+  });
+
+  it('an ok:false reason SKIPS the section and travels as data', async () => {
+    state.reads.activity = { json: { ok: false, reason: 'activity_read_unsupported' } };
+    state.reads.targeting = { json: { ok: false, reason: 'targeting_read_unsupported' } };
+    state.reads.pixels = { json: { ok: false, reason: 'pixel_read_unsupported' } };
+
+    const activity = await fetchTinkersActivity('aud_1', { since: '2026-08-01', until: '2026-08-19' });
+    const targeting = await fetchTinkersTargeting('aud_1');
+    const pixels = await fetchTinkersPixels('aud_1');
+    expect(activity).toEqual({ state: 'unsupported', reason: 'activity_read_unsupported' });
+    expect(targeting).toEqual({ state: 'unsupported', reason: 'targeting_read_unsupported' });
+    expect(pixels).toEqual({ state: 'unsupported', reason: 'pixel_read_unsupported' });
+
+    // "I cannot see the change history" and "nothing changed" are different
+    // sentences, and this is the one that keeps them apart.
+    const gap = seamGapFor(activity as never, "this account's change history");
+    expect(gap.status).toBe('skipped');
+    expect(gap.data).toMatchObject({ unavailable_reason: 'activity_read_unsupported' });
+  });
+
+  it('a 502, a dead socket and a broken contract are all the honest error', async () => {
+    state.reads.breakdown = { status: 502, json: {} };
+    expect(await fetchTinkersBreakdown('aud_1', { dimension: 'placement', since: '2026-08-01', until: '2026-08-19' })).toMatchObject({ state: 'failed' });
+
+    state.reads.breakdown = { throws: new Error('socket hang up') };
+    expect(await fetchTinkersBreakdown('aud_1', { dimension: 'placement', since: '2026-08-01', until: '2026-08-19' })).toMatchObject({
+      state: 'failed',
+      reason: 'socket hang up',
+    });
+
+    state.reads['ad-sets'] = { json: { ok: true, adSets: [{ name: 'no id' }] } };
+    expect(await fetchTinkersAdSets('aud_1')).toMatchObject({ state: 'failed' });
+  });
+
+  it('a token-shaped upstream failure never reaches a log line or a reason', async () => {
+    state.reads.pixels = { throws: new Error('upstream rejected token EAA-super-secret-token') };
+    const read = await fetchTinkersPixels('aud_1');
+    expect(JSON.stringify(read)).not.toContain('EAA');
+    expect(state.logs.join('\n')).not.toContain('EAA');
+  });
+
+  it('carries the changes and the audiences under the names the mappers read', async () => {
+    state.reads.activity = {
+      json: { ok: true, changes: [{ key: 'k1', at: '2026-08-10T09:00:00Z', kind: 'paused', objectId: 'ad_1', objectType: 'AD', providerEventType: 'update_ad_run_status' }], partial: false },
+    };
+    state.reads.targeting = {
+      json: {
+        ok: true,
+        adSets: [{ adsetId: 'as_1', adsetName: 'LAL 1%', targetingClass: 'broad', signals: {} }],
+        audiences: [{ id: 'aud_1', name: 'Purchasers', subtype: 'website' }],
+        partial: false,
+      },
+    };
+    const activity = await fetchTinkersActivity('aud_1', { since: '2026-08-01', until: '2026-08-19' });
+    expect(activity.state === 'ok' && activity.data).toHaveLength(1);
+    const targeting = await fetchTinkersTargeting('aud_1');
+    expect(targeting.state === 'ok' && targeting.data.adSets).toHaveLength(1);
+    expect(targeting.state === 'ok' && targeting.data.audiences).toHaveLength(1);
+  });
+
+  it('an absent audience list is an empty one, never undefined downstream', async () => {
+    state.reads.targeting = { json: { ok: true, adSets: [], partial: false } };
+    const read = await fetchTinkersTargeting('aud_1');
+    expect(read.state === 'ok' && read.data.audiences).toEqual([]);
+  });
+
+  it('an unconfigured seam fails the read without any call leaving', async () => {
+    state.secret = undefined;
+    const read = await fetchTinkersPixels('aud_1');
+    expect(read.state).toBe('failed');
+    expect(state.calls).toHaveLength(0);
   });
 });

@@ -6,6 +6,17 @@ import { buildColdRows, type RawAdDay } from './cold-source.js';
 import { SIX_MONTH_DAYS } from './audit-window.js';
 import type { StoreMediaCandidate } from './cold-creative-source.js';
 import { runMagicAudit } from './magic-audit.js';
+import {
+  activitySchema,
+  adSetsSchema,
+  insightRowsSchema,
+  pixelsSchema,
+  targetingSchema,
+  type SeamAdSet,
+  type SeamTargeting,
+  type TinkersRead,
+  type TinkersSeamReads,
+} from './tinkers-reads.js';
 
 /**
  * The Tinkers monorepo bridge — a cold audit for an org that lives in the
@@ -32,6 +43,15 @@ import { runMagicAudit } from './magic-audit.js';
  *       30-minute signed URLs onto their media store (their connect burst
  *       downloads the real files at Meta connect — full images and playable
  *       mp4s, where ads_read Graph would give us a 64px thumbnail)
+ *   GET /api/generation/:auditId/ad-sets            → how each ad set is
+ *       configured: goal, promoted event, delivery status
+ *   GET /api/generation/:auditId/adset-insights?since&until&granularity
+ *   GET /api/generation/:auditId/breakdown?dimension&since&until
+ *   GET /api/generation/:auditId/activity?since&until → the change history
+ *   GET /api/generation/:auditId/targeting          → per ad set a class plus
+ *       the signals it was decided from, and the account's saved audiences
+ *   GET /api/generation/:auditId/pixels             → tracking setup + Meta's
+ *       own diagnostics (no match-quality score exists to read)
  * all authorized with `Authorization: Bearer TINKERS_AUDIT_SEAM_SECRET` — the
  * same secret that signs the write-backs, one secret for the whole boundary.
  * The audit id in the path is the tenant capability: their row's own org
@@ -231,6 +251,15 @@ export function toRawAdDay(row: unknown): RawAdDay | null {
     actions.push({ action_type: 'video_view', value: videoPlays });
   }
 
+  // Same reason, for the click half: their port lifts `inline_link_clicks` into
+  // `linkClicks`, and the watched-and-not-clicked read needs a per-ad click
+  // count. Only injected when the list does not already carry one, so the
+  // actions array stays the source of truth where it has the answer.
+  const linkClicks = typeof r.linkClicks === 'number' ? r.linkClicks : 0;
+  if (linkClicks > 0 && !actions.some((a) => a.action_type === 'link_click')) {
+    actions.push({ action_type: 'link_click', value: linkClicks });
+  }
+
   const thruplays = typeof r.thruplays === 'number' ? r.thruplays : 0;
 
   return {
@@ -428,6 +457,165 @@ export async function fetchTinkersStoreMedia(
     logger.warn({ err: seamError(err), auditId }, 'tinkers creative-media read failed (creative read degrades)');
     return null;
   }
+}
+
+/**
+ * One authorized GET that keeps the three answers apart.
+ *
+ * A **404 means the endpoint is not deployed yet**, and that is the one
+ * distinction this whole function exists for: these six paths ship on Tinkers'
+ * own schedule, and until they land the sections that read them must stay
+ * `planned` — the honest gap they were before this wave — rather than turning
+ * into an error on the report of a customer who did nothing wrong.
+ *
+ * The audit id is also 404 when it is unknown or expired, so a revoked audit
+ * mid-run reads as "not deployed" here. That is deliberate and harmless: the
+ * account read at the top of the run already proved the id, and a revoked audit
+ * has nowhere to write its report back to anyway.
+ */
+async function seamRead<S extends { ok: boolean }>(
+  path: string,
+  schema: z.ZodType<S>,
+  what: string,
+): Promise<
+  | { state: 'ok'; body: Extract<S, { ok: true }> }
+  | { state: 'not_deployed' }
+  | { state: 'unsupported'; reason: string }
+  | { state: 'failed'; reason: string }
+> {
+  const baseUrl = env.TINKERS_BASE_URL;
+  const secret = env.TINKERS_AUDIT_SEAM_SECRET;
+  if (!baseUrl || !secret) return { state: 'failed', reason: 'TINKERS_BASE_URL / TINKERS_AUDIT_SEAM_SECRET not configured' };
+  try {
+    const resp = await fetch(`${baseUrl.replace(/\/$/, '')}${path}`, {
+      headers: { Authorization: `Bearer ${secret}` },
+      signal: AbortSignal.timeout(READ_TIMEOUT_MS),
+    });
+    if (resp.status === 404) {
+      logger.info({ read: what }, 'tinkers generation read is not deployed yet (the section stays planned)');
+      return { state: 'not_deployed' };
+    }
+    if (!resp.ok) return { state: 'failed', reason: `${what} returned ${resp.status}` };
+    const parsed = schema.safeParse(await resp.json());
+    if (!parsed.success) {
+      return { state: 'failed', reason: `${what} response did not match the contract: ${parsed.error.issues[0]?.message}` };
+    }
+    if (!parsed.data.ok) {
+      logger.info({ read: what, reason: (parsed.data as { reason?: string }).reason }, 'tinkers generation read cannot be served for this account');
+      return { state: 'unsupported', reason: (parsed.data as { reason?: string }).reason ?? 'unavailable' };
+    }
+    return { state: 'ok', body: parsed.data as Extract<S, { ok: true }> };
+  } catch (err) {
+    return { state: 'failed', reason: seamError(err) };
+  }
+}
+
+const partialOf = (body: { partial?: boolean | null }): boolean => body.partial === true;
+
+/** How each ad set is configured: its goal, its promoted event, its status. */
+export async function fetchTinkersAdSets(auditId: string): Promise<TinkersRead<SeamAdSet[]>> {
+  const read = await seamRead(`/api/generation/${auditId}/ad-sets`, adSetsSchema, 'ad-sets');
+  if (read.state !== 'ok') return read;
+  return {
+    state: 'ok',
+    partial: partialOf(read.body),
+    data: read.body.adSets.map((a) => ({
+      adsetId: a.adsetId,
+      name: a.name ?? null,
+      effectiveStatus: a.effectiveStatus ?? null,
+      optimizationGoal: a.optimizationGoal ?? null,
+      promotedObjectEventType: a.promotedObjectEventType ?? null,
+      campaignId: a.campaignId ?? null,
+    })),
+  };
+}
+
+/**
+ * Ad-set insights for one window, whole or by week. The window cap is theirs
+ * (31 days, refused rather than truncated), so a caller asking for more slices
+ * it — the same contract the ad-day pull works to.
+ */
+export async function fetchTinkersAdSetInsights(
+  auditId: string,
+  query: { since: string; until: string; granularity: 'total' | 'weekly' },
+): Promise<TinkersRead<unknown[]>> {
+  const read = await seamRead(
+    `/api/generation/${auditId}/adset-insights?since=${query.since}&until=${query.until}&granularity=${query.granularity}`,
+    insightRowsSchema,
+    'adset-insights',
+  );
+  if (read.state !== 'ok') return read;
+  return { state: 'ok', partial: partialOf(read.body), data: read.body.rows };
+}
+
+/** One window of account-level insights split by one dimension. */
+export async function fetchTinkersBreakdown(
+  auditId: string,
+  query: { dimension: 'placement' | 'age_gender' | 'country' | 'user_segment'; since: string; until: string },
+): Promise<TinkersRead<unknown[]>> {
+  const read = await seamRead(
+    `/api/generation/${auditId}/breakdown?dimension=${query.dimension}&since=${query.since}&until=${query.until}`,
+    insightRowsSchema,
+    `breakdown ${query.dimension}`,
+  );
+  if (read.state !== 'ok') return read;
+  return { state: 'ok', partial: partialOf(read.body), data: read.body.rows };
+}
+
+/**
+ * What the account's own operators did over one window. `activity_read_unsupported`
+ * is their answer when the provider cannot see the history at all, and it must
+ * never arrive here as an empty list: "nothing changed" and "I cannot see what
+ * changed" collapsing into one is a fabricated receipt.
+ */
+export async function fetchTinkersActivity(
+  auditId: string,
+  query: { since: string; until: string },
+): Promise<TinkersRead<unknown[]>> {
+  const read = await seamRead(
+    `/api/generation/${auditId}/activity?since=${query.since}&until=${query.until}`,
+    activitySchema,
+    'activity',
+  );
+  if (read.state !== 'ok') return read;
+  return { state: 'ok', partial: partialOf(read.body), data: read.body.changes };
+}
+
+/** Who each ad set was told to reach, plus the account's saved audiences. */
+export async function fetchTinkersTargeting(auditId: string): Promise<TinkersRead<SeamTargeting>> {
+  const read = await seamRead(`/api/generation/${auditId}/targeting`, targetingSchema, 'targeting');
+  if (read.state !== 'ok') return read;
+  return {
+    state: 'ok',
+    partial: partialOf(read.body),
+    data: { adSets: read.body.adSets, audiences: read.body.audiences ?? [] },
+  };
+}
+
+/** The account's pixels and what the provider will say about their health. */
+export async function fetchTinkersPixels(auditId: string): Promise<TinkersRead<unknown[]>> {
+  const read = await seamRead(`/api/generation/${auditId}/pixels`, pixelsSchema, 'pixels');
+  if (read.state !== 'ok') return read;
+  return { state: 'ok', partial: partialOf(read.body), data: read.body.pixels };
+}
+
+/**
+ * The six reads, bound to ONE audit id, as the orchestrator receives them.
+ *
+ * They are injected rather than imported: this module already imports
+ * magic-audit to start the run, so the sections cannot reach back here. It also
+ * means every section runner is testable against a fake seam with no fetch in
+ * sight.
+ */
+export function tinkersSeamReads(auditId: string): TinkersSeamReads {
+  return {
+    adSets: () => fetchTinkersAdSets(auditId),
+    adSetInsights: (query) => fetchTinkersAdSetInsights(auditId, query),
+    breakdown: (query) => fetchTinkersBreakdown(auditId, query),
+    activity: (query) => fetchTinkersActivity(auditId, query),
+    targeting: () => fetchTinkersTargeting(auditId),
+    pixels: () => fetchTinkersPixels(auditId),
+  };
 }
 
 /**
