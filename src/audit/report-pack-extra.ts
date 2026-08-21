@@ -1762,7 +1762,7 @@ export function computeAudienceSegments(inp: AudienceSegmentsInputs): PackSectio
       ? {
           next_step:
             `Run one small ad set against the people who already know you and compare its ${kpiLabel} to the ${newSegment?.kpi ?? 'cold'} you pay now. ` +
-            `A business spending everything on strangers is either growing on purpose or forgetting to ask its own customers twice.`,
+            `If that is deliberate, this section is just a check. If it is not, the people who already bought from you are the cheapest audience you have.`,
         }
       : beatsCold && bestKnown
         ? {
@@ -2042,7 +2042,7 @@ export function computeLaunchDiscipline(inp: LaunchDisciplineInputs): PackSectio
     parts.push(
       `${unfairlyTested.length} ad${unfairlyTested.length === 1 ? '' : 's'} never got a fair test: ${unfairlyTested.length === 1 ? 'it' : 'each'} stopped spending having taken under ` +
         `${money(fairTestBar, inp.currency)}, which is ${FAIR_TEST_TARGET_MULTIPLE} times the ${money(inp.costTarget!.value, inp.currency)} per ${inp.resultNoun} you told us you want. ` +
-        `Under that much spend one result is luck and none is not evidence.`,
+        `Below that, one result can be chance and none proves nothing either way.`,
     );
   }
 
@@ -2053,7 +2053,7 @@ export function computeLaunchDiscipline(inp: LaunchDisciplineInputs): PackSectio
       ? {
           next_step:
             unfairlyTested.length > 0 && shortMonths > rows.length / 2
-              ? `Two things, in this order: launch about ${avgExpected} genuinely different ads a month at this spend, and give each one ${money(fairTestBar ?? 0, inp.currency)} before you judge it. Fewer tests, each funded properly, beats more tests nobody can read.`
+              ? `Two things, in this order: launch about ${avgExpected} genuinely different ads a month at this spend, and give each one ${money(fairTestBar ?? 0, inp.currency)} before you judge it. Launching more than you can fund to that level leaves you with tests nobody can read.`
               : unfairlyTested.length > 0
                 ? `Give each new ad ${money(fairTestBar ?? 0, inp.currency)} before you decide about it. Stopping earlier than that is paying for a test and throwing away the answer.`
                 : `Raise the launch rate to about ${avgExpected} genuinely different ads a month at this spend. At one winner per twenty tests, the number of tests is what decides how many winners you get.`,

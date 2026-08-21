@@ -699,7 +699,7 @@ export function computeFatigue(rows90: PackAdRow[], breakevenRoas = 1.0, currenc
     summaryParts.push(
       `${attentionWithoutAction.length} ad${attentionWithoutAction.length > 1 ? 's were' : ' was'} watched and not clicked: "${worst.ad_name}" got ${worst.video_plays.toLocaleString('en-US')} three-second plays on ` +
         `${worst.impressions.toLocaleString('en-US')} impressions (${worst.play_rate_pct}%) and ${worst.link_clicks} link click${worst.link_clicks === 1 ? '' : 's'} (${worst.click_rate_pct}%), on ${money(worst.spend, currency)} of spend. ` +
-        `That is entertainment people sat through, not an ad that asked them for anything.`,
+        `People are watching it and doing nothing, so the opening works and the ask does not.`,
     );
   }
 
