@@ -294,6 +294,10 @@ export function buildColdCreativeFacts(args: {
     currency: args.currency,
     window: 'last 30 days',
     kpi: leadGen ? 'cost per lead (this account records leads, not purchases)' : 'Meta ROAS',
+    // How many creatives were actually WATCHED, so a claim about the creative
+    // can be scoped to them instead of to "every ad" (live report error).
+    creatives_watched: args.reads.length,
+    top_ads_in_facts: args.summary.ads.length,
     total_spend: Math.round(args.summary.total_spend),
     ads_with_spend: args.summary.ads_with_spend,
     top12_spend_share_pct: args.summary.top12_spend_share_pct,
@@ -337,13 +341,19 @@ export function fallbackWinners(
   summary: TopAdsSummary,
   reads: CreativeRead[],
   max = 4,
+  currency = '',
 ): Array<{ ad_name: string; spend: number; key_stat: string; why: string }> {
   const readByAd = new Map(reads.map((r) => [r.ad_id, r]));
+  const unit = currency ? ` ${currency}` : '';
   return summary.ads.slice(0, max).map((a) => {
     const read = readByAd.get(a.ad_id);
     let key_stat: string;
+    // A lead-gen ad's own number is what it pays for a lead, in money. A ROAS
+    // multiple on an account with no revenue is a fabricated metric, and a bare
+    // lead count says nothing about whether the lead was cheap.
     if (a.roas > 0) key_stat = `Meta ROAS ${a.roas}`;
     else if (a.purchases > 0) key_stat = `${a.purchases} purchases`;
+    else if (a.leads > 0 && a.spend > 0) key_stat = `Meta CPL ${round2(a.spend / a.leads)}${unit}`;
     else if (a.leads > 0) key_stat = `${a.leads} leads`;
     else if (a.hook_rate != null) key_stat = `hook rate ${round2(a.hook_rate * 100)}%`;
     else key_stat = 'top spender';

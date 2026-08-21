@@ -26,7 +26,7 @@ import {
 } from './report-pack-extra.js';
 import {
   buildAccountModel, mergeAccountModel, readAccountLens,
-  type AccountModel, type AccountModelInputs, type AccountLensRead,
+  type AccountModel, type AccountModelInputs, type AccountLensRead, type AccountLens,
 } from './account-model.js';
 import { coldBreakeven, buildColdKnowledge, type ColdRows, type OwnerInterview } from './cold-source.js';
 import { runColdCreativeAnalysis, type OwnLibraryScrape } from './cold-creative.js';
@@ -331,7 +331,29 @@ const SYNTH_SYSTEM =
   'Numbers keep their currency/unit. If the data is thin, say what is missing rather than inventing. ' +
   'METRIC LABELING (mandatory): every metric states its source — "Meta ROAS"/"Meta CPA" for Meta-attributed numbers, "TW blended"/"TW net profit" for Triple Whale. ' +
   'NEVER use the bare word "blended" for a Meta-attributed number; when two sources disagree, show both with their labels. ' +
+  'VOICE: plain operator language, the way one media buyer talks to another across a desk. Never a "not X but Y" construction. ' +
+  'No metaphors, no analogies, no taglines, no aphorisms, no rhetorical questions. Say the thing. ' +
   'Respond with PURE JSON matching the requested schema — no markdown, no commentary.';
+
+/**
+ * The honesty rules the customer-simulation review caught the model breaking on
+ * a live report. Each one is a sentence a reader could disprove by looking at
+ * the same payload, which is the only kind of error that costs trust.
+ */
+const SYNTH_HONESTY_RULES =
+  'HONESTY RULES (each of these was a real error on a live report):\n' +
+  '1. Never quote a raw field name from the facts. "Video_spend_share is 0%" is a database column read aloud; ' +
+  'write "none of the spend went to video" instead. Field names never appear in a sentence.\n' +
+  '2. A claim about creative copy, format, hooks or casting covers ONLY the ads whose words or creatives are in the ' +
+  'facts. Say "the 10 top-spending ads we read", never "every ad", "all your ads" or "the account\'s creative" as a whole.\n' +
+  '3. Never infer an instant form, a native lead form or an on-platform destination when the facts carry ' +
+  'landing_page_views above zero: those clicks reached a website, and the destination is a page.\n' +
+  '4. A weekend or weekday concentration claim is judged against the baseline that two days of seven are 28.6% ' +
+  'of the week. 30% of results on the weekend is the baseline, not a finding.\n' +
+  '5. The missing target is stated AT MOST ONCE in the whole report, and only by the "Funnel Diagnosis" section. ' +
+  'In every other section, judge against the account\'s own observed figures and do not mention that no target was given.\n' +
+  '6. Never state a percentage change unless the facts carry that change, or both figures it is computed from. ' +
+  'Two rates are not a cost, and a rate relabelled as a cost per result is a fabricated number.';
 
 /**
  * Compose the per-audit synthesis system prompt: the base + this client's
@@ -371,7 +393,7 @@ export function lensBrief(lens: AccountLensRead): string {
 }
 
 export function buildSynthSystem(clientKnowledge: string, dataCaveat: string | null, lens?: AccountLensRead | null): string {
-  const parts = [SYNTH_SYSTEM];
+  const parts = [SYNTH_SYSTEM, SYNTH_HONESTY_RULES];
   if (lens) parts.push(lensBrief(lens));
   if (dataCaveat) {
     // The caveat used to ride EVERY section prompt with "state this in the
@@ -795,12 +817,41 @@ export function funnelStages(t: Record<string, number>, currency: string): Funne
   };
 }
 
+/**
+ * The per-window figures under the funnel, in the account's OWN grammar.
+ *
+ * An account that records no purchase revenue has no ROAS and no average order
+ * value, and the `roas: 0` this used to emit is exactly how the page came to
+ * render a "ROAS 0" tile on a life-insurance account. A metric this account does
+ * not have is ABSENT from the payload, never zero in it.
+ */
+export function funnelDerived(
+  t30: Record<string, number>,
+  kind: FunnelShape['kind'],
+): Record<string, number | null> {
+  const n = (k: string): number => t30[k] ?? 0;
+  const derived: Record<string, number | null> = {
+    cpm: n('impressions') > 0 ? round2((n('spend') / n('impressions')) * 1000) : null,
+    ctr_link_pct: n('impressions') > 0 ? round2((n('link_clicks') / n('impressions')) * 100) : null,
+    cost_per_link_click: n('link_clicks') > 0 ? round2(n('spend') / n('link_clicks')) : null,
+    cost_per_lead: n('leads') > 0 ? round2(n('spend') / n('leads')) : null,
+    cost_per_registration: n('complete_registrations') > 0 ? round2(n('spend') / n('complete_registrations')) : null,
+  };
+  if (kind === 'ecommerce') {
+    derived.cpa = n('purchases') > 0 ? round2(n('spend') / n('purchases')) : null;
+    derived.roas = n('spend') > 0 ? round2(n('purchase_value') / n('spend')) : null;
+    derived.aov = n('purchases') > 0 ? round2(n('purchase_value') / n('purchases')) : null;
+  }
+  return derived;
+}
+
 async function runFunnelRead(
   clientCode: string,
   meter: CostMeter,
   client: { id: string; name: string; currency: string },
   synthSystem: string,
   rows30Override?: Array<Record<string, unknown>>,
+  auction?: AuctionContext | null,
 ): Promise<Partial<AuditSection>> {
   // Cold path injects the derived account rows (same columns as this select).
   const rows30 = rows30Override ?? await pageAll<Record<string, unknown>>(
@@ -820,15 +871,8 @@ async function runFunnelRead(
 
   const funnel = funnelStages(t30, client.currency);
   const stages = funnel.stages;
-  const derived = {
-    cpm: t30.impressions! > 0 ? round2((t30.spend! / t30.impressions!) * 1000) : null,
-    ctr_link_pct: t30.impressions! > 0 ? round2((t30.link_clicks! / t30.impressions!) * 100) : null,
-    cpa: t30.purchases! > 0 ? round2(t30.spend! / t30.purchases!) : null,
-    roas: t30.spend! > 0 ? round2(t30.purchase_value! / t30.spend!) : null,
-    aov: t30.purchases! > 0 ? round2(t30.purchase_value! / t30.purchases!) : null,
-    cost_per_lead: t30.leads! > 0 ? round2(t30.spend! / t30.leads!) : null,
-    cost_per_registration: t30.complete_registrations! > 0 ? round2(t30.spend! / t30.complete_registrations!) : null,
-  };
+  const purchaseGrammar = funnel.kind === 'ecommerce';
+  const derived = funnelDerived(t30, funnel.kind);
 
   // Triple Whale blended view where wired (LA, PL) — best effort, never blocks
   let twSummary: string | undefined;
@@ -855,14 +899,25 @@ async function runFunnelRead(
     headline_kpi: funnel.kind === 'ecommerce' ? 'Meta ROAS and Meta CPA' : funnel.kind === 'lead_gen' ? 'cost per lead (Meta CPL)' : 'cost per link click',
     last7_vs_prior7: {
       spend: [Math.round(t7.spend!), Math.round(p7.spend!)],
-      purchases: [t7.purchases, p7.purchases],
-      roas: [
-        t7.spend! > 0 ? round2(t7.purchase_value! / t7.spend!) : null,
-        p7.spend! > 0 ? round2(p7.purchase_value! / p7.spend!) : null,
-      ],
+      ...(purchaseGrammar
+        ? {
+            purchases: [t7.purchases, p7.purchases],
+            roas: [
+              t7.spend! > 0 ? round2(t7.purchase_value! / t7.spend!) : null,
+              p7.spend! > 0 ? round2(p7.purchase_value! / p7.spend!) : null,
+            ],
+          }
+        : {}),
       leads: [t7.leads, p7.leads],
+      cost_per_lead: [
+        t7.leads! > 0 ? round2(t7.spend! / t7.leads!) : null,
+        p7.leads! > 0 ? round2(p7.spend! / p7.leads!) : null,
+      ],
     },
     triple_whale_blended: twSummary,
+    // Measured once, by the cost-trend chapter. A click-rate claim here reads
+    // from these figures rather than deriving a second set from the same days.
+    auction_context: auction ?? undefined,
     benchmark_heuristics:
       funnel.kind === 'ecommerce'
         ? 'Rough DTC heuristics, label as such: link CTR 1-2% healthy; content-view/link-click 70-85% (lower = slow LP or tracking gap); ATC/content-view 8-15%; purchase/link-click 1-3%. Judge against the account\'s own trend first.'
@@ -876,10 +931,14 @@ async function runFunnelRead(
     `Account funnel data (deterministic):\n${JSON.stringify(facts, null, 1)}\n\n` +
       `Write the "Funnel Diagnosis" audit section. The stages in stages_30d ARE this account's funnel (funnel_kind=${funnel.kind}); ` +
       `name only those stages, and lead with ${facts.headline_kpi}.\n` +
+      (auction?.ctr_first != null && auction.ctr_last != null
+        ? `Click-rate context, already measured: link CTR ${auction.ctr_last}% now against ${auction.ctr_first}% at the start of the window. ` +
+          `A rate this account already held is a recovery target, so say so instead of presenting it as new headroom.\n`
+        : '') +
       `Schema:\n` +
       `{"summary":"2-3 sentences with the bottom line and the headline numbers (with currency)",` +
       `"biggest_leak":{"stage":"<one of the stage names in stages_30d, verbatim>","read":"1-2 sentences on the weakest stage-to-stage rate and what it implies"},` +
-      `"opportunities":[up to 3 strings, each concrete and tied to a number],` +
+      `"opportunities":[up to 3 strings, each concrete and tied to a number, and each carrying a fact or a figure the summary and biggest_leak did NOT already state — drop any bullet that only restates them],` +
       `"warnings":[up to 2 strings — only genuine risks visible in the data]}`,
   );
 
@@ -1778,11 +1837,87 @@ export function workLineFor(key: string, s: AuditSection): string | null {
 // B3 — lead-insight ranking across all completed sections
 // ---------------------------------------------------------------------------
 
+/**
+ * The facts the ranker is not allowed to contradict.
+ *
+ * The live #1 insight said the ad carrying 47% of spend "is already fatiguing"
+ * while the fatigue section had classified only a 1.3% ad as fatiguing; it
+ * quoted "Meta CPL 0.06 → 0.04" (a leads-per-spend RATE relabelled as a cost)
+ * and called that "down 26.8%" (0.06 to 0.04 is 33%); and it wrote "more than
+ * every other ad combined" about an ad with 225 of the account's 483 leads.
+ * Every one of those is the ranker inventing a verdict the sections did not
+ * reach, so the sections' own verdicts and the account's own totals now travel
+ * WITH the material, as rules rather than as context.
+ */
+/** The CPM/CTR read, so a "double the CTR" claim is framed as the recovery it is. */
+export interface AuctionContext {
+  cpm_delta_pct?: number | null;
+  ctr_delta_pct?: number | null;
+  ctr_first?: number | null;
+  ctr_last?: number | null;
+  weeks?: number | null;
+  verdict?: string | null;
+}
+
+export interface InsightGuardrails {
+  currency: string;
+  lens: AccountLens | null;
+  /** The cost-trend chapter's own figures. Nobody re-derives these. */
+  auction?: AuctionContext | null;
+  /** The account's own 30d totals. Every superlative is checked against these. */
+  totals30: { spend: number; leads: number; purchases: number; results: number } | null;
+  /** The fatigue chapter's OWN classification. The ranker may not re-classify. */
+  fatigue: {
+    kpi_mode: string;
+    fatiguing: Array<{ ad_name: string; stat: string | null; spend_30d: number | null }>;
+    evergreen: string[];
+    assessed_ads: number;
+  } | null;
+}
+
+export function buildInsightRules(g: InsightGuardrails): string {
+  const lines = [
+    'VERDICT DISCIPLINE (mandatory, these override your own reading of the data):',
+    g.fatigue
+      ? `The fatigue chapter classified ${g.fatigue.assessed_ads} assessed ads. FATIGUING: ${
+          g.fatigue.fatiguing.length
+            ? g.fatigue.fatiguing.map((a) => `"${a.ad_name}"${a.stat ? ` (${a.stat})` : ''}`).join(', ')
+            : 'none'
+        }. EVERGREEN: ${g.fatigue.evergreen.length ? g.fatigue.evergreen.map((n) => `"${n}"`).join(', ') : 'none'}. ` +
+        `You may call an ad fatiguing, past peak, declining or burning out ONLY if it is on that FATIGUING list. ` +
+        `The biggest spender not being on it is not a hint that it is: say nothing about its trend.`
+      : 'No fatigue classification was produced, so no insight may claim an ad is fatiguing, past peak or declining.',
+    `Every per-ad cost you quote is a MONEY figure taken verbatim from the facts (for example "Meta CPL 18.59 ${g.currency || 'USD'}"). ` +
+      `A rate such as 0.06 results per unit of spend is not a cost per result and may never be relabelled as one, ` +
+      `and you may not compute a percentage change between two figures unless the facts state that change.`,
+  ];
+  if (g.auction && (g.auction.ctr_delta_pct != null || g.auction.cpm_delta_pct != null)) {
+    const a = g.auction;
+    lines.push(
+      `The cost-trend chapter already measured the auction over ${a.weeks ?? 'the'} weeks: CPM ${a.cpm_delta_pct ?? 'unmeasured'}%, ` +
+        `link CTR ${a.ctr_delta_pct ?? 'unmeasured'}%` +
+        (a.ctr_first != null && a.ctr_last != null ? ` (${a.ctr_last}% now against ${a.ctr_first}% at the start of the window)` : '') +
+        `. Use those figures and do not recompute them. A CTR this account HELD earlier is a recovery target, so ` +
+        `frame a "double the CTR" opportunity as getting back to what it already did, never as a new ceiling.`,
+    );
+  }
+  if (g.totals30) {
+    lines.push(
+      `Account totals for the same 30 days: spend ${Math.round(g.totals30.spend)} ${g.currency || ''}`.trim() +
+        `, leads ${g.totals30.leads}, purchases ${g.totals30.purchases}. ` +
+        `Any superlative ("more than every other ad combined", "most of the account's leads", "the biggest") must be ` +
+        `arithmetic against these totals. If they do not prove it, drop the claim rather than softening it.`,
+    );
+  }
+  return lines.join(' ');
+}
+
 async function rankLeadInsights(
   meter: CostMeter,
   client: { name: string },
   sections: Record<string, AuditSection>,
   synthSystem: string,
+  guardrails: InsightGuardrails,
 ): Promise<LeadInsight[] | null> {
   const material = Object.values(sections)
     .filter((s) => s.status === 'complete')
@@ -1799,12 +1934,58 @@ async function rankLeadInsights(
     'lead_insights',
     synthSystem,
     `Completed audit sections for ${client.name}:\n${JSON.stringify(material, null, 1)}\n\n` +
+      `${buildInsightRules(guardrails)}\n\n` +
       `Pick the THREE lead insights for the top of the report. Ranking rubric: surprise × specificity — ` +
       `a qualifying insight names a specific entity (ad, campaign, pixel, stage, competitor page) AND a number. ` +
       `Prefer findings the client almost certainly does NOT already know. Never restate a section summary verbatim — sharpen it.\n` +
       `Schema: {"insights":[exactly 3 of {"headline":"<=90 chars, punchy","detail":"2-3 sentences with the number(s) and why it matters","severity":"risk|opportunity|info","section":"<section key>"}]}`,
   );
   return out?.insights ?? null;
+}
+
+/**
+ * ONE sentence that joins two sections the reader would otherwise read apart.
+ *
+ * Every section is true on its own and the report never says what they mean
+ * together, which is the whole difference between a dashboard and somebody
+ * having read the account. So one pass, one sentence, and it only ships when it
+ * names figures from at least two different sections: a connection that could
+ * have been written from one chapter is not a connection.
+ */
+export async function connectSections(
+  meter: CostMeter,
+  sections: Record<string, AuditSection>,
+  synthSystem: string,
+): Promise<string | null> {
+  const material = Object.values(sections)
+    .filter((s) => s.status === 'complete' && (s.data as { signal?: unknown } | undefined)?.signal === true)
+    .map((s) => ({ section: s.key, summary: s.summary, extract: JSON.stringify(s.data).slice(0, 1200) }));
+  if (material.length < 2) return null;
+
+  const out = await synthesizeJson<{ connection?: unknown; sections?: unknown }>(
+    meter,
+    'recognition_connection',
+    synthSystem,
+    `The sections of this audit that found something:\n${JSON.stringify(material, null, 1)}\n\n` +
+      `Write the ONE sentence that joins two of them into a single read of this account: what the combination means ` +
+      `that neither says alone. It must carry a figure from EACH of the two sections it joins, name them, and be a ` +
+      `sentence an operator would say out loud. No em-dashes, no metaphor, no summary of the whole report.\n` +
+      `Schema: {"connection":"one sentence","sections":["<section key>","<section key>"]}`,
+  );
+  return vetConnection(out);
+}
+
+/**
+ * The gate the connection sentence has to pass: two DIFFERENT sections named and
+ * at least one figure in the sentence. A sentence that could have been written
+ * from one chapter is a headline, not a connection, and this report already has
+ * headlines.
+ */
+export function vetConnection(raw: { connection?: unknown; sections?: unknown } | null | undefined): string | null {
+  const text = typeof raw?.connection === 'string' ? dedash(raw.connection.trim()) : '';
+  const cited = Array.isArray(raw?.sections) ? raw.sections.filter((s): s is string => typeof s === 'string') : [];
+  if (text.length < 20 || new Set(cited).size < 2 || !/\d/.test(text)) return null;
+  return text;
 }
 
 // ---------------------------------------------------------------------------
@@ -2187,6 +2368,21 @@ export async function runMagicAudit(
     return angleByAdIdShared;
   };
   const auditKpiMode = kpiMode(rows30);
+  /** The cost-trend chapter's own figures, for the sections that discuss clicks. */
+  const auctionContext = (): AuctionContext | null => {
+    const d = sections['cost_trends']?.data as Record<string, unknown> | undefined;
+    if (!d) return null;
+    const numOrNull = (v: unknown): number | null => (typeof v === 'number' ? v : null);
+    const ctx: AuctionContext = {
+      cpm_delta_pct: numOrNull(d.cpm_delta_pct),
+      ctr_delta_pct: numOrNull(d.ctr_delta_pct),
+      ctr_first: numOrNull(d.ctr_first),
+      ctr_last: numOrNull(d.ctr_last),
+      weeks: numOrNull(d.weeks) ?? ((d.series as unknown[] | undefined)?.length ?? null),
+      verdict: typeof d.verdict === 'string' ? d.verdict : null,
+    };
+    return ctx.cpm_delta_pct == null && ctx.ctr_delta_pct == null ? null : ctx;
+  };
   // The scatter's words: on a lead-gen account a dot is a cost per LEAD, and the
   // line it is read against is the owner's own stated target when they gave one
   // (never our estimate, never a borrowed 1.0x).
@@ -2420,7 +2616,7 @@ export async function runMagicAudit(
       }
       return s;
     },
-    funnel_read: () => runFunnelRead(code, meter, client, synthSystem, cold ? accFull30 : undefined),
+    funnel_read: () => runFunnelRead(code, meter, client, synthSystem, cold ? accFull30 : undefined, auctionContext()),
     account_facts: async () => {
       const partnershipIds = await fetchPartnershipAdIds(code, client.adAccountId, coldToken);
       let partnershipPct: number | null = null;
@@ -2511,8 +2707,15 @@ export async function runMagicAudit(
       const inputs: ScorecardInputs = {};
       if (ownHooks.spend >= 100) inputs.hooks = { value: ownHooks.value, cohortValues: cohortOf('hook_rate'), cohortLabel, impressions30: videoImps30 };
       if (ownHold.spend >= 100) inputs.hold = { value: ownHold.value, cohortValues: cohortOf('hold_rate'), cohortLabel };
-      const cohortsData = sections['creative_cohorts']?.data as { fresh_cohort_share_pct?: number } | undefined;
-      if (typeof cohortsData?.fresh_cohort_share_pct === 'number') inputs.freshness = { value: cohortsData.fresh_cohort_share_pct };
+      // On a read shorter than the cohort window, "100% fresh" is arithmetic on
+      // the window rather than a fact about the account, so it is not graded at
+      // all: a strength nobody earned is worse than a missing dimension.
+      const cohortsData = sections['creative_cohorts']?.data as
+        | { fresh_cohort_share_pct?: number; window_too_short?: boolean }
+        | undefined;
+      if (typeof cohortsData?.fresh_cohort_share_pct === 'number' && cohortsData.window_too_short !== true) {
+        inputs.freshness = { value: cohortsData.fresh_cohort_share_pct };
+      }
       const concData = sections['spend_concentration']?.data as { top3_share_pct?: number } | undefined;
       if (typeof concData?.top3_share_pct === 'number') inputs.concentration = { value: concData.top3_share_pct };
       const costData = sections['cost_trends']?.data as { cpm_delta_pct?: number } | undefined;
@@ -2730,12 +2933,65 @@ export async function runMagicAudit(
   // insights should see what we found in the actual creatives.
   if (coldCreativePromise) await coldCreativePromise;
 
-  // B3 — rank the lead insights across everything that completed
+  // B3 — rank the lead insights across everything that completed. The ranker
+  // reads the sections' own verdicts and the account's own totals as rules: an
+  // insight that contradicts the chapter under it is worse than no insight.
   try {
-    const insights = await rankLeadInsights(meter, client, sections, synthSystem);
+    const fatigueData = sections['creative_fatigue']?.data as
+      | { kpi_mode?: string; assessed_ads?: number; ads?: Array<Record<string, unknown>> }
+      | undefined;
+    const fatigueAds = fatigueData?.ads ?? [];
+    const statOf = (a: Record<string, unknown>): string | null => {
+      const s = a.stat;
+      if (typeof s === 'string' && s.length > 0) return s;
+      const cpl = a.cpl_last_14;
+      if (typeof cpl === 'number') return `Meta CPL ${round2(cpl)} ${client.currency}`.trim();
+      const recent = a.kpi_recent;
+      return fatigueData?.kpi_mode === 'roas' && typeof recent === 'number' ? `Meta ROAS ${round2(recent)}` : null;
+    };
+    const guardrails: InsightGuardrails = {
+      currency: client.currency,
+      lens: lensRead?.lens ?? null,
+      auction: auctionContext(),
+      totals30: accountTotals30
+        ? {
+            spend: accountTotals30.spend ?? 0,
+            leads: accountTotals30.leads ?? 0,
+            purchases: accountTotals30.purchases ?? 0,
+            results: accountTotals30.results ?? 0,
+          }
+        : null,
+      fatigue: fatigueData
+        ? {
+            kpi_mode: fatigueData.kpi_mode ?? 'cpr',
+            assessed_ads: fatigueData.assessed_ads ?? fatigueAds.length,
+            fatiguing: fatigueAds
+              .filter((a) => a.class === 'fatiguing')
+              .map((a) => ({
+                ad_name: String(a.ad_name ?? 'unnamed ad'),
+                stat: statOf(a),
+                spend_30d: typeof a.spend_30d === 'number' ? a.spend_30d : null,
+              })),
+            evergreen: fatigueAds.filter((a) => a.class === 'evergreen').map((a) => String(a.ad_name ?? 'unnamed ad')),
+          }
+        : null,
+    };
+    const insights = await rankLeadInsights(meter, client, sections, synthSystem, guardrails);
     if (insights) await updateRow({ lead_insights: insights.map((i) => scrubInsightProse(i)) });
   } catch (err) {
     logger.warn({ err }, 'lead-insight ranking failed (report still valid)');
+  }
+
+  // The one sentence that joins two chapters. Last, because it can only be
+  // written once the chapters exist; fail-soft, because a report without it is
+  // the report we shipped yesterday.
+  if (recognition) {
+    try {
+      const connection = await connectSections(meter, sections, synthSystem);
+      if (connection) await updateRow({ recognition: { ...recognition, ...(rowState.recognition as object ?? {}), connection } });
+    } catch (err) {
+      logger.warn({ err, auditId }, 'cross-section connection failed (report still valid)');
+    }
   }
 
   await updateRow({ status: anyError ? 'error' : 'complete', cost_usd: round2(meter.spentUsd) });

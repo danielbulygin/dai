@@ -260,6 +260,37 @@ takes them from Tinkers' `/creatives` answer (`landingUrls`, query dropped), and
 the warehouse path uses the ones `checkAdDestinations` already resolves live from
 each ad's creative.
 
+## What the simulation round changed in the payload
+
+A customer-simulation review of the first live regeneration found sentences a
+reader could have disproved from the same payload. The generator-side fixes:
+
+- `recognition.connection` (new, optional): ONE sentence joining two sections
+  with a figure from each, written by one extra pass after the report is
+  complete. It ships only when it names two different sections and carries a
+  number, so a headline cannot pass as a connection. Absent when the report has
+  fewer than two sections with a signal.
+- `funnel_read.data.derived` no longer carries `roas`, `cpa` or `aov` on an
+  account whose funnel kind is not `ecommerce`: the fields are ABSENT, not zero,
+  because a `roas: 0` is what put a "ROAS 0" tile on a life-insurance account.
+  It gains `cost_per_link_click`, and `trend_7d` carries `cost_per_lead` and
+  drops the purchase pair on those accounts.
+- The lead-insight ranker now receives the sections' own verdicts (which ads the
+  fatigue chapter classified, with their money stats), the account's 30-day
+  totals and the cost-trend chapter's CPM/CTR figures, as RULES: it may not call
+  an ad fatiguing unless that chapter did, may not relabel a rate as a cost, may
+  not state a percentage change the facts do not carry, and must check every
+  superlative against the totals.
+- Every synthesis prompt carries the honesty rules (no field names read aloud,
+  creative claims scoped to the ads actually watched, no invented instant form
+  when `landing_page_views` is above zero, the 28.6% weekend baseline, the
+  missing-target caveat stated once and only by the funnel section) and the
+  voice rules (plain operator language, no "not X but Y", no metaphors or
+  taglines).
+- The cold creative read states `creatives_watched` and `top_ads_in_facts` so a
+  claim can be scoped to them, and a lead-gen ad's fallback stat is money per
+  lead ("Meta CPL 18.6 USD") rather than a bare count or a ROAS multiple.
+
 ## Two rules the report page depends on
 
 **A quiet section carries no next step.** `data.signal === false` is a section

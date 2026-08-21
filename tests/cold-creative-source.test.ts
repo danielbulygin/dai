@@ -202,7 +202,9 @@ describe('winners synthesis inputs + fallback', () => {
     expect(w[0]).toMatchObject({ ad_name: 'UGC-hook-A', spend: 900, key_stat: 'Meta ROAS 3.4' });
     expect(w[0]!.why).toContain('UGC selfie talking head');
     expect(w[0]!.why).toContain('threw out all my bras');
-    expect(w[1]!.key_stat).toBe('25 leads');
+    // A lead-gen ad's own number is money per lead, never a bare count: 500 spend
+    // over 25 leads is what the account pays, and a count alone hides it.
+    expect(w[1]!.key_stat).toBe('Meta CPL 20');
     expect(w[2]!.key_stat).toBe('hook rate 18%');
     expect(w[2]!.why).toContain('not readable');
   });
