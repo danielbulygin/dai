@@ -55,6 +55,9 @@ const envSchema = z.object({
   ADA_DM_ALLOWED_USERS: z.string().optional(),
   STUDIO_API_KEY: z.string().optional(),
   META_ACCESS_TOKEN: z.string().optional(),
+  /** Gemini vision key — cold-path creative reads and look_at_media. Optional:
+   *  both surfaces degrade with a self-describing error when it is absent. */
+  GEMINI_API_KEY: z.string().optional(),
   TRIPLEWHALE_API_KEY: z.string().optional(),
   DROPLET_URL: z.string().default('http://139.59.144.194:8080'),
   DROPLET_API_KEY: z.string().optional(),

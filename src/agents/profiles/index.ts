@@ -2,7 +2,11 @@ export const toolProfiles = {
   readonly: ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch'],
   standard: ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'Bash', 'ask_agent'],
   coding: ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'Bash', 'Write', 'Edit'],
-  full: ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'Bash', 'Write', 'Edit', 'NotebookEdit'],
+  full: [
+    'Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'Bash', 'Write', 'Edit', 'NotebookEdit',
+    // Investigation surface — see the note on media_buyer below.
+    'meta_graph_get', 'look_at_media', 'read_repo_file', 'grep_repo',
+  ],
   assistant: ['recall', 'remember', 'search_memories', 'ask_agent', 'post_message', 'reply_in_thread', 'send_as_daniel', 'read_dms', 'find_user', 'get_unread_dms', 'search_meetings', 'get_meeting_summary', 'get_meeting_transcript', 'list_recent_meetings', 'query_tasks', 'create_task', 'update_task', 'add_task_comment', 'search_notion', 'get_channel_insights', 'get_recent_mentions', 'get_monitoring_history', 'generate_briefing', 'list_events', 'search_events', 'create_event', 'update_event', 'delete_event', 'check_availability', 'search_emails', 'read_email', 'draft_email', 'send_email', 'review_my_learnings', 'correct_learning', 'delete_learning', 'browse_navigate', 'browse_click', 'browse_type', 'browse_read_page', 'browse_screenshot', 'browse_select', 'browse_close'],
   media_buyer: [
     'recall', 'remember', 'search_memories',
@@ -29,6 +33,14 @@ export const toolProfiles = {
     'qc_copy', 'verify_launch', 'poll_analysis', 'set_adset_marker',
     'update_aot_task_status', 'update_aot_ad_set_stage',
     'lookup_dead_end',
+    // Investigation surface (read-only): raw Graph reads, vision over arbitrary
+    // bytes, repo reads. DELIBERATELY NOT in client_media_buyer — client-facing
+    // Tinkers users do not get raw Graph reads until a per-tenant token IS the
+    // enforced boundary. Today the tenant boundary is app code sitting on a
+    // service-role key with an agency env-token fallback, so a client-facing
+    // agent holding an open Graph read would be one app-code bug away from
+    // reading another tenant's account. See project_tinkers_ada_write_parity.
+    'meta_graph_get', 'look_at_media', 'read_repo_file', 'grep_repo',
   ],
   creative_strategist: [
     'recall', 'remember', 'search_memories',

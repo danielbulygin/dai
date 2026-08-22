@@ -16,6 +16,7 @@ import * as googleTools from './tools/google-tools.js';
 import * as browserTools from './tools/browser-tools.js';
 import * as creativeTools from './tools/creative-tools.js';
 import * as metaApiTools from './tools/meta-api-tools.js';
+import * as investigationTools from './tools/investigation-tools.js';
 import { auditDatasetHealth } from './tools/dataset-health-tools.js';
 import * as mediaLibraryTools from './tools/media-library-tools.js';
 import * as adLaunchTools from './tools/ad-launch-tools.js';
@@ -4278,6 +4279,128 @@ register({
 });
 
 // ---------------------------------------------------------------------------
+// Investigation tools (read-only open-ended surface)
+// ---------------------------------------------------------------------------
+
+register({
+  definition: {
+    name: 'meta_graph_get',
+    description:
+      'Read ANY Meta Graph node or edge this client owns — activities, issues_info, product_sets, adcreatives, ad_review_feedback, previews, custom_audiences — when no dedicated tool covers the question. Reach for this the moment a question needs a field the purpose-built tools do not carry: "why is this ad PAUSED with no review feedback?" (`<ad_id>/issues_info` — Meta halts ads with error 2643152 and ad_review_feedback comes back null), "who changed this budget?" (`act_<id>/activities`), "what does this catalog product set actually filter on?" (`<product_set_id>?fields=filter,product_count`). ALWAYS a read: the HTTP verb is GET, the token comes from the client connection, and the account is pinned to what that connection is granted, so a path aimed at another tenant is denied. Give the path WITHOUT the /v21.0 prefix and put query arguments in `params`.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        client_code: {
+          type: 'string',
+          description: 'Client code (e.g. "laori", "press_london"). Forced from the client scope when one is set.',
+        },
+        path: {
+          type: 'string',
+          description:
+            'Graph path after the version segment — "act_1234567890/activities", "120250000000/issues_info", "<product_set_id>". Must start with the client ad account (act_<id>) or a specific object id.',
+        },
+        params: {
+          type: 'object',
+          description:
+            'Query params, e.g. {"fields":"id,name,status","limit":"50","since":"2026-08-01"}. access_token / method / appsecret_proof are refused.',
+        },
+      },
+      required: ['client_code', 'path'],
+    },
+  },
+  async execute(input, context) {
+    return investigationTools.metaGraphGet({
+      clientCode: (context.clientScope?.clientCode ?? input.client_code) as string,
+      path: input.path as string,
+      params: input.params as Record<string, unknown> | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'look_at_media',
+    description:
+      'LOOK at an image or video at a URL and answer a question about it. Use this whenever the answer is in the pixels rather than in a field: reading the on-image text of a creative (prices, badges, "30% OFF" claims baked into a catalog image), checking which brand/logo is actually on screen, verifying a thumbnail, or describing a competitor asset. Accepts any public http/https URL, including Meta CDN creative URLs and Google Drive file links (a Drive /file/d/<id>/view link is rewritten to the direct download automatically). Images up to 6MB, videos up to 48MB. Returns a prose answer plus the content type and byte size.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        url: {
+          type: 'string',
+          description: 'Public http/https URL of the image or video.',
+        },
+        question: {
+          type: 'string',
+          description:
+            'What to look for. Defaults to a full read: transcribe all visible text verbatim, name brands/logos, describe the layout.',
+        },
+      },
+      required: ['url'],
+    },
+  },
+  async execute(input) {
+    return investigationTools.lookAtMedia({
+      url: input.url as string,
+      question: input.question as string | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'read_repo_file',
+    description:
+      "Read one file from the BMAD repo on the droplet. Use it when the answer is written down in our own documentation or config rather than in an ad account — a client's brand rules or dos-and-donts, a naming convention, pma/global/meta-ads-api-gotchas.md, a playbook. Path is repo-relative (e.g. \"pma/clients/laori/brand-guidelines.md\"). Read-only.",
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        path: {
+          type: 'string',
+          description: 'Repo-relative file path, e.g. "pma/global/meta-ads-api-gotchas.md".',
+        },
+      },
+      required: ['path'],
+    },
+  },
+  async execute(input) {
+    return investigationTools.readRepoFile({ path: input.path as string });
+  },
+});
+
+register({
+  definition: {
+    name: 'grep_repo',
+    description:
+      'Search the BMAD repo on the droplet for a regex pattern and get back matching files with line numbers. Use it to FIND where something is documented before reading it with read_repo_file — a client convention, an error code someone already wrote up, the place a rule is defined. Narrow with path_prefix (e.g. "pma/clients/laori") to keep results tight. Read-only.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        pattern: {
+          type: 'string',
+          description: 'Regex to search for, e.g. "2643152" or "alkoholfrei".',
+        },
+        path_prefix: {
+          type: 'string',
+          description: 'Restrict the search to this repo-relative directory prefix.',
+        },
+        max_results: {
+          type: 'number',
+          description: 'Max matches to return (default 100).',
+        },
+      },
+      required: ['pattern'],
+    },
+  },
+  async execute(input) {
+    return investigationTools.grepRepo({
+      pattern: input.pattern as string,
+      pathPrefix: input.path_prefix as string | undefined,
+      maxResults: input.max_results as number | undefined,
+    });
+  },
+});
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -4317,6 +4440,8 @@ const SCOPED_BMAD_TOOLS = new Set([
   'get_triplewhale_summary',
   'query_meta_insights',
   'query_meta_creatives',
+  // Open-ended Graph reads MUST be scoped — the model never picks the tenant.
+  'meta_graph_get',
 ]);
 
 export async function executeTool(

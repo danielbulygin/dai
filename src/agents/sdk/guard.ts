@@ -118,6 +118,9 @@ const READ_TOOLS = new Set<string>([
   'scan_media_library_folder', 'check_preupload_status',
   // reports
   'generate_weekly_report',
+  // investigation surface — read-only BY CONSTRUCTION (always HTTP GET, tenant
+  // pinned to the resolved token's granted accounts, no write verb reachable)
+  'meta_graph_get', 'look_at_media', 'read_repo_file', 'grep_repo',
 ]);
 
 /**

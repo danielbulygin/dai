@@ -1,10 +1,8 @@
 import { getTokenForClient } from "../../integrations/meta-token.js";
+import { graphGet } from "../../integrations/meta-graph.js";
 import { getSupabase } from "../../integrations/supabase.js";
 import { env } from "../../env.js";
 import { logger } from "../../utils/logger.js";
-
-const META_API_VERSION = "v21.0";
-const META_BASE_URL = `https://graph.facebook.com/${META_API_VERSION}`;
 
 // ---------------------------------------------------------------------------
 // Resolve client code → ad_account_id from BMAD Supabase
@@ -50,6 +48,12 @@ async function resolveAdAccountId(
 // Facebook Graph API request helper
 // ---------------------------------------------------------------------------
 
+/**
+ * Edge-shaped adapter over the shared graphGet helper (integrations/meta-graph.ts).
+ * The version pin, 429 message, error unwrap, and 500-row pagination cap all
+ * live there now, so this file and the investigation surface can't drift.
+ * Node responses collapse to [] exactly as this function always did.
+ */
 async function metaApiRequest(
   endpoint: string,
   params: Record<string, string>,
@@ -61,47 +65,9 @@ async function metaApiRequest(
     return { error: "No Meta access token available for this client." };
   }
 
-  const url = new URL(`${META_BASE_URL}/${endpoint}`);
-  url.searchParams.set("access_token", token);
-  for (const [key, value] of Object.entries(params)) {
-    url.searchParams.set(key, value);
-  }
-
-  logger.debug({ endpoint, params: Object.keys(params) }, "Meta API request");
-
-  const response = await fetch(url.toString(), {
-    signal: AbortSignal.timeout(60_000),
-  });
-
-  if (response.status === 429) {
-    return { error: "Rate limited by Facebook API. Wait a moment and retry." };
-  }
-
-  const body = await response.json() as Record<string, unknown>;
-
-  if (!response.ok) {
-    const fbError = body.error as Record<string, unknown> | undefined;
-    const msg = fbError?.message ?? JSON.stringify(body);
-    logger.error({ status: response.status, error: msg }, "Meta API error");
-    return { error: `Facebook API error: ${msg}` };
-  }
-
-  // Handle paginated results — collect all pages
-  let allData = (body.data as unknown[]) ?? [];
-  let paging = body.paging as Record<string, unknown> | undefined;
-
-  while (paging?.next && allData.length < 500) {
-    const nextUrl = paging.next as string;
-    const nextResp = await fetch(nextUrl, { signal: AbortSignal.timeout(60_000) });
-    if (!nextResp.ok) break;
-    const nextBody = await nextResp.json() as Record<string, unknown>;
-    const nextData = nextBody.data as unknown[];
-    if (!nextData?.length) break;
-    allData = allData.concat(nextData);
-    paging = nextBody.paging as Record<string, unknown> | undefined;
-  }
-
-  return { data: allData };
+  const result = await graphGet(endpoint, params, token);
+  if (result.error) return { error: result.error };
+  return { data: result.data ?? [] };
 }
 
 // ---------------------------------------------------------------------------
