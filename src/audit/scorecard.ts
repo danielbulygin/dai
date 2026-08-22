@@ -1,3 +1,5 @@
+import { computeOwnBestMonth, type OwnBestMonthInputs } from './own-best-month.js';
+
 /**
  * "Where you stand" scorecard — the audit's spine (Ada 2.0 Phase C).
  *
@@ -278,13 +280,42 @@ export interface ComparisonBand {
 
 export interface ComparisonSection {
   summary: string;
-  next_step: string;
-  data: { bands: ComparisonBand[]; cohort_label: string | null } & Record<string, unknown>;
+  /**
+   * OPTIONAL, and absent when neither half of the chapter found a step worth
+   * taking: the page reads a next step as an action, so a quiet chapter
+   * carrying one renders as a finding it is not.
+   */
+  next_step?: string;
+  data: {
+    bands: ComparisonBand[];
+    cohort_label: string | null;
+    signal: boolean;
+    own_best: Record<string, unknown> | null;
+  } & Record<string, unknown>;
+  warnings?: string[];
   derivation?: string;
 }
 
-/** Build the comparison chapter from the already-computed scorecard. Pure. */
-export function buildComparisonSection(scorecard: ScorecardEntry[]): ComparisonSection {
+/**
+ * Build the comparison chapter. Pure.
+ *
+ * The chapter has TWO halves and needs only one of them. The desk half grades
+ * rates against the named peer cohort and exists only where that cohort holds
+ * at least five accounts. The own-history half measures the account against its
+ * own best 30-day stretch, needs no peers at all, and is therefore the half
+ * that is nearly always there. It speaks FIRST for that reason, and because a
+ * cost the account has already achieved is harder to argue with than a cost
+ * somebody else achieved.
+ *
+ * `own` is the own-history INPUT rather than a precomputed read, so the caller
+ * threads rows and this stays the one place the chapter is worded.
+ */
+export function buildComparisonSection(
+  scorecard: ScorecardEntry[],
+  own?: OwnBestMonthInputs | null,
+): ComparisonSection {
+  const ownRead = own ? computeOwnBestMonth(own) : null;
+
   // Only rate dimensions cross accounts (unit '%', a real cohort). That is
   // hooks and hold — never money metrics (CPM never crosses currencies).
   const RATE_KEYS = new Set(['hooks', 'hold']);
@@ -350,7 +381,7 @@ export function buildComparisonSection(scorecard: ScorecardEntry[]): ComparisonS
 
   // End on the strength (scorecard rule).
   const strength = bands.find((b) => b.band === 'strong');
-  const next_step = weakest
+  const deskStep = weakest
     ? weakest.key === 'hooks'
       ? `Brief new openings for your top spenders — the content already holds, so more people past the first three seconds converts on the budget you're already spending.`
       : `Tighten the 3–15s stretch of your top spenders — the hooks are already winning the click.`
@@ -358,13 +389,36 @@ export function buildComparisonSection(scorecard: ScorecardEntry[]): ComparisonS
       ? `Protect what's producing this — it's the edge to build the next tests around.`
       : `Baseline for the next audit — watch these bands move in 30 days.`;
 
+  const deskDerivation =
+    `Each band is the middle half (25th–75th percentile) of ${cohortLabel ?? 'the comparison accounts'}, with the median marked and your number plotted on it. ` +
+    `Every account is spend-weighted the same way — big spenders count for more, exactly as your budget experiences it. ` +
+    `The gap is pure arithmetic: their median ÷ your rate − 1. Rates only — we never compare another account's spend or revenue, only how their creative performs.`;
+
+  // Own history first, then the desk. Neither half is required; the chapter
+  // refuses only when it has nothing at all to say.
+  const ownFirst = [ownRead?.summary, ...parts].filter((s): s is string => typeof s === 'string' && s.length > 0);
+  const summary =
+    ownFirst.length > 0
+      ? ownFirst.join(' ')
+      : `Comparing this account needs either a peer cohort of at least five accounts on the same rate, or enough of its own daily history to cut two separate months from. This read has neither.`;
+
+  // The own-history step wins where it exists: it is the half built on numbers
+  // this account has already produced, so it is the more defensible ask.
+  const nextStep = ownRead?.next_step ?? (bands.length > 0 ? deskStep : null);
+  const derivation = [ownRead ? ownRead.derivation : null, bands.length > 0 ? deskDerivation : null]
+    .filter((s): s is string => typeof s === 'string' && s.length > 0)
+    .join(' ');
+
   return {
-    summary: parts.join(' '),
-    next_step,
-    data: { bands, cohort_label: cohortLabel },
-    derivation:
-      `Each band is the middle half (25th–75th percentile) of ${cohortLabel ?? 'the comparison accounts'}, with the median marked and your number plotted on it. ` +
-      `Every account is spend-weighted the same way — big spenders count for more, exactly as your budget experiences it. ` +
-      `The gap is pure arithmetic: their median ÷ your rate − 1. Rates only — we never compare another account's spend or revenue, only how their creative performs.`,
+    summary,
+    ...(nextStep ? { next_step: nextStep } : {}),
+    data: {
+      bands,
+      cohort_label: cohortLabel,
+      signal: bands.some((b) => b.band === 'weak') || ownRead?.signal === true,
+      own_best: ownRead ? ownRead.data : null,
+    },
+    ...(ownRead && ownRead.warnings.length > 0 ? { warnings: ownRead.warnings } : {}),
+    ...(derivation ? { derivation } : {}),
   };
 }

@@ -243,7 +243,7 @@ export const SECTION_ORDER: Array<Pick<AuditSection, 'key' | 'title' | 'status'>
   { key: 'launch_discipline', title: 'Launching and Testing: how much new creative you ship', status: 'pending' },
   { key: 'cost_trends', title: 'CPM and Auction Pressure', status: 'pending' },
   { key: 'timing_patterns', title: 'Day-of-Week Pattern', status: 'pending' },
-  { key: 'how_you_compare', title: 'How You Compare: hook and hold vs the desk', status: 'pending' },
+  { key: 'how_you_compare', title: 'How You Compare: your own best month plus hook and hold vs the desk', status: 'pending' },
   { key: 'pixel_health', title: 'Tracking Setup: what your pixel is set up to send', status: 'pending' },
   { key: 'placement_breakdown', title: 'Placements: where the spend actually goes', status: 'pending' },
   { key: 'audience_breakdown', title: 'Audience Delivery: age, gender and geography', status: 'pending' },
@@ -2084,7 +2084,14 @@ export function workLineFor(key: string, s: AuditSection): string | null {
       return `Split 90 days of results by weekday`;
     case 'how_you_compare': {
       const n = (d.bands as unknown[] | undefined)?.length ?? 0;
-      return n ? `Benchmarked your hook${n > 1 ? ' & hold' : ''} rate against the accounts on our desk` : null;
+      const desk = n ? `benchmarked your hook${n > 1 ? ' & hold' : ''} rate against the accounts on our desk` : null;
+      // A named case means a best stretch was actually found; a refusal carries
+      // none, and the ledger must not claim work whose answer was "I cannot".
+      const ownBest = d.own_best as { case?: unknown } | null | undefined;
+      const foundOwnBest = !!ownBest && typeof ownBest.case === 'string';
+      if (foundOwnBest && desk) return `Measured the last 30 days against the account's own cheapest 30, and ${desk}`;
+      if (foundOwnBest) return `Read every 30-day stretch in the account's own history and measured the last 30 days against the cheapest one`;
+      return desk ? `Benchmarked your hook${n > 1 ? ' & hold' : ''} rate against the accounts on our desk` : null;
     }
     case 'concept_roas':
       return typeof d.coverage_pct === 'number' ? `Matched creative angle tags on ${d.coverage_pct}% of spend` : null;
@@ -3011,7 +3018,19 @@ export async function runMagicAudit(
     // Runs AFTER timing_patterns, whose iteration triggers computeAndSaveScorecard —
     // so savedScorecard (hook/hold cohort bands) is populated. Repackages the
     // already-benchmarked rate dims into the dedicated band chapter; posts a stat.
-    how_you_compare: async () => buildComparisonSection(savedScorecard ?? []),
+    //
+    // The second half needs no cohort at all: it measures the account against
+    // its own best 30-day stretch. `packAccRows90` is the longest daily ACCOUNT
+    // series the pull holds — the 180-day set is ad-level and carries spend
+    // only, so a cost per result cannot be cut from it.
+    how_you_compare: async () =>
+      buildComparisonSection(savedScorecard ?? [], {
+        days: packAccRows90,
+        ads: packRows90,
+        currency: client.currency,
+        resultNoun: lensRead?.lens === 'lead_gen' ? 'lead' : 'result',
+        anchorDate: auditWindow.anchorDate,
+      }),
     placement_breakdown: async () => {
       if (seam) {
         const read = await seam.breakdown({
