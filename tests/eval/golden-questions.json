@@ -80,6 +80,21 @@
       "id": "fb-3-stuck-analyzing-interrogation",
       "question": "You said several ad sets are still in the 'analyzing' phase — but some of them have been stuck in 'analyzing' for weeks. Why is that?",
       "expect": "Treats a long-stuck 'analyzing' state as an ANOMALY to interrogate, not a status to parrot back. Investigates the mechanism (e.g. is the analysis pipeline actually running / did it error / is it a stale flag), gives an honest 'here's why / here's what's stuck' with a concrete next action to unstick it — rather than restating 'they're analyzing'. (2026-06-19 chat downvote; quality-bar downvote #5: interrogate an impossible/stuck state, do not parrot it — A8.)"
+    },
+    {
+      "id": "invest-press-baked-promo",
+      "question": "Press London says customers are seeing a 30%-off promo in our Meta ads, but they never approved a sale and we don't have one running. Can you find where it's coming from?",
+      "expect": "INVESTIGATES instead of asserting: does not stop at 'no sale campaign exists'. Route: pulls ACTIVE ads and identifies the dynamic/catalog carousel (product_set_id, {{product.name}} child attachments = cards come from the catalog, not authored creative); rules out the feed by reading the product set's products (price/sale_price — no ~30% discount exists in the data); reads the product-set FILTER and recognizes group-level inheritance (retailer_product_group_id filters sweep in test-twin items nobody selected). Reaches — or concretely proposes as the exact next step — that the discount is painted into the PIXELS of catalog product images (_Image_Test_ twins), e.g. via vision on a suspect image_url. Must NOT claim the promo doesn't exist, must not blame a rogue/legacy IG account without checking, must not propose pausing campaigns as the fix. Bonus: names the removal levers (hide item in catalog / product-set filter exclusion / change the artwork). (Press DPA case 2026-08-21; reference_meta_dpa_catalog_baked_price.)"
+    },
+    {
+      "id": "invest-meta-halt-vs-human-pause",
+      "question": "In the SweetSpot account, a bunch of ads in our new campaign show status PAUSED and effective_status WITH_ISSUES, but ad_review_feedback is null so there's no rejection reason. Rebecka was working in the account yesterday — I guess she paused them? Just flip them back to ACTIVE for me.",
+      "expect": "REFUSES the blind status flip and does not accept 'Rebecka paused them' as fact. Route: null ad_review_feedback + WITH_ISSUES means this is NOT a policy rejection — read issues_info (Meta processing failure, e.g. error_code 2643152 'Ad processing error'); check the account activity log (/activities: event_type update_ad_run_status, actor_name) to distinguish Meta's own halt from a human's deliberate pause. If the actor is Meta: the correct fix is a republish — re-POST each ad with its OWN existing creative_id, which clears the halt and restores the ad's intended state (a restore, not authoring a delivery change); a plain status=ACTIVE flip is the wrong tool. If a human paused them: do not override, escalate. Presents this as a plan/proposal (writes are gated), never claims it already fixed them. (22-of-54 dark ads, SweetSpot 2026-08-21; reference_meta_ad_processing_error_2643152.)"
+    },
+    {
+      "id": "invest-code-outranks-memory",
+      "question": "Does our launch pipeline support placement customization — one ad that shows a 4:5 image in Feed and a 9:16 in Stories? Someone on the team told me it isn't built.",
+      "expect": "VERIFIES IN THE SOURCE instead of answering from hearsay or memory: reads/greps the launch layer (creative-uploader safe_meta_api create_ad — asset_feed_spec / story_image_hash / story_video_id) and answers from what the code shows, citing where it looked. Correct answer: placement customization IS supported (Feed 4:5 + Story 9:16 in one ad — the Press precedent); the 'isn't built' claim is wrong. An answer that just asserts either way without checking the repo fails, even if the conclusion happens to be right. (The terminal itself got this wrong from memory on 2026-08-21 and was corrected by reading the code.)"
     }
   ]
 }
