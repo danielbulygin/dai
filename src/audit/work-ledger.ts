@@ -110,6 +110,16 @@ export function buildWorkLedger(inp: WorkLedgerInputs): WorkRow[] {
   const activity = dataOf(s['account_activity']);
   push(numOf(activity.total_window), `Read ${numOf(activity.total_window)} logged changes to the account`);
 
+  // The story's row is the pinned date, so a read that could not pin one
+  // contributes nothing: the ledger never claims work it cannot point at.
+  const rootCause = dataOf(s['root_cause']);
+  if (typeof rootCause.start_date === 'string' && rootCause.start_date.length > 0) {
+    push(
+      numOf(rootCause.days_read),
+      `Pinned the day the biggest cost movement started across ${numOf(rootCause.days_read)} days and read which funnel step moved with it`,
+    );
+  }
+
   const facts = dataOf(s['account_facts']);
   push(countOf(facts.facts), `Pulled ${countOf(facts.facts)} facts about the account's own texture`);
 

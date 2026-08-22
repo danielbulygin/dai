@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { AdsetConfigLite } from './report-pack.js';
+import type { ChangeReceipt, ReceiptKind } from './root-cause.js';
 import type {
   ActivityEvent,
   AdSetNamePromise,
@@ -141,6 +142,12 @@ export const pixelsSchema = z.union([
 const numOf = (v: unknown): number => {
   const n = typeof v === 'number' ? v : parseFloat(String(v ?? ''));
   return Number.isFinite(n) ? n : 0;
+};
+/** A figure, or null when the field is absent: a budget of 0 and no budget read differently. */
+const numOrNull = (v: unknown): number | null => {
+  if (v === null || v === undefined || v === '') return null;
+  const n = typeof v === 'number' ? v : parseFloat(String(v));
+  return Number.isFinite(n) ? n : null;
 };
 const strOrNull = (v: unknown): string | null => (typeof v === 'string' && v.length > 0 ? v : null);
 const boolOrNull = (v: unknown): boolean | null => (typeof v === 'boolean' ? v : null);
@@ -564,6 +571,46 @@ export function toActivityEvents(changes: readonly unknown[]): ActivityEvent[] {
     // The key is the adapter's own stable identity, so overlapping window
     // slices cannot report one pause twice.
     byKey.set(strOrNull(c.key) ?? `${event.event_type}:${at}:${strOrNull(c.objectId) ?? ''}`, event);
+  }
+  return [...byKey.values()];
+}
+
+/** The port's own closed vocabulary. Anything else is kept as `other`. */
+const RECEIPT_KINDS = new Set<string>(['paused', 'resumed', 'budget_increased', 'budget_decreased']);
+
+/**
+ * The same normalized change rows, kept WHOLE for the root-cause story: what
+ * changed, to what it was done, and which way a budget went.
+ *
+ * `toActivityEvents` above throws the budget figures and the object name away,
+ * because the activity chapter only counts and buckets. A receipt has to be a
+ * sentence, so it needs them: "the daily budget went up from 40 to 120" is a
+ * receipt and "a budget event happened" is not. A kind outside the port's own
+ * closed vocabulary is carried as `other` rather than guessed at.
+ */
+export function toChangeReceipts(changes: readonly unknown[]): ChangeReceipt[] {
+  const byKey = new Map<string, ChangeReceipt>();
+  for (const change of changes) {
+    const c = rec(change);
+    const at = strOrNull(c.at);
+    if (!at) continue;
+    const rawKind = strOrNull(c.kind) ?? '';
+    const receipt: ChangeReceipt = {
+      at,
+      kind: RECEIPT_KINDS.has(rawKind) ? (rawKind as ReceiptKind) : 'other',
+      objectName: strOrNull(c.objectName),
+      objectType: strOrNull(c.objectType),
+      fromBudget: numOrNull(c.fromBudget),
+      toBudget: numOrNull(c.toBudget),
+      // Nothing on this seam carries a who, and one invented name in a receipt
+      // is worse than every other honesty bug in this file put together.
+      actorName: null,
+    };
+    // First occurrence wins. Overlapping window slices return the same change
+    // twice under the same key, and a later copy carrying fewer fields would
+    // otherwise quietly replace the one that could form a sentence.
+    const key = strOrNull(c.key) ?? `${rawKind}:${at}:${strOrNull(c.objectId) ?? ''}`;
+    if (!byKey.has(key)) byKey.set(key, receipt);
   }
   return [...byKey.values()];
 }

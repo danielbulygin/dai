@@ -12,6 +12,7 @@
  */
 
 import type { PackSection, PackAdRow, AdsetConfigLite } from './report-pack.js';
+import type { ChangeReceipt, ReceiptKind } from './root-cause.js';
 import { kpiMode } from './report-pack.js';
 
 const r1 = (v: number): number => Math.round(v * 10) / 10;
@@ -1329,6 +1330,43 @@ export function categorizeActivityEvent(eventType: string): ActivityCategory {
   if (/campaign|ad_set|adgroup|ad_group|create_ad_set/.test(e)) return 'structure';
   if (/account|billing|payment|funding|invoice|user|permission|business|owner/.test(e)) return 'account';
   return 'other';
+}
+
+/**
+ * The same events as receipts the root-cause story can quote.
+ *
+ * The live activities edge names the person behind a change and does NOT carry
+ * the budget it moved from and to, which is the mirror image of what the
+ * generation seam hands over. So a budget change from this source is
+ * `budget_changed` and never an increase: the compound signature that blames a
+ * scale-up needs to know the direction, and reading a direction off an event
+ * name is exactly how a receipt ends up accusing somebody of the opposite move.
+ */
+export function receiptsFromActivityEvents(events: readonly ActivityEvent[]): ChangeReceipt[] {
+  return events
+    .filter((ev) => typeof ev.event_time === 'string' && ev.event_time.length > 0)
+    .map((ev) => {
+      const raw = (ev.event_type || '').toLowerCase();
+      const category = categorizeActivityEvent(ev.event_type);
+      const kind: ReceiptKind =
+        category === 'budget'
+          ? 'budget_changed'
+          : category === 'status'
+            ? /unpause|resume|reactivat/.test(raw)
+              ? 'resumed'
+              : 'paused'
+            : 'other';
+      return {
+        at: ev.event_time,
+        kind,
+        // This read asks for no object name, so nothing here names what changed.
+        objectName: null,
+        objectType: ev.object_type,
+        fromBudget: null,
+        toBudget: null,
+        actorName: ev.actor_name,
+      };
+    });
 }
 
 export interface AccountActivityInputs {

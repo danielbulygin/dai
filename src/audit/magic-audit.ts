@@ -17,17 +17,19 @@ import {
   type ScatterLens, type FatigueReadForCohorts,
 } from './report-pack.js';
 import { buildScorecard, buildComparisonSection, type ScorecardInputs, type ScorecardEntry } from './scorecard.js';
+import { computeRootCause, type ChangeReceipt } from './root-cause.js';
 import {
   computePlacementBreakdown, computeAudienceBreakdown, computeTargetingSplit, computeLearningLimited,
   computeSaturation, computeCreativeDiversity, computeCohortWave, computeWhatsWorking, computeLandingPages,
   computeAccountFacts, longestStillSpendingSpan, classifyDestination, computeAccountActivity,
   rankDestinationsBySpend, computeAudienceSegments, computePixelHealth, computeLaunchDiscipline,
+  receiptsFromActivityEvents,
   type PlacementInsightRow, type DemoInsightRow, type GeoInsightRow, type TargetingSpecLite,
   type WeeklyReachRow, type LandingAdRow, type DeadUrlCheck, type ActivityEvent,
 } from './report-pack-extra.js';
 import {
   partialWarning, readAudiences, readClassifiedAdSets, readNamePromises, seamGapFor, toActivityEvents,
-  toAdsetConfigs, toAdsetSpend, toAdsetWeeklyEvents, toDemoRows, toGeoRows, toPixelLites,
+  toAdsetConfigs, toAdsetSpend, toAdsetWeeklyEvents, toChangeReceipts, toDemoRows, toGeoRows, toPixelLites,
   toPlacementRows, toSegmentRows, toTargetingSpecs,
   type SeamAdSet, type TinkersRead, type TinkersSeamReads,
 } from './tinkers-reads.js';
@@ -231,7 +233,7 @@ export interface LeadInsight {
 // other, and the deep dash scrub rewrites a dashed one into two sentences on
 // its way to the row ("Placements. Where the spend actually goes"), which is
 // not a title. A colon says the same thing and survives the gate unchanged.
-const SECTION_ORDER: Array<Pick<AuditSection, 'key' | 'title' | 'status'>> = [
+export const SECTION_ORDER: Array<Pick<AuditSection, 'key' | 'title' | 'status'>> = [
   { key: 'dataset_health', title: 'Data Foundation: pixel, CAPI and match quality', status: 'pending' },
   { key: 'account_structure', title: 'Account Structure and Spend Concentration', status: 'pending' },
   { key: 'spend_concentration', title: 'Budget Concentration: how much rides on one ad', status: 'pending' },
@@ -259,6 +261,7 @@ const SECTION_ORDER: Array<Pick<AuditSection, 'key' | 'title' | 'status'>> = [
   { key: 'funnel_read', title: 'Funnel Diagnosis', status: 'pending' },
   { key: 'account_facts', title: 'Did You Know: the account texture', status: 'pending' },
   { key: 'account_activity', title: "Account Activity: change history and who's working the account", status: 'pending' },
+  { key: 'root_cause', title: 'The Biggest Move: when it started and what changed around it', status: 'pending' },
   { key: 'competitor_teardown', title: 'Ads Library Landscape', status: 'pending' },
 ];
 
@@ -2150,6 +2153,11 @@ export function workLineFor(key: string, s: AuditSection): string | null {
       const launched = typeof d.launched_total === 'number' ? d.launched_total : 0;
       return months ? `Dated every ad's first spending day across ${months} months and counted ${launched} launches` : null;
     }
+    case 'root_cause': {
+      const days = typeof d.days_read === 'number' ? d.days_read : 0;
+      if (!d.start_date) return days ? `Read ${days} days of daily delivery looking for the biggest cost movement` : null;
+      return `Pinned the day the biggest cost movement started and read which funnel step moved with it across ${days} days`;
+    }
     case 'account_facts':
       return `Pulled six months of account texture, the "did you know" facts`;
     case 'competitor_teardown':
@@ -2889,6 +2897,92 @@ export async function runMagicAudit(
     return read.state === 'ok' ? toAdsetSpend(read.data) : spendByAdset;
   };
 
+  /**
+   * ONE change-history read per audit, memoized, for the two chapters that need
+   * it. The activity chapter counts and buckets the events; the root-cause story
+   * quotes the ones that landed near the date it pinned. Two pulls would be two
+   * chances for the two chapters to cite different history for the same account,
+   * and on the seam it is three requests each.
+   *
+   * `ok: false` carries the section shape the failure deserves, so the activity
+   * chapter reports the gap exactly as it did before, while the story keeps its
+   * OTHER half and says plainly that it could not see the change log. Those are
+   * different sentences from "nothing changed", and the story never merges them.
+   */
+  interface ActivityLoad {
+    ok: boolean;
+    gap?: Partial<AuditSection>;
+    events: ActivityEvent[];
+    receipts: ChangeReceipt[];
+    partial: boolean;
+    actorsAvailable: boolean;
+    asOf?: string;
+    windowDays?: number;
+  }
+  let activityPromise: Promise<ActivityLoad> | undefined;
+  const loadActivity = (): Promise<ActivityLoad> => {
+    activityPromise ??= (async (): Promise<ActivityLoad> => {
+      const nothing = { events: [], receipts: [], partial: false };
+      if (seam) {
+        // Their window caps at 31 days and is REFUSED rather than truncated, so
+        // ninety days is three requests. The first slice decides the read:
+        // if the most recent month cannot be read there is no history at all,
+        // while a failed older slice only shortens the window we claim.
+        const asOf = new Date().toISOString().slice(0, 10);
+        const changes: unknown[] = [];
+        let daysRead = 0;
+        let partial = false;
+        for (let slice = 0; slice < ACTIVITY_SLICES; slice += 1) {
+          const read = await seam.activity({
+            since: shiftISO(asOf, slice * ACTIVITY_SLICE_DAYS + (ACTIVITY_SLICE_DAYS - 1)),
+            until: shiftISO(asOf, slice * ACTIVITY_SLICE_DAYS),
+          });
+          if (read.state !== 'ok') {
+            if (slice === 0) {
+              return { ok: false, gap: seamGapFor(read, "this account's change history"), ...nothing, actorsAvailable: false };
+            }
+            partial = true;
+            break;
+          }
+          changes.push(...read.data);
+          daysRead += ACTIVITY_SLICE_DAYS;
+          if (read.partial) partial = true;
+        }
+        return {
+          ok: true,
+          events: toActivityEvents(changes),
+          receipts: toChangeReceipts(changes),
+          partial,
+          // The normalized rows carry what changed and when, and no actor at
+          // all. One "unattributed" bucket over every change would read as a
+          // finding about a person nobody named.
+          actorsAvailable: false,
+          asOf,
+          windowDays: daysRead,
+        };
+      }
+      // Change history reads live from Meta's activities edge on BOTH paths
+      // (cold connection token or the agency token) — no warehouse dependency.
+      const res = await fetchAccountActivities(code, client.adAccountId, coldToken);
+      if (!res) {
+        return {
+          ok: false,
+          gap: { status: 'error', error: 'account change-history pull failed or is unavailable under ads_read' },
+          ...nothing,
+          actorsAvailable: true,
+        };
+      }
+      return {
+        ok: true,
+        events: res.events,
+        receipts: receiptsFromActivityEvents(res.events),
+        partial: res.partial,
+        actorsAvailable: true,
+      };
+    })();
+    return activityPromise;
+  };
+
   const RUNNERS: Record<string, () => Promise<Partial<AuditSection>>> = {
     dataset_health: () => runDatasetHealth(code),
     account_structure: () => runAccountStructure(code),
@@ -3194,55 +3288,33 @@ export async function runMagicAudit(
       return computeAccountFacts({ rows180: packRows180, adNames, partnershipSpendPct: partnershipPct, currency: client.currency });
     },
     account_activity: async () => {
-      if (seam) {
-        // Their window caps at 31 days and is REFUSED rather than truncated, so
-        // ninety days is three requests. The first slice decides the section:
-        // if the most recent month cannot be read there is no history to report,
-        // while a failed older slice only shortens the window we claim.
-        const asOf = new Date().toISOString().slice(0, 10);
-        const changes: unknown[] = [];
-        let daysRead = 0;
-        let partial = false;
-        for (let slice = 0; slice < ACTIVITY_SLICES; slice += 1) {
-          const read = await seam.activity({
-            since: shiftISO(asOf, slice * ACTIVITY_SLICE_DAYS + (ACTIVITY_SLICE_DAYS - 1)),
-            until: shiftISO(asOf, slice * ACTIVITY_SLICE_DAYS),
-          });
-          if (read.state !== 'ok') {
-            if (slice === 0) return seamGapFor(read, "this account's change history");
-            partial = true;
-            break;
-          }
-          changes.push(...read.data);
-          daysRead += ACTIVITY_SLICE_DAYS;
-          if (read.partial) partial = true;
-        }
-        return computeAccountActivity({
-          events: toActivityEvents(changes),
-          currency: client.currency,
-          monthlyRetainer: null,
-          partial,
-          asOf,
-          windowDays: daysRead,
-          // The normalized rows carry what changed and when, and no actor at
-          // all. One "unattributed" bucket over every change would read as a
-          // finding about a person nobody named.
-          actorsAvailable: false,
-        });
-      }
-      // Change history reads live from Meta's activities edge on BOTH paths
-      // (cold connection token or the agency token) — no warehouse dependency.
-      const res = await fetchAccountActivities(code, client.adAccountId, coldToken);
-      if (!res) return { status: 'error', error: 'account change-history pull failed or is unavailable under ads_read' };
+      const load = await loadActivity();
+      if (!load.ok) return load.gap!;
       // Monthly retainer is nullable — unknown at audit time. This is the wire
       // point: when a lead states what they pay their manager, thread it here to
       // light up cost-per-change. Until then the section reports counts only.
       const monthlyRetainer: number | null = null;
       return computeAccountActivity({
-        events: res.events,
+        events: load.events,
         currency: client.currency,
         monthlyRetainer,
-        partial: res.partial,
+        partial: load.partial,
+        actorsAvailable: load.actorsAvailable,
+        ...(load.asOf ? { asOf: load.asOf } : {}),
+        ...(load.windowDays ? { windowDays: load.windowDays } : {}),
+      });
+    },
+    root_cause: async () => {
+      const load = await loadActivity();
+      return computeRootCause({
+        days: packAccRows90,
+        currency: client.currency,
+        anchorDate: auditWindow.anchorDate,
+        // A failed change-history read hands the story a NULL, not an empty
+        // list: "nothing changed on the ads side" is a finding this section
+        // publishes, and inventing it out of a read that never answered would
+        // be the one fabricated receipt in the report.
+        changes: load.ok ? load.receipts : null,
       });
     },
     audience_segments: async () => {
