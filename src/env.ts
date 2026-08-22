@@ -58,6 +58,12 @@ const envSchema = z.object({
   /** Gemini vision key — cold-path creative reads and look_at_media. Optional:
    *  both surfaces degrade with a self-describing error when it is absent. */
   GEMINI_API_KEY: z.string().optional(),
+  /** Vercel Sandbox credentials — run_analysis_script (compute over fetched
+   *  data in a no-credentials, no-network microVM). All three required for the
+   *  tool to work; absent, it degrades with a self-describing error. */
+  VERCEL_TOKEN: z.string().optional(),
+  VERCEL_TEAM_ID: z.string().optional(),
+  VERCEL_PROJECT_ID: z.string().optional(),
   TRIPLEWHALE_API_KEY: z.string().optional(),
   DROPLET_URL: z.string().default('http://139.59.144.194:8080'),
   DROPLET_API_KEY: z.string().optional(),

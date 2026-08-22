@@ -17,6 +17,7 @@ import * as browserTools from './tools/browser-tools.js';
 import * as creativeTools from './tools/creative-tools.js';
 import * as metaApiTools from './tools/meta-api-tools.js';
 import * as investigationTools from './tools/investigation-tools.js';
+import * as sandboxTools from './tools/sandbox-tools.js';
 import { auditDatasetHealth } from './tools/dataset-health-tools.js';
 import * as mediaLibraryTools from './tools/media-library-tools.js';
 import * as adLaunchTools from './tools/ad-launch-tools.js';
@@ -4396,6 +4397,41 @@ register({
       pattern: input.pattern as string,
       pathPrefix: input.path_prefix as string | undefined,
       maxResults: input.max_results as number | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'run_analysis_script',
+    description:
+      'Run a throwaway Node.js script in an isolated sandbox and get its stdout back. Use this whenever a question needs EXACT computation over data you have already fetched — arithmetic across many rows ("what is the max discount across these 171 products?"), joins/set-differences between ID lists ("which of these 54 ads appears in neither response?"), sums, rates, distributions. Never do row-by-row arithmetic in your head when the number matters: fetch the data with the other tools, then compute it here. Pass the data as `input_json`; the script runs as ESM (`node script.mjs`), so read it with `import fs from "node:fs"; const input = JSON.parse(fs.readFileSync("./input.json", "utf8"));`. Print results to stdout (console.log). The sandbox is a fresh microVM with NO network access and NO credentials — it cannot fetch anything itself, so put everything the computation needs into input_json. Script errors come back as stderr + a non-zero exit code: fix the script and run it again.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        script: {
+          type: 'string',
+          description:
+            'Node.js source (ESM — use `import`, not require, or read files via `node:fs`). Reads ./input.json, prints results to stdout. Max 128KB.',
+        },
+        input_json: {
+          type: 'object',
+          description:
+            'The data to compute over, written to ./input.json inside the sandbox. Max 5MB serialized — pass only the fields the computation needs.',
+        },
+        timeout_seconds: {
+          type: 'number',
+          description: 'Max script runtime in seconds (default 60, clamped to 5-120).',
+        },
+      },
+      required: ['script'],
+    },
+  },
+  async execute(input) {
+    return sandboxTools.runAnalysisScript({
+      script: input.script as string,
+      inputJson: input.input_json,
+      timeoutSeconds: input.timeout_seconds as number | undefined,
     });
   },
 });

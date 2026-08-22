@@ -6,6 +6,7 @@ export const toolProfiles = {
     'Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'Bash', 'Write', 'Edit', 'NotebookEdit',
     // Investigation surface — see the note on media_buyer below.
     'meta_graph_get', 'look_at_media', 'read_repo_file', 'grep_repo',
+    'run_analysis_script',
   ],
   assistant: ['recall', 'remember', 'search_memories', 'ask_agent', 'post_message', 'reply_in_thread', 'send_as_daniel', 'read_dms', 'find_user', 'get_unread_dms', 'search_meetings', 'get_meeting_summary', 'get_meeting_transcript', 'list_recent_meetings', 'query_tasks', 'create_task', 'update_task', 'add_task_comment', 'search_notion', 'get_channel_insights', 'get_recent_mentions', 'get_monitoring_history', 'generate_briefing', 'list_events', 'search_events', 'create_event', 'update_event', 'delete_event', 'check_availability', 'search_emails', 'read_email', 'draft_email', 'send_email', 'review_my_learnings', 'correct_learning', 'delete_learning', 'browse_navigate', 'browse_click', 'browse_type', 'browse_read_page', 'browse_screenshot', 'browse_select', 'browse_close'],
   media_buyer: [
@@ -41,6 +42,9 @@ export const toolProfiles = {
     // agent holding an open Graph read would be one app-code bug away from
     // reading another tenant's account. See project_tinkers_ada_write_parity.
     'meta_graph_get', 'look_at_media', 'read_repo_file', 'grep_repo',
+    // Compute over fetched data (Vercel Sandbox: no credentials in, no network
+    // out). Internal-only for the same reason as the investigation surface.
+    'run_analysis_script',
   ],
   creative_strategist: [
     'recall', 'remember', 'search_memories',

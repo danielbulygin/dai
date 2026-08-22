@@ -121,6 +121,9 @@ const READ_TOOLS = new Set<string>([
   // investigation surface — read-only BY CONSTRUCTION (always HTTP GET, tenant
   // pinned to the resolved token's granted accounts, no write verb reachable)
   'meta_graph_get', 'look_at_media', 'read_repo_file', 'grep_repo',
+  // compute-only: script runs in an ephemeral microVM with networkPolicy
+  // 'deny-all' and zero credentials — it can affect nothing outside the VM
+  'run_analysis_script',
 ]);
 
 /**
