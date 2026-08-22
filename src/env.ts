@@ -64,6 +64,9 @@ const envSchema = z.object({
   VERCEL_TOKEN: z.string().optional(),
   VERCEL_TEAM_ID: z.string().optional(),
   VERCEL_PROJECT_ID: z.string().optional(),
+  /** AOT Memory store (search_corpus / read_corpus_memory): password for the
+   *  mem_api Postgres role. Absent, the corpus tools degrade self-describing. */
+  AOT_MEMORY_DB_PASSWORD: z.string().optional(),
   TRIPLEWHALE_API_KEY: z.string().optional(),
   DROPLET_URL: z.string().default('http://139.59.144.194:8080'),
   DROPLET_API_KEY: z.string().optional(),

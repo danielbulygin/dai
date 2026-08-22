@@ -124,6 +124,8 @@ const READ_TOOLS = new Set<string>([
   // compute-only: script runs in an ephemeral microVM with networkPolicy
   // 'deny-all' and zero credentials — it can affect nothing outside the VM
   'run_analysis_script',
+  // corpus reads — RLS-scoped selects on the memory store, no side effects
+  'search_corpus', 'read_corpus_memory',
 ]);
 
 /**

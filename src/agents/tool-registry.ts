@@ -18,6 +18,7 @@ import * as creativeTools from './tools/creative-tools.js';
 import * as metaApiTools from './tools/meta-api-tools.js';
 import * as investigationTools from './tools/investigation-tools.js';
 import * as sandboxTools from './tools/sandbox-tools.js';
+import * as corpusTools from './tools/corpus-tools.js';
 import { auditDatasetHealth } from './tools/dataset-health-tools.js';
 import * as mediaLibraryTools from './tools/media-library-tools.js';
 import * as adLaunchTools from './tools/ad-launch-tools.js';
@@ -4433,6 +4434,60 @@ register({
       inputJson: input.input_json,
       timeoutSeconds: input.timeout_seconds as number | undefined,
     });
+  },
+});
+
+register({
+  definition: {
+    name: 'search_corpus',
+    description:
+      "Search the agency's accumulated knowledge corpus (the AOT Memory store): cross-client Meta gotchas and error-code diagnoses, per-client conventions and learnings, working rules, past investigations. SEARCH THIS BEFORE CONCLUDING — before diagnosing a Meta error code or a weird account state (someone has usually hit it before and written down the exact route), before asserting that something \"isn't built\" or \"doesn't exist\", and at the start of any client task. Hybrid keyword+semantic search: full natural questions work well, and exact strings like error codes (\"2643152\") are gold. Returns snippets — ALWAYS read the full memory with read_corpus_memory before relying on it. Complements grep_repo (which searches repo docs; this searches distilled experience).",
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        query: {
+          type: 'string',
+          description: 'What you want to know — a natural question, a symptom, or an exact error code/phrase.',
+        },
+        client_code: {
+          type: 'string',
+          description: 'Optional client code to bias relevance (e.g. "laori", "TL", "press_london").',
+        },
+        limit: {
+          type: 'number',
+          description: 'Max hits (default 12).',
+        },
+      },
+      required: ['query'],
+    },
+  },
+  async execute(input) {
+    return corpusTools.searchCorpus({
+      query: input.query as string,
+      clientCode: input.client_code as string | undefined,
+      limit: input.limit as number | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'read_corpus_memory',
+    description:
+      'Read the FULL content of one memory from the agency knowledge corpus, by the path a search_corpus hit returned (e.g. "org/reference_meta_ads_api_gotchas.md"). Snippets truncate the route/fix details — read the whole memory before acting on it.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        path: {
+          type: 'string',
+          description: 'Store path from a search_corpus result.',
+        },
+      },
+      required: ['path'],
+    },
+  },
+  async execute(input) {
+    return corpusTools.readCorpusMemory({ path: input.path as string });
   },
 });
 

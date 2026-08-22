@@ -7,6 +7,7 @@ export const toolProfiles = {
     // Investigation surface — see the note on media_buyer below.
     'meta_graph_get', 'look_at_media', 'read_repo_file', 'grep_repo',
     'run_analysis_script',
+    'search_corpus', 'read_corpus_memory',
   ],
   assistant: ['recall', 'remember', 'search_memories', 'ask_agent', 'post_message', 'reply_in_thread', 'send_as_daniel', 'read_dms', 'find_user', 'get_unread_dms', 'search_meetings', 'get_meeting_summary', 'get_meeting_transcript', 'list_recent_meetings', 'query_tasks', 'create_task', 'update_task', 'add_task_comment', 'search_notion', 'get_channel_insights', 'get_recent_mentions', 'get_monitoring_history', 'generate_briefing', 'list_events', 'search_events', 'create_event', 'update_event', 'delete_event', 'check_availability', 'search_emails', 'read_email', 'draft_email', 'send_email', 'review_my_learnings', 'correct_learning', 'delete_learning', 'browse_navigate', 'browse_click', 'browse_type', 'browse_read_page', 'browse_screenshot', 'browse_select', 'browse_close'],
   media_buyer: [
@@ -45,6 +46,9 @@ export const toolProfiles = {
     // Compute over fetched data (Vercel Sandbox: no credentials in, no network
     // out). Internal-only for the same reason as the investigation surface.
     'run_analysis_script',
+    // The AOT Memory corpus (org truths + client learnings + Ada's own).
+    // Internal-only: the store's RLS scopes are agency-internal knowledge.
+    'search_corpus', 'read_corpus_memory',
   ],
   creative_strategist: [
     'recall', 'remember', 'search_memories',
