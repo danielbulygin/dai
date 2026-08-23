@@ -7,6 +7,8 @@
  *   pnpm exec tsx scripts/eval-ada.ts --runner slack       # the hand-rolled runner
  *   pnpm exec tsx scripts/eval-ada.ts --no-judge           # capture only (old behaviour)
  *   pnpm exec tsx scripts/eval-ada.ts --target http        # hit the LIVE /chat SSE endpoint
+ *   pnpm exec tsx scripts/eval-ada.ts --target http --scope AOTUS --questions golden-questions-web.json
+ *                                                          # web-parity: the CUSTOMER door (scoped chat)
  *
  * Runs are sequential (live Opus + live tools — costs real money and a few
  * minutes). Results land in tests/eval/runs/<timestamp>.json. Sessions use
@@ -25,7 +27,8 @@
  * needs the skills dir; set ADA_SDK_SKILLS_CWD locally (defaults to the droplet path).
  */
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { createHmac } from 'node:crypto';
+import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Anthropic from '@anthropic-ai/sdk';
 import { runAgent } from '../src/agents/runner.js';
@@ -42,11 +45,15 @@ interface GoldenQuestion {
   expect: string;
 }
 
-const { questions } = JSON.parse(
-  readFileSync(join(EVAL_DIR, 'golden-questions.json'), 'utf-8'),
-) as { questions: GoldenQuestion[] };
-
 const argv = process.argv;
+// --questions <file>: an alternate golden set from tests/eval/ (basename only, so a
+// path can't escape the eval dir). The web-parity suite lives in golden-questions-web.json.
+const questionsFile = argv.includes('--questions')
+  ? basename(argv[argv.indexOf('--questions') + 1] ?? 'golden-questions.json')
+  : 'golden-questions.json';
+const { questions } = JSON.parse(
+  readFileSync(join(EVAL_DIR, questionsFile), 'utf-8'),
+) as { questions: GoldenQuestion[] };
 const onlyArg = argv.find((a) => a.startsWith('--only'));
 const onlyIds = onlyArg
   ? new Set((argv[argv.indexOf(onlyArg) + 1] ?? onlyArg.split('=')[1] ?? '').split(','))
@@ -63,6 +70,32 @@ const HTTP_TIMEOUT_MS = Number(process.env.EVAL_HTTP_TIMEOUT_MS ?? 180_000);
 if (target === 'http' && !ASSIST_SECRET) {
   console.error('--target http needs ADA_ASSIST_SECRET in env (X-Assist-Key for the /chat endpoint).');
   process.exit(1);
+}
+
+// --scope <CODE>: ask through the CUSTOMER door — the client-scoped /chat branch the
+// Tinkers portal uses. Mints the identical 5-minute HMAC scope claim (mirrors
+// verifyScopeClaim in ada-console-assist.ts / tinkers scope-claim.ts), so the run
+// exercises the live tenancy fence itself, never a test-only shortcut.
+const scope = argv.includes('--scope')
+  ? (argv[argv.indexOf('--scope') + 1] ?? '').toUpperCase().trim()
+  : '';
+const SCOPE_SIGNING_SECRET = process.env.ADA_SCOPE_SIGNING_SECRET ?? '';
+if (scope && target !== 'http') {
+  console.error('--scope only works with --target http (it tests the live scoped endpoint).');
+  process.exit(1);
+}
+if (scope && !SCOPE_SIGNING_SECRET) {
+  console.error('--scope needs ADA_SCOPE_SIGNING_SECRET in env (the Tinkers↔droplet claim secret).');
+  process.exit(1);
+}
+
+// Minted per request, not per run: claims expire in 5 minutes and a judged suite runs longer.
+function mintScopeClaim(clientScope: string): string {
+  const now = Math.floor(Date.now() / 1000);
+  const payload = { client_scope: clientScope, user_id: 'eval-web', iat: now, exp: now + 300 };
+  const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const sig = createHmac('sha256', SCOPE_SIGNING_SECRET).update(body).digest('base64url');
+  return `${body}.${sig}`;
 }
 
 /**
@@ -84,7 +117,11 @@ async function askViaHttp(question: string, sessionId: string): Promise<ChatStre
     const res = await fetch(CHAT_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Assist-Key': ASSIST_SECRET },
-      body: JSON.stringify({ question, session_id: sessionId }),
+      body: JSON.stringify({
+        question,
+        session_id: sessionId,
+        ...(scope ? { client_scope: scope, scope_claim: mintScopeClaim(scope) } : {}),
+      }),
       signal: ctrl.signal,
     });
     if (!res.ok || !res.body) {
@@ -229,7 +266,8 @@ const totalCost = results.reduce((s, r) => s + (typeof r.cost_usd === 'number' ?
 const infraFailures = results.filter((r) => r.error != null || r.infra_failure === true).length;
 
 writeFileSync(outPath, JSON.stringify({
-  run_id: runId, runner, target, judge_model: doJudge ? JUDGE_MODEL : null,
+  run_id: runId, runner, target, suite: questionsFile, scope: scope || null,
+  judge_model: doJudge ? JUDGE_MODEL : null,
   git: process.env.GIT_SHA ?? 'local',
   provisional: true,
   note: 'Grades are PROVISIONAL — Dan has not ratified the quality bar (docs/ada-quality-bar-2026-06-21.md). Principles_violated reference the [EVAL] IDs there; A7 is advisory.',
