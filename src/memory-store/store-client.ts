@@ -72,6 +72,8 @@ export interface StoreSearchHit {
   snippet: string;
   score: number;
   version: number;
+  /** First ~N chars of the memory body — only when search ran with contentHeadChars. */
+  contentHead?: string;
 }
 
 export interface StoreMemory {
@@ -201,30 +203,35 @@ export async function storeSearch(args: {
   query: string;
   clientScopes: string[];
   limit?: number;
+  /** When set, each hit also carries the first N chars of the memory body. */
+  contentHeadChars?: number;
 }): Promise<StoreSearchHit[]> {
   const limit = args.limit ?? 12;
+  const headChars = Math.max(0, Math.min(4000, args.contentHeadChars ?? 0));
   const queryVec = await embedQuery(args.query);
 
   return withAdaPrincipal(args.clientScopes, async (c) => {
     const fts = await c.query(
       `select boundary, path, title, version,
-              ts_headline('english', content, q, 'MaxWords=35, MinWords=10') as snippet
+              ts_headline('english', content, q, 'MaxWords=35, MinWords=10') as snippet,
+              left(content, $3) as content_head
          from memories, websearch_to_tsquery('english', $1) q
         where is_active and content_tsv @@ q
         order by ts_rank(content_tsv, q) desc, path
         limit $2`,
-      [args.query, limit],
+      [args.query, limit, headChars],
     );
     const vec = queryVec
       ? await c.query(
           `select m.boundary, m.path, m.title, m.version,
-                  left(m.content, 300) as snippet
+                  left(m.content, 300) as snippet,
+                  left(m.content, $4) as content_head
              from memory_embeddings e
              join memories m on m.boundary = e.boundary and m.path = e.path and m.is_active
             where e.model = $1
             order by e.embedding <=> $2::vector
             limit $3`,
-          [EMBEDDING_MODEL, toVectorLiteral(queryVec), limit],
+          [EMBEDDING_MODEL, toVectorLiteral(queryVec), limit, headChars],
         )
       : { rows: [] as Record<string, unknown>[] };
 
@@ -248,6 +255,7 @@ export async function storeSearch(args: {
         snippet: String(row.snippet ?? ''),
         score,
         version: Number(row.version),
+        ...(headChars > 0 ? { contentHead: String(row.content_head ?? '') } : {}),
       }));
   });
 }

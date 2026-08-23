@@ -125,6 +125,57 @@ Four rules for any diagnosis, audit, or "why is this happening" question:
    creative are invisible in every API field — \`look_at_media\` on the actual asset is the only
    proof.`;
 
+/** Prompt-build must never hang on the store: race the search against this. */
+const RECALL_TIMEOUT_MS = 4000;
+const RECALL_HITS = 4;
+const RECALL_HEAD_CHARS = 1200;
+
+/**
+ * Query-aware recall (AOT Memory plan: "replace query-independent context
+ * injection with store-backed query-aware recall" — the old static top-5
+ * learnings contained the asked-about fact 3/59 times in the retrieval eval).
+ * Searches the store with the USER'S MESSAGE at prompt-build time and injects
+ * the top hits, so the relevant knowledge arrives without Ada having to
+ * decide to look for it (the reflex gap the 2026-08-23 investigation evals
+ * kept showing). Internal Ada only; fail-open to null (caller falls back to
+ * the static block).
+ */
+export async function buildQueryAwareRecallSection(
+  userMessage: string,
+  clientCode?: string,
+): Promise<string | null> {
+  const query = String(userMessage ?? '').trim();
+  if (query.length < 12) return null; // "hi" tells the search nothing
+  try {
+    const { storeSearch, allClientScopes } = await import('../../memory-store/store-client.js');
+    const hits = await Promise.race([
+      storeSearch({
+        query: clientCode ? `${clientCode} ${query}` : query,
+        clientScopes: allClientScopes(),
+        limit: RECALL_HITS,
+        contentHeadChars: RECALL_HEAD_CHARS,
+      }),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('recall timeout')), RECALL_TIMEOUT_MS)),
+    ]);
+    if (!hits.length) return null;
+    const blocks = hits.map((h) => {
+      const body = (h.contentHead ?? h.snippet).trim();
+      const truncated = h.contentHead && h.contentHead.length >= RECALL_HEAD_CHARS;
+      return `### ${h.title ?? h.path}\n(corpus: ${h.path}${truncated ? ' — TRUNCATED, read_corpus_memory for the rest' : ''})\n${body}`;
+    });
+    return [
+      '## Relevant agency knowledge (auto-retrieved for THIS question)',
+      'Top corpus matches for the current message. Treat as leads, not gospel: verify anything',
+      'load-bearing, and use `read_corpus_memory` on a path when the excerpt cuts off.',
+      ...blocks,
+    ].join('\n\n');
+  } catch (err) {
+    logger.warn({ err }, 'sdk: query-aware recall skipped (falling back to static learnings)');
+    return null;
+  }
+}
+
 export async function buildSystemPrompt(opts: RunOptions): Promise<string> {
   const agent = getAgent('ada')!;
   const parts: string[] = [];
@@ -153,12 +204,24 @@ export async function buildSystemPrompt(opts: RunOptions): Promise<string> {
     parts.push(`## Live Slack Context\nYou are responding in channel \`${opts.channelId}\`${opts.threadTs ? `, thread \`${opts.threadTs}\`` : ''}. Use these literal IDs when a tool needs this conversation's channel — never invent one.`);
   }
 
+  // Internal Ada: query-aware recall replaces the static top-5 learnings
+  // (which carried the asked-about fact 3/59 times). Own step, NOT inside the
+  // quick-context try: a quick-context failure must not silently kill recall
+  // (and vice versa — buildQueryAwareRecallSection fails open to null itself).
+  const recall = opts.clientScope
+    ? null
+    : await buildQueryAwareRecallSection(opts.userMessage, undefined);
+  if (recall) parts.push(recall);
+
   try {
     const ctx = opts.clientScope
       ? await getClientQuickContext(`ada_client_${opts.clientScope.clientCode}`, opts.clientScope.clientCode, opts.userId)
       : await getQuickContext('ada', opts.userId);
     if (ctx.lastSessionSummary) parts.push(`## Previous Session\n${ctx.lastSessionSummary}`);
-    if (ctx.topLearnings.length) parts.push(`## Key Learnings\n${ctx.topLearnings.map((l) => `- ${l.content}`).join('\n')}`);
+    // Static learnings stay as the fallback when recall produced nothing, and
+    // stay primary for client-scoped Ada until the Tinkers injection-scope
+    // question is decided.
+    if (!recall && ctx.topLearnings.length) parts.push(`## Key Learnings\n${ctx.topLearnings.map((l) => `- ${l.content}`).join('\n')}`);
     if (ctx.userLearnings.length) parts.push(`## User Preferences\n${ctx.userLearnings.map((l) => `- ${l.content}`).join('\n')}`);
   } catch (err) { logger.warn({ err }, 'sdk: quick-context injection failed'); }
 
