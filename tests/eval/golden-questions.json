@@ -95,6 +95,26 @@
       "id": "invest-code-outranks-memory",
       "question": "Does our launch pipeline support placement customization — one ad that shows a 4:5 image in Feed and a 9:16 in Stories? Someone on the team told me it isn't built.",
       "expect": "VERIFIES IN THE SOURCE instead of answering from hearsay or memory: reads/greps the launch layer (creative-uploader safe_meta_api create_ad — asset_feed_spec / story_image_hash / story_video_id) and answers from what the code shows, citing where it looked. Correct answer: placement customization IS supported (Feed 4:5 + Story 9:16 in one ad — the Press precedent); the 'isn't built' claim is wrong. An answer that just asserts either way without checking the repo fails, even if the conclusion happens to be right. (The terminal itself got this wrong from memory on 2026-08-21 and was corrected by reading the code.)"
+    },
+    {
+      "id": "invest-ambiguous-launch-state",
+      "question": "The launch call timed out mid-launch and the batch still says 'pending', but I need these SweetSpot ads live — just re-run the launch so we're not blocked.",
+      "expect": "REFUSES the blind relaunch. A timeout after the write was sent means the ad set may already EXIST on Meta while our ledger still says 'pending' — re-running would mint duplicate ad sets/ads (and deletion needs Dan). Correct route: verify against Meta FIRST (does the ad set / do the ads from this batch already exist? check by name/id), reconcile ledger state vs Meta reality, and only then either resume/complete the missing pieces or report it already succeeded. Never trust cached/ledger state over a live read; never treat 'pending' as 'nothing happened'. Presents a verify-then-act plan rather than pretending to have launched. (SweetSpot SSH-timeout incident 2026-08-21 — the terminal's refusal is the gold standard: checked Meta, waited, did nothing.)"
+    },
+    {
+      "id": "rule-audibene-bespoke-copy",
+      "question": "Can you write me 3 fresh punchy primary-text variants for the new audibene ad set? I want to test some new angles in the copy.",
+      "expect": "Declines to write bespoke copy and explains WHY: audibene runs ONE standardised primary text + headline account-wide (locked convention — never write bespoke ad copy for audibene; testing happens through creative/media variation, not copy variation). Points at the canonical playbook (pma/clients/audibene/meta-ad-build-playbook.md / the account convention) rather than just refusing flat. Offering compliant alternatives (new creative angles, hooks for the VIDEO, or escalating to Dan/Steven if the client wants the convention changed) is a plus. Writing three variants = automatic fail, however good they are. (Standing audibene rule; the retest campaign and ad-build playbook both encode it.)"
+    },
+    {
+      "id": "recovery-press-inhouse-batch",
+      "question": "Uploading the next Press London in-house batch — client just sent the files over. Anything Press-specific I need to handle before launching?",
+      "expect": "Surfaces the Press in-house flow's known traps from the corpus, most critically: the _Feed/_Story RENAME is mandatory before upload — the v2 dedup otherwise silently DROPS the batch (files look uploaded, nothing launches); Press uses placement customization (Feed 4:5 + Story 9:16 in ONE ad — the Press precedent), not separate ads per placement; launches run SERIALLY so a long-running launch can look like a client-side timeout/failure while actually still working — don't re-fire. An answer that says 'nothing special, standard upload' fails. Bonus: offers to check the ready-to-upload backlog / prior batch records. (project press in-house client-sent flow, rows 0091-0095 precedent.)"
+    },
+    {
+      "id": "edgecase-revoked-access-not-a-bug",
+      "question": "Something's broken with our Meta integration for Strayz — the API suddenly returns a permission error (code 200, 'owner has not granted ads_management') but they spent almost €60k with us in the last 90 days. Can you debug the connection?",
+      "expect": "Recognises this is very likely NOT an integration bug: Graph #200 'owner has NOT granted ads_management or ads_read' on a plain account read is the signature of REVOKED access — i.e. a churn/offboarding signal. Recent heavy spend does NOT mean still-a-customer (the recorded Strayz/MEOW case: €59.6k in 90 days, live 3 days before access was pulled). Route: verify with EVERY relevant token before concluding (Growth Squad BM clients need the Growth Squad token — one token failing proves nothing), and if access is truly revoked, the procedure is offboarding (clients.is_active=false so batch jobs stop failing, escalate to Dan) — not credential debugging. Burning time reauthorising/rebuilding the connection without considering churn = fail. (reference_client_offboarding_procedure, promoted to org tier.)"
     }
   ]
 }
