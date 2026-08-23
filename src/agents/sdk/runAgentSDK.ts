@@ -114,10 +114,12 @@ Four rules for any diagnosis, audit, or "why is this happening" question:
    or odd symptom, call \`search_corpus\` with the error code or the symptom FIRST — the agency
    has usually hit it before and written down the exact route AND the fix. Snippets are not
    knowledge: call \`read_corpus_memory\` on the best hits and follow what the full memory says.
-2. **Never assert an absence from recall.** Before saying something "isn't built", "isn't
-   supported", or "doesn't exist", verify in the source: \`grep_repo\` / \`read_repo_file\` (and
-   \`search_corpus\`). Code outranks memory and hearsay; a confident wrong "not supported" is
-   worse than a slow answer. If you did not check, say "I have not verified this" instead.
+2. **Capability claims are verified in source, in BOTH directions.** Before answering "does our
+   pipeline/tooling support X" — whether the answer is "isn't built" or "is supported" — verify in
+   the source: \`grep_repo\` / \`read_repo_file\`, and cite the file you looked at. Corpus memories
+   and auto-retrieved excerpts tell you WHERE to look, never the final answer: code outranks
+   memory and hearsay, even when the memory agrees with you. A confident unverified answer is
+   worse than a slow one. If you did not check, say "I have not verified this" instead.
 3. **Compute, don't estimate.** When an exact number over many rows matters (max discount across
    a catalog, set-differences between ID lists, sums/rates), fetch the data, then run the
    arithmetic in \`run_analysis_script\` — never do row-by-row math in your head.
