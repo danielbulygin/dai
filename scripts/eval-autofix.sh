@@ -74,9 +74,10 @@ else
   SLACK_TEXT=":wrench: Web-Ada auto-fix ran (exit $CLAUDE_EXIT) but committed nothing — see \`$WORKTREE/autofix-session-log.txt\` and the fix brief \`$BRIEF\`."
 fi
 
-if [ -n "${SLACK_BOT_TOKEN:-}" ] && [ -n "${PIPER_CHANNEL_ID:-}" ]; then
+EVAL_POST_TOKEN="${EVAL_SLACK_BOT_TOKEN:-${PIPER_BOT_TOKEN:-${SLACK_BOT_TOKEN:-}}}"
+if [ -n "$EVAL_POST_TOKEN" ] && [ -n "${PIPER_CHANNEL_ID:-}" ]; then
   curl -sS -X POST https://slack.com/api/chat.postMessage \
-    -H "Authorization: Bearer $SLACK_BOT_TOKEN" -H 'Content-Type: application/json' \
+    -H "Authorization: Bearer $EVAL_POST_TOKEN" -H 'Content-Type: application/json' \
     -d "$(node -e "console.log(JSON.stringify({channel: process.env.PIPER_CHANNEL_ID, text: process.argv[1], unfurl_links: false}))" "$SLACK_TEXT")" \
     >/dev/null || true
 else

@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const RUNS_DIR = join(__dirname, '..', 'tests', 'eval', 'runs');
-const TOKEN = process.env.SLACK_BOT_TOKEN ?? '';
+const TOKEN = process.env.EVAL_SLACK_BOT_TOKEN ?? process.env.PIPER_BOT_TOKEN ?? process.env.SLACK_BOT_TOKEN ?? '';
 const CHANNEL = process.env.EVAL_SLACK_CHANNEL_ID ?? process.env.PIPER_CHANNEL_ID ?? '';
 const WEB_SUITE = 'golden-questions-web.json';
 const FRESH_MS = 6 * 60 * 60 * 1000;
