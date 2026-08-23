@@ -4352,7 +4352,7 @@ register({
   definition: {
     name: 'read_repo_file',
     description:
-      "Read one file from the BMAD repo on the droplet. Use it when the answer is written down in our own documentation or config rather than in an ad account — a client's brand rules or dos-and-donts, a naming convention, pma/global/meta-ads-api-gotchas.md, a playbook. Path is repo-relative (e.g. \"pma/clients/laori/brand-guidelines.md\"). Read-only.",
+      "Read one file from the BMAD repo on the droplet — our documentation AND our production source code. Use it when the answer is written down (a client's brand rules or dos-and-donts, a naming convention, pma/global/meta-ads-api-gotchas.md, a playbook) or when the truth lives in code: the launch pipeline / creative-uploader source is IN this repo at pma/tools/creative-uploader/ (safe_meta_api.py, upload_creative.py, media_library_v2.py, channel_resolver.py, verify_ada_launch.py). Path is repo-relative (e.g. \"pma/clients/laori/brand-guidelines.md\"). Read-only.",
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -4373,7 +4373,7 @@ register({
   definition: {
     name: 'grep_repo',
     description:
-      'Search the BMAD repo on the droplet for a regex pattern and get back matching files with line numbers. Use it to FIND where something is documented before reading it with read_repo_file — a client convention, an error code someone already wrote up, the place a rule is defined. Narrow with path_prefix (e.g. "pma/clients/laori") to keep results tight. Read-only.',
+      'Search the BMAD repo on the droplet for a regex pattern and get back matching files with line numbers. The repo holds our docs AND our production source code — the launch pipeline / creative-uploader lives at pma/tools/creative-uploader/ — so this is ALSO how you verify what the code actually supports (method rule 2: capability claims are checked here, not answered from memory). Use it to FIND where something is documented or implemented before reading it with read_repo_file. Narrow with path_prefix (e.g. "pma/clients/laori" or "pma/tools/creative-uploader") to keep results tight. Read-only.',
     input_schema: {
       type: 'object' as const,
       properties: {
