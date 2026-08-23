@@ -67,6 +67,9 @@ const envSchema = z.object({
   /** AOT Memory store (search_corpus / read_corpus_memory): password for the
    *  mem_api Postgres role. Absent, the corpus tools degrade self-describing. */
   AOT_MEMORY_DB_PASSWORD: z.string().optional(),
+  /** '1' = Stage B dual-write: remember() mirrors each learning into the
+   *  memory store (best-effort, never blocks the learnings insert). */
+  MEMORY_STORE_DUAL_WRITE: z.string().optional(),
   TRIPLEWHALE_API_KEY: z.string().optional(),
   DROPLET_URL: z.string().default('http://139.59.144.194:8080'),
   DROPLET_API_KEY: z.string().optional(),

@@ -86,18 +86,18 @@ describe('principal contract (the store is fail-closed — this is what unlocks 
     const guc = log[1]!;
     expect(guc.text).toContain("set_config('app.boundary', 'internal'");
     expect(guc.text).toContain("set_config('app.role',     'agent'");
-    expect(guc.text).toContain("set_config('app.agent',    'ada'");
     expect(guc.text).toContain("'public, extensions'");
-    const scopes = JSON.parse(String(guc.values![0])) as string[];
+    expect(guc.values![0]).toBe('ada');
+    const scopes = JSON.parse(String(guc.values![1])) as string[];
     expect(scopes).toContain('client:teethlovers');
     expect(scopes).toContain('client:press-london');
     expect(scopes.every((s) => s.startsWith('client:'))).toBe(true);
   });
 
-  it('write_scopes is always empty — this surface can never write', async () => {
+  it('write_scopes is always empty — the READ surface can never write', async () => {
     const log = installFakePool([]);
     await searchCorpus({ query: 'anything' });
-    expect(log[1]!.text).toContain(`set_config('app.write_scopes', '[]'`);
+    expect(JSON.parse(String(log[1]!.values![2]))).toEqual([]);
   });
 });
 

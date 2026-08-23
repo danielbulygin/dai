@@ -1,5 +1,7 @@
 import { nanoid } from "nanoid";
 import { getDaiSupabase } from "../integrations/dai-supabase.js";
+import { env } from "../env.js";
+import { logger } from "../utils/logger.js";
 
 export interface Learning {
   id: string;
@@ -42,6 +44,24 @@ export async function addLearning(params: AddLearningParams): Promise<Learning> 
     .single();
 
   if (error) throw new Error(`Failed to add learning: ${error.message}`);
+
+  // Stage B dual-write (AOT Memory §8.2, D1: the store is the PERMANENT home
+  // of Ada's learnings): mirror the committed row into the memory store, in
+  // the backfill's exact file shape so live writes and the 3,548 backfilled
+  // rows form one corpus. Flag-gated (MEMORY_STORE_DUAL_WRITE=1) and strictly
+  // best-effort — the store must never be able to break remember(); the
+  // nightly re-run of backfill-learnings.ts catches anything missed here.
+  if ((env as unknown as Record<string, string | undefined>).MEMORY_STORE_DUAL_WRITE === '1') {
+    try {
+      const { storeWriteLearning } = await import('../memory-store/store-client.js');
+      // Spread: Learning (fixed props) -> LearningRowForStore (indexed shape).
+      const res = await storeWriteLearning({ ...(data as Learning) });
+      logger.info({ path: res.path, status: res.status }, 'learning dual-written to memory store');
+    } catch (err) {
+      logger.warn({ err, learningId: (data as Learning).id }, 'memory-store dual-write failed (learnings row is committed; backfill re-run will catch up)');
+    }
+  }
+
   return data as Learning;
 }
 

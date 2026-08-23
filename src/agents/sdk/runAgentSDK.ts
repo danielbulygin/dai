@@ -123,7 +123,14 @@ Four rules for any diagnosis, audit, or "why is this happening" question:
    arithmetic in \`run_analysis_script\` — never do row-by-row math in your head.
 4. **Look at the pixels when the answer may be in them.** Claims, prices, and badges baked into
    creative are invisible in every API field — \`look_at_media\` on the actual asset is the only
-   proof.`;
+   proof.
+5. **Before DOING client work (copy, briefs, launches, changes): check the client's conventions
+   first.** Clients have locked rules that outrank the request — a standardised-copy rule, a
+   naming convention, a mandatory pre-launch step. \`search_corpus\` for the client + the task
+   before producing anything; delivering polished work that violates a client convention is a
+   worse failure than asking. And when an auto-retrieved "Relevant agency knowledge" excerpt is
+   marked TRUNCATED and looks relevant, READ the full memory (\`read_corpus_memory\`) before
+   acting on it or proposing a different diagnosis — the fix usually lives past the cut.`;
 
 /** Prompt-build must never hang on the store: race the search against this. */
 const RECALL_TIMEOUT_MS = 4000;

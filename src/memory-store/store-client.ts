@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import pg from 'pg';
 import { env } from '../env.js';
 import { logger } from '../utils/logger.js';
@@ -162,12 +163,12 @@ function toVectorLiteral(v: number[]): string {
 }
 
 /**
- * Run `fn` inside a transaction with Ada's principal set FIRST (the GUC
- * invariant from memory-api/src/api.ts — RLS does the enforcement, this only
- * declares who is asking). clientScopes = canonical store scopes.
+ * Run `fn` inside a transaction with a principal set FIRST (the GUC invariant
+ * from memory-api/src/api.ts — RLS does the enforcement, this only declares
+ * who is asking). Scopes are canonical store scopes ('client:teethlovers').
  */
-async function withAdaPrincipal<T>(
-  clientScopes: string[],
+async function withPrincipal<T>(
+  principal: { agent: string; readScopes: string[]; writeScopes: string[] },
   fn: (c: pg.PoolClient) => Promise<T>,
 ): Promise<T> {
   const p = getPool();
@@ -179,10 +180,10 @@ async function withAdaPrincipal<T>(
       `select set_config('search_path', 'public, extensions', true),
               set_config('app.boundary', 'internal', true),
               set_config('app.role',     'agent', true),
-              set_config('app.agent',    'ada', true),
-              set_config('app.read_scopes',  $1, true),
-              set_config('app.write_scopes', '[]', true)`,
-      [JSON.stringify(clientScopes.map((s) => `client:${s}`))],
+              set_config('app.agent',    $1, true),
+              set_config('app.read_scopes',  $2, true),
+              set_config('app.write_scopes', $3, true)`,
+      [principal.agent, JSON.stringify(principal.readScopes), JSON.stringify(principal.writeScopes)],
     );
     const out = await fn(c);
     await c.query('commit');
@@ -193,6 +194,17 @@ async function withAdaPrincipal<T>(
   } finally {
     c.release();
   }
+}
+
+/** The READ principal: Ada, all client tiers readable, writes ALWAYS empty. */
+async function withAdaPrincipal<T>(
+  clientScopes: string[],
+  fn: (c: pg.PoolClient) => Promise<T>,
+): Promise<T> {
+  return withPrincipal(
+    { agent: 'ada', readScopes: clientScopes.map((s) => `client:${s}`), writeScopes: [] },
+    fn,
+  );
 }
 
 /**
@@ -286,4 +298,122 @@ export async function storeRead(args: {
       version: row.version,
     };
   });
+}
+
+// ---------------------------------------------------------------------------
+// WRITE leg (Stage B dual-write, spec §7.1 / §8.2) — one narrow write:
+// Ada's remember() mirrors each new learning into the store, using the EXACT
+// path scheme and file shape of backfill-learnings.ts so live writes and the
+// 3,548 backfilled rows form one reconcilable corpus. All other write paths
+// stay closed (the read principal pins write_scopes to []).
+// ---------------------------------------------------------------------------
+
+/** Frontmatter key order — MUST match backfill-learnings.ts KNOWN_KEYS. */
+const LEARNING_KEYS = [
+  'id', 'agent_id', 'category', 'client_code', 'confidence', 'applied_count',
+  'score', 'source_session_id', 'created_at', 'updated_at',
+] as const;
+
+export interface LearningRowForStore {
+  id: string;
+  agent_id: string;
+  content: string;
+  category?: string | null;
+  client_code?: string | null;
+  confidence?: number | null;
+  source_session_id?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  [key: string]: unknown;
+}
+
+function sha256Hex(s: string): string {
+  return createHash('sha256').update(s, 'utf8').digest('hex');
+}
+
+/** Same slug + tier routing as backfill-learnings.ts pathForRow. */
+export function learningPath(row: LearningRowForStore): string {
+  const slug = `learning-${row.id.toLowerCase().replace(/[^a-z0-9]+/g, '')}-${sha256Hex(row.id).slice(0, 6)}`;
+  const scope = clientScopeFor(row.client_code ?? null);
+  if (scope) return `client/${scope}/learnings/${slug}.md`;
+  const agent = /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(row.agent_id) ? row.agent_id : 'unknown';
+  return `agent/${agent}/learnings/${slug}.md`;
+}
+
+/** YAML-safe like the backfill: strings via JSON.stringify, numbers/bools/null bare. */
+function yamlValue(v: unknown): string {
+  if (v === null || v === undefined) return 'null';
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  return JSON.stringify(String(v));
+}
+
+/** Same file shape as backfill-learnings.ts composeMemory (fields as frontmatter, claim as body). */
+export function composeLearningMemory(row: LearningRowForStore): string {
+  const excluded = new Set(['content', 'search_vector']);
+  const extras = Object.keys(row)
+    .filter((k) => !(LEARNING_KEYS as readonly string[]).includes(k) && !excluded.has(k))
+    .sort();
+  const lines = [...(LEARNING_KEYS as readonly string[]).filter((k) => k in row), ...extras]
+    .map((k) => `${k}: ${yamlValue(row[k])}`);
+  return `---\n${lines.join('\n')}\n---\n\n${row.content ?? ''}`;
+}
+
+function learningTitle(row: LearningRowForStore): string {
+  const first = (row.content ?? '').split('\n').map((l) => l.trim()).find((l) => l.length > 0)
+    ?? `learning ${row.id}`;
+  return first.length > 120 ? `${first.slice(0, 117)}…` : first;
+}
+
+/**
+ * Mirror one learning into the store via mem_propose_write (the ONLY write
+ * path — permission + CAS enforced in the database, audit A1/A2). The
+ * principal is the writing agent itself with exactly the one write scope the
+ * row routes to. Idempotent: an identical existing head is a clean no-op; a
+ * different head is CAS-retried once against its sha.
+ */
+export async function storeWriteLearning(row: LearningRowForStore): Promise<{
+  status: 'committed' | 'noop';
+  path: string;
+  version?: number;
+}> {
+  const path = learningPath(row);
+  const tier = path.startsWith('client/') ? 'client' : 'agent';
+  const scope = path.split('/')[1]!;
+  const content = composeLearningMemory(row);
+  const title = learningTitle(row);
+  const writeScopes = tier === 'client' ? [`client:${scope}`] : [];
+
+  return withPrincipal(
+    { agent: row.agent_id, readScopes: writeScopes, writeScopes },
+    async (c) => {
+      const propose = async (base: string | null) => c.query(
+        `select out_version, out_sha256, out_status
+           from mem_propose_write($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+        [
+          'internal', path, tier, scope, content, title, base,
+          row.agent_id, row.source_session_id ?? 'dai-live', 'agent', 'agent',
+          null, 'dai remember() dual-write (Stage B, spec §8.2)',
+        ],
+      );
+      try {
+        const res = await propose(null);
+        return { status: 'committed' as const, path, version: Number(res.rows[0]?.out_version) };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!/conflict|already exists|duplicate/i.test(msg)) throw err;
+        // Head exists (a retry, or the backfill got here first): identical
+        // content is a no-op; different content is CAS-written over the head.
+        const head = await c.query(
+          `select content, content_sha256 from memories
+            where boundary = 'internal' and path = $1 and is_active`,
+          [path],
+        );
+        const headRow = head.rows[0];
+        if (!headRow) throw err;
+        if (headRow.content === content) return { status: 'noop' as const, path };
+        const res = await propose(String(headRow.content_sha256));
+        return { status: 'committed' as const, path, version: Number(res.rows[0]?.out_version) };
+      }
+    },
+  );
 }
