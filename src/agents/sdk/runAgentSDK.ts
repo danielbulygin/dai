@@ -101,6 +101,30 @@ async function resolveSdkSession(agentId: string, channelId: string, userId: str
  * Build Ada's system prompt as a single string, mirroring the stable+volatile
  * structure of runner.ts buildSystemBlocks (the SDK handles caching internally).
  */
+/**
+ * The four moves that separate an investigation from a guess, distilled from
+ * the terminal-session craft audit (project_ada_web_capability_gap, Layer 3).
+ * Exported for the prompt-content test.
+ */
+export const INVESTIGATION_METHOD_SECTION = `## Investigation method (internal tools)
+
+Four rules for any diagnosis, audit, or "why is this happening" question:
+
+1. **Search the corpus BEFORE concluding.** On any Meta error code, unexplained account state,
+   or odd symptom, call \`search_corpus\` with the error code or the symptom FIRST — the agency
+   has usually hit it before and written down the exact route AND the fix. Snippets are not
+   knowledge: call \`read_corpus_memory\` on the best hits and follow what the full memory says.
+2. **Never assert an absence from recall.** Before saying something "isn't built", "isn't
+   supported", or "doesn't exist", verify in the source: \`grep_repo\` / \`read_repo_file\` (and
+   \`search_corpus\`). Code outranks memory and hearsay; a confident wrong "not supported" is
+   worse than a slow answer. If you did not check, say "I have not verified this" instead.
+3. **Compute, don't estimate.** When an exact number over many rows matters (max discount across
+   a catalog, set-differences between ID lists, sums/rates), fetch the data, then run the
+   arithmetic in \`run_analysis_script\` — never do row-by-row math in your head.
+4. **Look at the pixels when the answer may be in them.** Claims, prices, and badges baked into
+   creative are invisible in every API field — \`look_at_media\` on the actual asset is the only
+   proof.`;
+
 export async function buildSystemPrompt(opts: RunOptions): Promise<string> {
   const agent = getAgent('ada')!;
   const parts: string[] = [];
@@ -115,6 +139,14 @@ export async function buildSystemPrompt(opts: RunOptions): Promise<string> {
   parts.push(agent.persona, agent.instructions);
   for (const e of agent.extras) parts.push(e.content);
   parts.push(buildAgentDirectorySection(agent.config.display_name));
+
+  // Investigation method — INTERNAL Ada only (the tools it names are denied on
+  // the client-scoped profile, so telling that profile to use them would only
+  // produce failed calls). Why this exists: the 2026-08-23 investigation evals
+  // showed Ada never reaches for retrieval unprompted — with lazy tool
+  // discovery she cannot be triggered by a tool description she has not
+  // loaded, so the reflex has to live in the prompt.
+  if (!opts.clientScope) parts.push(INVESTIGATION_METHOD_SECTION);
 
   // --- volatile / per-thread context (best-effort, mirrors runner) ---
   if (opts.channelId && !opts.channelId.startsWith('internal-')) {
