@@ -3,7 +3,7 @@ import { env } from '../../env.js';
 import { logger } from '../../utils/logger.js';
 import { getSupabase } from '../../integrations/supabase.js';
 import { runColdAudit } from '../../audit/cold-audit.js';
-import { isTinkersSeamConfigured, redactSecrets, runBridgedColdAudit } from '../../audit/tinkers-bridge.js';
+import { isTinkersSeamConfigured, redactSecrets, reportAuditFailed, runBridgedColdAudit } from '../../audit/tinkers-bridge.js';
 
 export const auditTriggerRouter = new Hono();
 
@@ -61,12 +61,15 @@ auditTriggerRouter.post('/audit/trigger', async (c) => {
       )
       // Redacted, not raw: a Graph failure on this path can quote the request
       // URL, and that URL carries the customer's access token.
-      .catch((err) =>
+      .catch(async (err) => {
         logger.error(
           { err: redactSecrets(err instanceof Error ? err.message : 'unknown error'), organizationId, auditId: tinkersAuditId },
           'bridged cold audit failed',
-        ),
-      );
+        );
+        // The row must leave RUNNING: without this the lead's page said
+        // "being written now" forever over a generation that had given up.
+        await reportAuditFailed(auditId);
+      });
 
     return c.json({ status: 'accepted' }, 202);
   }

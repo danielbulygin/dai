@@ -14,7 +14,10 @@
  *
  * The six-month read stays on the calendar. It exists to place creative in
  * time ("this ad first went live in March"), and sliding it back with the
- * anchor would say an account has newer creative than it does.
+ * anchor would say an account has newer creative than it does. The one
+ * exception is a DEEP-dormant account (silent longer than the window itself):
+ * there the calendar six months hold nothing at all, so the read slides to
+ * end at the anchor and describes the account's last active period.
  *
  * Pure: dates in, dates and words out. No clock, no network, no logging.
  */
@@ -94,7 +97,14 @@ export function resolveAuditWindow(args: {
     daysSinceLastSpend,
     coreStart: shiftDays(anchorDate, 30),
     ninetyStart: shiftDays(anchorDate, 90),
-    sixMonthStart: shiftDays(asOf, SIX_MONTH_DAYS),
+    // The six-month read stays on the calendar for a live or lightly-dormant
+    // account. Past six months of silence the calendar window is EMPTY, so it
+    // slides to end at the anchor: for a deep-dormant account "creative in
+    // time" can only mean the six months it was last alive in.
+    sixMonthStart:
+      daysSinceLastSpend != null && daysSinceLastSpend > SIX_MONTH_DAYS
+        ? shiftDays(anchorDate, SIX_MONTH_DAYS)
+        : shiftDays(asOf, SIX_MONTH_DAYS),
   };
 }
 

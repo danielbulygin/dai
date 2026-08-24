@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { env } from '../env.js';
 import { logger } from '../utils/logger.js';
 import { buildColdRows, type RawAdDay } from './cold-source.js';
-import { SIX_MONTH_DAYS } from './audit-window.js';
+import { lastSpendDateOf, SIX_MONTH_DAYS } from './audit-window.js';
 import type { StoreMediaCandidate } from './cold-creative-source.js';
 import { runMagicAudit } from './magic-audit.js';
 import {
@@ -599,6 +599,27 @@ export async function fetchTinkersPixels(auditId: string): Promise<TinkersRead<u
   return { state: 'ok', partial: partialOf(read.body), data: read.body.pixels };
 }
 
+/** How many six-month windows the dormant probe walks back. With the standard
+ *  window already read this reaches about 36 months, Meta's insights floor. */
+const DORMANT_PROBE_WINDOWS = 5;
+
+/**
+ * The last day a dormant account ever spent, found by walking six-month
+ * windows back from the standard one. An empty window costs six cheap seam
+ * reads; the first window holding spend answers with its newest spending day.
+ */
+async function probeLastSpendDay(auditId: string, asOf: string): Promise<string | null> {
+  for (let step = 1; step <= DORMANT_PROBE_WINDOWS; step += 1) {
+    const windowEnd = isoDaysAgo(asOf, SIX_MONTH_DAYS * step);
+    const { adDays } = await fetchTinkersAdDays(auditId, { asOf: windowEnd });
+    const last = lastSpendDateOf(
+      adDays.map((r) => ({ date: r.date_start ?? null, spend: Number(r.spend ?? 0) })),
+    );
+    if (last) return last;
+  }
+  return null;
+}
+
 /**
  * The six reads, bound to ONE audit id, as the orchestrator receives them.
  *
@@ -657,6 +678,20 @@ export async function reportAuditFinalize(auditId: string): Promise<void> {
     }
   } catch (err) {
     logger.warn({ err: seamError(err), auditId }, 'tinkers audit finalize failed (the sweep reconciles)');
+  }
+}
+
+/**
+ * Tell Tinkers the generation FAILED, so the row leaves RUNNING with a state a
+ * page can render. Without this a refused audit ("nothing to audit") kept its
+ * row RUNNING forever and the lead stared at "being written now" for good.
+ * Fail-soft like every post on this seam.
+ */
+export async function reportAuditFailed(auditId: string): Promise<void> {
+  try {
+    await postReport({ auditId, status: 'ERROR' });
+  } catch (err) {
+    logger.warn({ err: seamError(err), auditId }, 'tinkers audit failure report did not land');
   }
 }
 
@@ -805,9 +840,24 @@ async function runBridged(args: {
   );
 
   const asOf = new Date().toISOString().slice(0, 10);
-  const pull = await fetchTinkersAdDays(auditId, { asOf });
+  let pull = await fetchTinkersAdDays(auditId, { asOf });
   const { destinations, landingUrls } = await fetchTinkersDestinations(auditId);
-  const rows = buildColdRows({ adDays: pull.adDays, destinations });
+  let rows = buildColdRows({ adDays: pull.adDays, destinations });
+  if (rows.rowCount === 0) {
+    // Dormant account: the standard six months are empty, but the account may
+    // have run ads before them. Walk back for the last day it ever spent, then
+    // read the six months ENDING there — the report of its last active period,
+    // anchored and labeled as such by the window module.
+    const anchor = await probeLastSpendDay(auditId, asOf);
+    if (anchor) {
+      logger.info(
+        { organizationId, auditId, anchor },
+        'bridged cold audit: dormant account, re-pulling around its last active day',
+      );
+      pull = await fetchTinkersAdDays(auditId, { asOf: anchor });
+      rows = buildColdRows({ adDays: pull.adDays, destinations });
+    }
+  }
   logger.info(
     {
       organizationId,

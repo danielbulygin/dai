@@ -280,3 +280,24 @@ describe('the six-month creative inventory', () => {
     expect(readRetiredEarners(live.sixMonthAds, { anchorDate: live.window.anchorDate }).count).toBe(0);
   });
 });
+
+describe('the deep-dormant six-month slide', () => {
+  it('keeps the calendar six months while the account is lightly dormant', () => {
+    const w = resolveAuditWindow({ asOf: '2026-08-24', lastSpendDate: '2026-06-01' });
+    expect(w.anchored).toBe(true);
+    expect(w.sixMonthStart).toBe('2026-02-22');
+  });
+
+  it('slides the six-month read to the anchor once the silence outlasts the window', () => {
+    const w = resolveAuditWindow({ asOf: '2026-08-24', lastSpendDate: '2025-05-10' });
+    expect(w.anchored).toBe(true);
+    expect(w.anchorDate).toBe('2025-05-10');
+    expect(w.sixMonthStart).toBe('2024-11-08');
+  });
+
+  it('an account that never spent keeps every window on the calendar', () => {
+    const w = resolveAuditWindow({ asOf: '2026-08-24', lastSpendDate: null });
+    expect(w.anchored).toBe(false);
+    expect(w.sixMonthStart).toBe('2026-02-22');
+  });
+});
