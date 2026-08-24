@@ -98,10 +98,14 @@ register({
     },
   },
   async execute(input, context) {
+    // Scoped runs read only their own silo: both keys come from the VERIFIED
+    // scope, never from model input (executeTool forces input.client_code too —
+    // this makes the executor safe even if that override list ever drifts).
+    const scoped = context.clientScope?.clientCode;
     const result = await memoryTools.recall({
       query: input.query as string,
-      agent_id: context.agentId,
-      client_code: input.client_code as string | undefined,
+      agent_id: scoped ? `ada_client_${scoped}` : context.agentId,
+      client_code: scoped ?? (input.client_code as string | undefined),
     });
     return JSON.stringify(result);
   },
@@ -133,11 +137,17 @@ register({
     },
   },
   async execute(input, context) {
+    // A customer may only teach Ada about their OWN account. Scoped runs force
+    // both the agent silo and the client tag from the VERIFIED scope, so a
+    // customer-taught learning can never land global — anything that sounds
+    // like general methodology stays in their silo until the internal team
+    // reviews it and promotes it by hand (Franzi, 2026-08-24).
+    const scoped = context.clientScope?.clientCode;
     const result = await memoryTools.remember({
       content: input.content as string,
       category: input.category as string,
-      agent_id: context.agentId,
-      client_code: input.client_code as string | undefined,
+      agent_id: scoped ? `ada_client_${scoped}` : context.agentId,
+      client_code: scoped ?? (input.client_code as string | undefined),
     });
     return JSON.stringify(result);
   },
