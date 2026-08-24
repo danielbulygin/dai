@@ -234,24 +234,31 @@ export async function buildSystemPrompt(opts: RunOptions): Promise<string> {
     if (ctx.userLearnings.length) parts.push(`## User Preferences\n${ctx.userLearnings.map((l) => `- ${l.content}`).join('\n')}`);
   } catch (err) { logger.warn({ err }, 'sdk: quick-context injection failed'); }
 
-  try {
-    const detected = detectClientCodes([opts.userMessage]);
-    if (detected.length) {
-      parts.push(...loadClientContextExtras(detected).map((e) => e.content));
-      const meth = await loadMethodologyExtra(detected[0]!);
-      if (meth) parts.push(meth.content);
-      // Phase B (context layer): KPI targets + client-scoped learnings for the
-      // primary detected client. The global top-5 learnings (below) can never
-      // carry a fresh client-specific correction — this section can (newest
-      // first). This is the fix for the JVA golden-case eval fail (2026-07-02).
-      const [targetsExtra, learningsExtra] = await Promise.all([
-        loadClientTargetsExtra(detected[0]!),
-        loadClientLearningsExtra(detected[0]!),
-      ]);
-      if (targetsExtra) parts.push(targetsExtra.content);
-      if (learningsExtra) parts.push(learningsExtra.content);
-    }
-  } catch (err) { logger.warn({ err }, 'sdk: client-context injection failed'); }
+  // INTERNAL runs only — a client-scoped run must never have another
+  // client's context injected because the customer's message happened to
+  // mention an agency client's code or name (cross-tenant prompt leak).
+  // Mirrors the runner path, which has carried this guard all along:
+  // "Client-scoped runs already get theirs via the overlay."
+  if (!opts.clientScope) {
+    try {
+      const detected = detectClientCodes([opts.userMessage]);
+      if (detected.length) {
+        parts.push(...loadClientContextExtras(detected).map((e) => e.content));
+        const meth = await loadMethodologyExtra(detected[0]!);
+        if (meth) parts.push(meth.content);
+        // Phase B (context layer): KPI targets + client-scoped learnings for the
+        // primary detected client. The global top-5 learnings (below) can never
+        // carry a fresh client-specific correction — this section can (newest
+        // first). This is the fix for the JVA golden-case eval fail (2026-07-02).
+        const [targetsExtra, learningsExtra] = await Promise.all([
+          loadClientTargetsExtra(detected[0]!),
+          loadClientLearningsExtra(detected[0]!),
+        ]);
+        if (targetsExtra) parts.push(targetsExtra.content);
+        if (learningsExtra) parts.push(learningsExtra.content);
+      }
+    } catch (err) { logger.warn({ err }, 'sdk: client-context injection failed'); }
+  }
 
   try {
     const batchIds = extractBatchIds([opts.userMessage]);
