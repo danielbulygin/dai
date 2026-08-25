@@ -1723,6 +1723,87 @@ async function graphCall(
 }
 
 /**
+ * What a read-back must carry for the portal to JUDGE a write instead of taking
+ * the intent's word for it. Adding a campaign budget makes Meta silently set
+ * LOWEST_COST_WITH_BID_CAP, and an attribution window cannot be corrected once
+ * an ad set exists — neither is visible unless it is read back by name.
+ */
+const CAMPAIGN_JUDGED_FIELDS =
+  'id,name,status,effective_status,objective,daily_budget,lifetime_budget,bid_strategy,account_id';
+const ADSET_JUDGED_FIELDS =
+  'id,name,status,effective_status,campaign_id,account_id,daily_budget,lifetime_budget,' +
+  'bid_strategy,bid_amount,optimization_goal,billing_event,promoted_object,attribution_spec';
+
+/**
+ * Accounts here name objects in ` // ` segments (`AOT // CBO // Main Campaign`),
+ * so a copy has to arrive as one more segment rather than as a dash suffix in
+ * another house's grammar. An explicit settings.name beats it — the proposal
+ * builds the real name from the source name and the new event — but the suffix
+ * is still what lands first, so a copy stays marked even if that rename fails.
+ */
+const ADA_COPY_SUFFIX = ' // Ada copy';
+
+// A proposal is model-written: treat every technical field defensively.
+// Enum-shaped values pass through; prose ("mirror the existing ad sets") is
+// refused or falls back rather than reaching Meta verbatim — that exact string
+// 400'd the first live approve on 2026-07-29.
+const enumish = (v: unknown): string | undefined =>
+  typeof v === 'string' && /^[A-Z][A-Z0-9_]*$/.test(v) ? v : undefined;
+const objish = (v: unknown): Record<string, unknown> | undefined =>
+  v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v as object).length > 0
+    ? (v as Record<string, unknown>)
+    : undefined;
+/**
+ * An attribution window is a list of {event_type, window_days}. It is the one
+ * setting nobody can correct after the ad set exists, so a shape that is only
+ * nearly right is refused rather than repaired.
+ */
+const attributionish = (v: unknown): Array<Record<string, unknown>> | undefined => {
+  if (!Array.isArray(v) || v.length === 0) return undefined;
+  const wellFormed = v.every((e) =>
+    e && typeof e === 'object' && !Array.isArray(e) &&
+    typeof (e as { event_type?: unknown }).event_type === 'string' &&
+    Number.isFinite(Number((e as { window_days?: unknown }).window_days)));
+  return wellFormed ? (v as Array<Record<string, unknown>>) : undefined;
+};
+
+/**
+ * The no-edits-after-spend rule, asserted instead of assumed.
+ *
+ * A fresh copy is safe to write settings onto only while nothing has been
+ * bought with it. Meta has no lifetime-spend field on an ad set, so insights
+ * are the only source of truth — and a read that FAILS is not a zero, it is a
+ * refusal to write.
+ */
+async function assertUnspent(
+  adsetId: string,
+  token: string,
+): Promise<{ ok: true } | { ok: false; refused: string }> {
+  let rows: Array<{ spend?: string }>;
+  try {
+    const res = await graphCall(`${adsetId}/insights`, token, { fields: 'spend', date_preset: 'maximum' });
+    rows = (res.data as Array<{ spend?: string }> | undefined) ?? [];
+  } catch (e) {
+    return {
+      ok: false,
+      refused:
+        `Ada could not confirm ad set ${adsetId} has never spent (${(e as Error).message}), ` +
+        `and she does not edit an ad set she cannot prove is untouched`,
+    };
+  }
+  const spent = rows.reduce((sum, r) => sum + (Number(r.spend ?? 0) || 0), 0);
+  if (spent > 0) {
+    return {
+      ok: false,
+      refused:
+        `ad set ${adsetId} has already spent $${spent.toFixed(2)} — editing an ad set that has ` +
+        `spent throws away the learning that spend bought`,
+    };
+  }
+  return { ok: true };
+}
+
+/**
  * Card 76: the page-permission / lead-ToS gate for verbs that instantiate an
  * ad from an existing creative (duplicate_ad, duplicate_ad_set).
  *
@@ -1944,22 +2025,46 @@ export async function handleExecuteAction(body: ExecuteActionRequest): Promise<R
     await graphCall(`${acct}/campaigns`, token, { ...params, execution_options: JSON.stringify(['validate_only']) }, 'POST');
     if (dryRun) return wouldApply(`would create PAUSED campaign "${params.name}" (${objective})`);
     const created = await graphCall(`${acct}/campaigns`, token, params, 'POST');
-    const after = await graphCall(String(created.id), token, { fields: 'id,name,status,effective_status,objective,daily_budget,bid_strategy' });
-    // Grow the fence to include the new campaign (practice account only, by lock).
+    const after = await graphCall(String(created.id), token, { fields: CAMPAIGN_JUDGED_FIELDS });
+    // Growing the fence is a STEP, not a courtesy. Without the new id in
+    // allowed_campaign_ids every follow-up copy into this campaign is refused,
+    // so a fence that silently failed to grow leaves a campaign nobody can fill
+    // and a customer who was told the opposite. PostgREST reports a failed
+    // update by returning an error rather than by throwing, so the row it hands
+    // back is the only proof the write landed.
+    let fenceError = '';
     try {
-      await sb
+      const { data: refenced, error } = await sb
         .from('clients')
         .update({ allowed_campaign_ids: [...allowed, String(created.id)] })
-        .eq('code', clientCode);
+        .eq('code', clientCode)
+        .select('allowed_campaign_ids')
+        .maybeSingle();
+      if (error) fenceError = error.message ?? String(error);
+      else if (!((refenced?.allowed_campaign_ids as string[] | null) ?? []).includes(String(created.id))) {
+        fenceError = 'the fence read back without the new campaign id';
+      }
     } catch (e) {
-      console.error('[execute-action] fence grow failed:', e);
+      fenceError = (e as Error).message;
     }
     logWrite({
       context, toolName: 'execute_action:create_campaign', targetSystem: 'meta',
       targetId: String(created.id), before: null, after,
       reverse: { note: 'delete requires a human — Ada never deletes', object: 'campaign', id: String(created.id) },
-      summary: `Created PAUSED campaign "${params.name}" (${objective}, ${String(settings.budget_mode ?? 'abo')}) and fenced it in (approve-modal)`,
+      summary: `Created PAUSED campaign "${params.name}" (${objective}, ${String(settings.budget_mode ?? 'abo')})${fenceError ? ' — FENCE GROW FAILED, nothing can be copied into it' : ' and fenced it in'} (approve-modal)`,
     });
+    if (fenceError) {
+      return {
+        ok: false,
+        error: 'fence_grow_failed',
+        object: after,
+        detail:
+          `The campaign was created in ${acct} and is paused — Meta gave it the id ${String(created.id)}. ` +
+          `Ada could not add that id to the list of campaigns she is allowed to change (${fenceError}), so ` +
+          `nothing can be copied into it yet and she has stopped here rather than going on. Someone has to ` +
+          `add ${String(created.id)} to ${clientCode}'s allowed campaigns before the next step.`,
+      };
+    }
     return { ok: true, applied: true, object: after };
   }
 
@@ -2033,7 +2138,12 @@ export async function handleExecuteAction(body: ExecuteActionRequest): Promise<R
   if (type === 'duplicate_ad_set') {
     const sourceId = String(intent.target_id ?? '');
     if (!sourceId) return { ok: false, refused: 'missing target_id (the ad set to duplicate)' };
-    const source = await graphCall(sourceId, token, { fields: 'id,name,campaign_id,account_id' });
+    // Read the source's own event and window too: they are what the copy is
+    // being changed AWAY from, and the audit log's before/after is the only
+    // place anyone can see that diff afterwards.
+    const source = await graphCall(sourceId, token, {
+      fields: 'id,name,campaign_id,account_id,optimization_goal,promoted_object,attribution_spec',
+    });
     if (`act_${String(source.account_id)}` !== acct) {
       return { ok: false, refused: `source ad set ${sourceId} lives in a different account — refused` };
     }
@@ -2064,32 +2174,98 @@ export async function handleExecuteAction(body: ExecuteActionRequest): Promise<R
     } catch (e) {
       console.error('[execute-action] duplicate_ad_set sample validation skipped:', e);
     }
+    // What the approval asked to be DIFFERENT on the copy. Every one of these
+    // is written to the fresh copy; the source is read and never written back
+    // to, which is what keeps no-edits-after-spend intact.
+    const copyName = typeof settings.name === 'string' && settings.name.trim() ? settings.name.trim() : '';
+    const wantedGoal = enumish(settings.optimization_goal);
+    const wantedPromoted = objish(settings.promoted_object);
+    const wantedAttribution = attributionish(settings.attribution_spec);
+    if (settings.optimization_goal !== undefined && !wantedGoal) {
+      return { ok: false, refused: `optimization_goal ${JSON.stringify(settings.optimization_goal)} is not an optimization goal Meta would accept` };
+    }
+    if (settings.promoted_object !== undefined && !wantedPromoted) {
+      return { ok: false, refused: 'promoted_object is not an object — the optimization event cannot be set without the pixel and event it names' };
+    }
+    if (settings.attribution_spec !== undefined && !wantedAttribution) {
+      return { ok: false, refused: 'attribution_spec is not a list of {event_type, window_days} — it cannot be corrected once the ad set exists, so Ada does not guess at it' };
+    }
     const copyParams: Record<string, string> = {
       campaign_id: dest,
       status_option: 'PAUSED',
-      rename_options: JSON.stringify({ rename_suffix: ' — ADA COPY' }),
+      // The suffix is what lands FIRST, so the copy stays marked as one even if
+      // the rename below never happens. An explicit settings.name then replaces
+      // it with the name the account's own convention produces.
+      rename_options: JSON.stringify({ rename_suffix: ADA_COPY_SUFFIX }),
     };
-    if (dryRun) return wouldApply(`would duplicate ad set "${String(source.name)}" into campaign ${dest}, PAUSED (validated: page permission, lead-ads terms)`);
+    // Everything the copy has to be TOLD after it exists. /copies carries the
+    // source's settings over wholesale, so an optimization event a customer
+    // approved is not applied by copying — it is applied here or not at all.
+    const configure: Record<string, string> = {};
+    if (copyName) configure.name = copyName;
+    if (wantedGoal) configure.optimization_goal = wantedGoal;
+    if (wantedPromoted) configure.promoted_object = JSON.stringify(wantedPromoted);
+    if (wantedAttribution) configure.attribution_spec = JSON.stringify(wantedAttribution);
+    // The optional bid override on a fresh copy (the BitCap flow), ceiling-guarded.
+    const bidUsd = Number(settings.bid_amount_usd ?? 0);
+    if (bidUsd > 0 && bidUsd <= maxDailyBudgetUsd) configure.bid_amount = String(Math.round(bidUsd * 100));
+    const configured = Object.keys(configure);
+    if (dryRun) {
+      return wouldApply(
+        `would duplicate ad set "${String(source.name)}" into campaign ${dest}, PAUSED` +
+        (configured.length ? `, then set ${configured.join(', ')} on the copy` : '') +
+        ' (validated: page permission, lead-ads terms)',
+      );
+    }
     const copied = await graphCall(`${sourceId}/copies`, token, copyParams, 'POST');
     const newId = String((copied.copied_adset_id as string | undefined) ?? copied.id ?? '');
-    const after = newId
-      ? await graphCall(newId, token, { fields: 'id,name,status,effective_status,campaign_id,daily_budget,bid_amount' }).catch(() => copied)
-      : copied;
-    // Optional bid override on the fresh copy (the BitCap flow), ceiling-guarded.
-    if (newId && settings.bid_amount_usd) {
-      const bid = Number(settings.bid_amount_usd);
-      if (bid > 0 && bid <= maxDailyBudgetUsd) {
-        await graphCall(newId, token, { bid_amount: String(Math.round(bid * 100)) }, 'POST').catch((e) => {
-          console.error('[execute-action] bid override failed:', e);
-        });
+    if (!newId) {
+      return {
+        ok: false,
+        error: 'copy_returned_no_id',
+        object: copied,
+        detail:
+          `Meta accepted the copy of ad set "${String(source.name)}" (${sourceId}) into campaign ${dest} but ` +
+          `returned no id for it, so Ada can neither read the copy back nor finish setting it up. A paused ` +
+          `ad set may exist in that campaign under an id nobody holds — check the campaign before retrying.`,
+      };
+    }
+    // no-edits-after-spend, asserted rather than assumed: nothing is written to
+    // the copy until Meta itself says the copy has never spent.
+    let configureError = '';
+    if (configured.length > 0) {
+      const unspent = await assertUnspent(newId, token);
+      if (!unspent.ok) configureError = unspent.refused;
+      else {
+        try {
+          await graphCall(newId, token, configure, 'POST');
+        } catch (e) {
+          configureError = (e as Error).message;
+        }
       }
     }
+    // ONE read-back, after every write, carrying the fields the portal judges.
+    const after = await graphCall(newId, token, { fields: ADSET_JUDGED_FIELDS }).catch(() => copied);
     logWrite({
       context, toolName: 'execute_action:duplicate_ad_set', targetSystem: 'meta',
-      targetId: newId || sourceId, before: source, after,
+      targetId: newId, before: source, after,
       reverse: { note: 'delete requires a human — Ada never deletes', object: 'adset', id: newId },
-      summary: `Duplicated ad set "${String(source.name)}" into campaign ${dest}, PAUSED (approve-modal)`,
+      summary:
+        `Duplicated ad set "${String(source.name)}" into campaign ${dest}, PAUSED` +
+        (configured.length ? `, set ${configured.join(', ')}` : '') +
+        (configureError ? ' — SETTINGS NOT APPLIED' : '') + ' (approve-modal)',
     });
+    if (configureError) {
+      return {
+        ok: false,
+        error: 'copy_not_configured',
+        object: after,
+        detail:
+          `Ad set ${newId} was copied into campaign ${dest} and is paused, but Ada could not set ` +
+          `${configured.join(', ')} on it: ${configureError}. An attribution window cannot be changed once ` +
+          `an ad set exists, so this copy has to be rebuilt rather than corrected.`,
+      };
+    }
     return { ok: true, applied: true, object: after };
   }
 
@@ -2118,16 +2294,6 @@ export async function handleExecuteAction(body: ExecuteActionRequest): Promise<R
       sibling = ((sib.data as Record<string, unknown>[] | undefined) ?? [])[0] ?? null;
     } catch { /* no sibling — fall back to explicit settings/defaults */ }
 
-    // A proposal is model-written: treat every technical field defensively.
-    // Enum-shaped values pass through; prose ("mirror the existing ad sets")
-    // falls back to the sibling mirror instead of reaching Meta verbatim —
-    // that exact string 400'd the first live approve on 2026-07-29.
-    const enumish = (v: unknown): string | undefined =>
-      typeof v === 'string' && /^[A-Z][A-Z0-9_]*$/.test(v) ? v : undefined;
-    const objish = (v: unknown): Record<string, unknown> | undefined =>
-      v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v as object).length > 0
-        ? (v as Record<string, unknown>)
-        : undefined;
     const params: Record<string, string> = {
       name: String(settings.name ?? `ADA TEST // ${new Date().toISOString().slice(0, 10)}`),
       campaign_id: campaignId,
