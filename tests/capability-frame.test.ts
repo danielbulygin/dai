@@ -68,6 +68,7 @@ const {
   mapWriteCapability,
   toCapabilityFrame,
   resolveWriteCapability,
+  parseControlInput,
   EXECUTABLE_VERBS,
 } = await import('../scripts/ada-console-assist.js');
 
@@ -242,5 +243,161 @@ describe('resolveWriteCapability — the two reads behind the frame', () => {
     expect(cap).toMatchObject({ reason: 'unknown', canExecute: false, verbs: [] });
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
+  });
+});
+
+/**
+ * The portal's control block (2026-08-25, second pass). The two systems keep
+ * separate switches and the first probe found them disagreeing: BFM's tinkers
+ * controlMode said hitl while this side, reading its own guard_settings, said
+ * read-only, because nothing in tinkers writes that table. The settled division
+ * is that the PORTAL owns the mode and the STOP — it is the switch the customer
+ * actually touches — and the droplet keeps the fence. So the request may carry
+ * the mode, and where it does it wins; where it does not, nothing changes.
+ */
+describe('parseControlInput — validated, never trusted', () => {
+  it('accepts the three modes with a boolean stop', () => {
+    expect(parseControlInput({ mode: 'hitl', stopped: false })).toEqual({ mode: 'hitl', stopped: false });
+    expect(parseControlInput({ mode: 'autonomous', stopped: true })).toEqual({ mode: 'autonomous', stopped: true });
+    expect(parseControlInput({ mode: 'read_only', stopped: false })).toEqual({ mode: 'read_only', stopped: false });
+    // Extra keys are ignored rather than carried: the shape we read is the
+    // shape we documented.
+    expect(parseControlInput({ mode: 'hitl', stopped: false, account_id: 'act_1' }))
+      .toEqual({ mode: 'hitl', stopped: false });
+  });
+
+  it('is all-or-nothing: a half-formed block is a caller we do not understand', () => {
+    for (const bad of [
+      undefined, null, 'hitl', 42, [], [{ mode: 'hitl', stopped: false }],
+      {}, { mode: 'hitl' }, { stopped: true },
+      { mode: 'off', stopped: false }, { mode: 'HITL', stopped: false },
+      { mode: 'hitl', stopped: 'yes' }, { mode: 'hitl', stopped: 1 }, { mode: null, stopped: false },
+    ]) {
+      expect(parseControlInput(bad)).toBeNull();
+    }
+  });
+});
+
+describe('mapWriteCapability — the portal owns the mode, we own the fence', () => {
+  /** A guard row that would say read-only on its own, so the override is visible. */
+  const staleGuardRow = { mode: 'read_only', stopped_at: null };
+
+  it('opens the lane on the portal\'s word, over a guard row that never heard', () => {
+    const cap = mapWriteCapability({
+      adAccountId: 'act_1', guardRow: staleGuardRow, fence: ['120000'],
+      control: { mode: 'hitl', stopped: false },
+    });
+    expect(cap).toMatchObject({ canExecute: true, reason: 'ok', openMode: 'hitl', verbs: THREE_VERBS });
+  });
+
+  it('still calls an empty fence a lane, however open the portal says the mode is', () => {
+    // The half we own. A verb promised here would have nowhere to land.
+    const cap = mapWriteCapability({
+      adAccountId: 'act_1', guardRow: staleGuardRow, fence: [],
+      control: { mode: 'hitl', stopped: false },
+    });
+    expect(cap).toMatchObject({ canExecute: false, reason: 'no_lane', verbs: [], openMode: 'hitl' });
+    expect(mapWriteCapability({
+      adAccountId: 'act_1', fence: null, control: { mode: 'autonomous', stopped: false },
+    }).openMode).toBe('autonomous');
+  });
+
+  it('lets the portal\'s STOP outrank everything, including its own mode', () => {
+    expect(mapWriteCapability({
+      adAccountId: 'act_1', guardRow: { mode: 'hitl', stopped_at: null }, fence: ['120000'],
+      control: { mode: 'hitl', stopped: true },
+    })).toMatchObject({ reason: 'mode_stopped', canExecute: false, verbs: [] });
+  });
+
+  it('lets the portal shut a lane the guard row would have opened', () => {
+    // The override runs both ways, or it is not a source of truth.
+    expect(mapWriteCapability({
+      adAccountId: 'act_1', guardRow: { mode: 'hitl', stopped_at: null }, fence: ['120000'],
+      control: { mode: 'read_only', stopped: false },
+    }).reason).toBe('mode_read_only');
+    // ...and a guard row's stale STOP no longer stops a portal that says otherwise.
+    expect(mapWriteCapability({
+      adAccountId: 'act_1', guardRow: { mode: 'hitl', stopped_at: '2026-08-24T22:10:00Z' }, fence: ['120000'],
+      control: { mode: 'hitl', stopped: false },
+    }).reason).toBe('ok');
+  });
+
+  it('changes nothing when no control block came, or when it was thrown out', () => {
+    const rails = { adAccountId: 'act_1', guardRow: staleGuardRow, fence: ['120000'] } as const;
+    expect(mapWriteCapability(rails).reason).toBe('mode_read_only');
+    expect(mapWriteCapability({ ...rails, control: null }).reason).toBe('mode_read_only');
+    expect(mapWriteCapability({ ...rails, control: parseControlInput({ mode: 'hitl' }) }).reason)
+      .toBe('mode_read_only');
+    // The open case is unchanged too: no control block, guard row decides.
+    expect(mapWriteCapability({ ...rails, guardRow: { mode: 'hitl' } }).reason).toBe('ok');
+  });
+
+  it('still says unknown when the reads it owns did not come back', () => {
+    // The portal's mode cannot rescue a missing fence: without the client row
+    // there is nothing to tell `ok` and `no_lane` apart.
+    const control = { mode: 'hitl', stopped: false } as const;
+    expect(mapWriteCapability({ readFailed: true, control }).reason).toBe('unknown');
+    expect(mapWriteCapability({ adAccountId: null, control }).reason).toBe('unknown');
+  });
+
+  it('keeps openMode out of the wire frame', () => {
+    const frame = toCapabilityFrame(mapWriteCapability({
+      adAccountId: 'act_1', fence: [], control: { mode: 'hitl', stopped: false },
+    }));
+    expect(Object.keys(frame).sort()).toEqual(['can_execute', 'reason', 'type', 'verbs']);
+    expect(frame).toEqual({ type: 'capability', can_execute: false, reason: 'no_lane', verbs: [] });
+  });
+});
+
+describe('resolveWriteCapability — the control block reaches the mapping', () => {
+  beforeEach(() => {
+    state.filters = [];
+    state.clients = {};
+    state.guardSettings = {};
+    state.throwOnRead = false;
+  });
+
+  it('answers on the portal\'s mode and our fence, not on the stale guard row', async () => {
+    state.clients.BFM = { ad_account_id: 'act_1726935217614830', allowed_campaign_ids: ['120000'] };
+    state.guardSettings.act_1726935217614830 = { mode: 'read_only', stopped_at: null };
+
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => undefined);
+    const cap = await resolveWriteCapability('BFM', { mode: 'hitl', stopped: false });
+    expect(cap).toMatchObject({ canExecute: true, reason: 'ok', verbs: THREE_VERBS });
+    debug.mockRestore();
+  });
+
+  it('logs the disagreement as two reason words and a client code, and nothing else', async () => {
+    state.clients.BFM = { ad_account_id: 'act_1', allowed_campaign_ids: null };
+    // No guard row at all — BFM's real shape on the night this was written.
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => undefined);
+
+    const cap = await resolveWriteCapability('BFM', { mode: 'hitl', stopped: false });
+    expect(cap.reason).toBe('no_lane');
+
+    expect(debug).toHaveBeenCalledTimes(1);
+    const line = String(debug.mock.calls[0]?.[0]);
+    // Strict: the whole line is the sentence, the code and the two verdicts. No
+    // account id, and nothing the caller put in the body echoed back.
+    expect(line).toMatch(
+      /^\[ada-console-assist\] control sources disagree for BFM: portal (ok|mode_read_only|mode_stopped|no_lane|unknown), guard row (ok|mode_read_only|mode_stopped|no_lane|unknown)$/,
+    );
+    expect(line).toContain('portal no_lane');
+    expect(line).toContain('guard row mode_read_only');
+    expect(line).not.toContain('act_');
+    debug.mockRestore();
+  });
+
+  it('says nothing when the two switches agree, and nothing when none was sent', async () => {
+    state.clients.BFM = { ad_account_id: 'act_1', allowed_campaign_ids: ['120000'] };
+    state.guardSettings.act_1 = { mode: 'hitl', stopped_at: null };
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => undefined);
+
+    expect((await resolveWriteCapability('BFM', { mode: 'hitl', stopped: false })).reason).toBe('ok');
+    expect(debug).not.toHaveBeenCalled();
+    // No block at all is the old path, and the old path never compared anything.
+    expect((await resolveWriteCapability('BFM')).reason).toBe('ok');
+    expect(debug).not.toHaveBeenCalled();
+    debug.mockRestore();
   });
 });

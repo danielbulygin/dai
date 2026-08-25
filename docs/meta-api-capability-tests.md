@@ -146,6 +146,31 @@ the console has real write tools and no switch to offer.
 `handleExecuteAction` enforces, read once and mapped once, so the sentence Ada
 speaks and the frame the portal reads cannot disagree.
 
+**Shape accepted** (added the same day, once the two systems were found
+disagreeing — see the trap below). The scoped `/chat` body may carry an optional
+control block, derived server-side by the portal from the org's selected ad
+account:
+
+```json
+{ "control": { "mode": "read_only" | "hitl" | "autonomous", "stopped": true } }
+```
+
+Both keys are required and typed: `mode` one of exactly those three strings,
+`stopped` a real boolean. Anything else — absent, null, an array, a string, one
+key missing, `"stopped": "yes"`, `"mode": "HITL"` — is thrown out WHOLE and the
+turn takes the old path. A half-formed block is not a partial truth to mix with
+the guard row, it is a caller we do not understand, and our own read is the
+fail-closed one.
+
+**Who owns which switch (2026-08-25):** the PORTAL is the source of truth for
+the account's control mode and its STOP; the droplet stays the source of truth
+for the fence. So a control block overrides `guard_settings.mode` and
+`stopped_at`, in BOTH directions, and overrides nothing else. `allowed_campaign_ids`
+is still read here, which is why a portal saying `hitl` over an empty fence
+lands on `no_lane` rather than promising a verb with nowhere to land. A
+disagreement between the two sources logs one debug line carrying the client
+code and the two reason words, and nothing else — never a value from the body.
+
 **Mapping, in precedence order** (NOT the order the rails are read):
 
 | Rail state | `reason` | Who can change it |
@@ -156,21 +181,36 @@ speaks and the frame the portal reads cannot disagree.
 | hitl/autonomous, `allowed_campaign_ids` empty or null | `no_lane` | us — it is a setup step, never their switch |
 | hitl/autonomous with a fence | `ok` | — the three verbs are live |
 
+Where a control block arrived, rows two and three read `control.stopped` and
+`control.mode` in place of the guard row; row four and row five read the fence
+exactly as before, and row one is unchanged (a failed client read leaves no
+fence to consult, so a portal mode cannot rescue it).
+
 STOP outranks the mode row it contradicts (it is the newest thing a human said);
 mode outranks the fence, so a read-only account is never shown a setup problem
 in place of its own switch.
 
-**Result on BFM:** `{"can_execute":false,"reason":"mode_read_only","verbs":[]}`.
+**Result on BFM, with no control block:**
+`{"can_execute":false,"reason":"mode_read_only","verbs":[]}`.
 
-**The trap.** BFM has **no `guard_settings` row at all** and
-`allowed_campaign_ids` is **null**, while the founder had just set the account's
-**tinkers** `controlMode` to HITL. The two systems keep separate switches:
-tinkers `controlMode` lives in the tinkers Postgres and nothing there writes
-this Supabase table (grep: `guard_settings` appears nowhere in tinkers). So the
-frame says read-only, the portal offers the switch, and flipping it again would
-change the tinkers row and still leave this read at read-only. Note also that
-BFM would fall to `no_lane`, not `ok`, the moment a `guard_settings` row said
-hitl — the fence is empty, and `no_lane` is a lane only we can open.
+**Result on BFM, once the portal sends `{"mode":"hitl","stopped":false}`:**
+`{"can_execute":false,"reason":"no_lane","verbs":[]}`, and the debug line
+`control sources disagree for BFM: portal no_lane, guard row mode_read_only`.
+
+**The trap, and why the control block exists.** BFM has **no `guard_settings`
+row at all** and `allowed_campaign_ids` is **null**, while the founder had just
+set the account's **tinkers** `controlMode` to HITL. The two systems keep
+separate switches: tinkers `controlMode` lives in the tinkers Postgres and
+nothing there writes this Supabase table (grep: `guard_settings` appears nowhere
+in tinkers). Read from here alone the frame said `mode_read_only`, the portal
+would have drawn the switch, and flipping it would have changed a row this read
+never looks at. Hence the split above: the customer-facing switch travels with
+the request and wins.
+
+It also moves BFM's honest answer from `mode_read_only` to `no_lane`, which
+points at a different person — their mode is fine, our lane is not built. The
+fence is null, and `no_lane` is a lane only we can open. Ada says so in those
+terms, with no date attached.
 
 **Regression checks** (`tests/capability-frame.test.ts`, pure mapping with the
 two reads mocked):
@@ -182,3 +222,11 @@ two reads mocked):
    `ok` list is exactly the three — a verb named here is a promise.
 4. The guard row is looked up by the account the CLIENT row named, never by
    anything that arrived beside the code.
+5. `parseControlInput` rejects fourteen malformed shapes whole, and the mapping
+   with a rejected or absent block is byte-identical to the old path.
+6. The portal override runs BOTH ways: it opens a lane a stale read-only guard
+   row would have shut, and shuts one a stale hitl row would have opened; its
+   `stopped` outranks its own mode; and an empty fence still answers `no_lane`
+   however open the portal says the mode is.
+7. The disagreement line matches a strict whole-line pattern: the client code
+   and two words from our own closed vocabulary, no account id, nothing echoed.

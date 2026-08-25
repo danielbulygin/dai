@@ -142,10 +142,41 @@ interface AssistRequest {
   // the claim is minted from the SESSION server-side, never by the browser.
   client_scope?: string;
   scope_claim?: string;
+  // The portal's own control mode for the ad account this turn is about, sent
+  // on scoped requests only. Deliberately `unknown`: it arrives off the wire
+  // through a bare `as AssistRequest` cast, so the type system must force it
+  // through parseControlInput before anything reads it.
+  control?: unknown;
   // /diagnose only — the prior Ada turn the debugger second-opinions:
   answer?: string;                            // Ada's answer being checked
   trace?: { label: string; tool?: string }[]; // the tool/step trace Ada took
 }
+
+/**
+ * Who owns which switch (2026-08-25): the PORTAL is the source of truth for the
+ * account's control mode and its STOP, and the droplet stays the source of truth
+ * for the campaign fence. The two disagreed the first time anyone looked — a
+ * founder set his tinkers controlMode to hitl and this side, reading its own
+ * guard_settings, still said read-only, because nothing in tinkers writes that
+ * table. Rather than sync two switches, the customer-facing one wins and travels
+ * with the request.
+ */
+interface ControlInput { mode: 'read_only' | 'hitl' | 'autonomous'; stopped: boolean }
+
+/**
+ * All-or-nothing on purpose: a half-formed control block is not a partial truth
+ * we can mix with the guard row, it is a caller we do not understand, and the
+ * fallback (our own fail-closed read) is the safe one. Returns null for absent
+ * and for malformed alike, so both take exactly the old path.
+ */
+export function parseControlInput(raw: unknown): ControlInput | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const c = raw as { mode?: unknown; stopped?: unknown };
+  if (typeof c.stopped !== 'boolean') return null;
+  if (c.mode !== 'read_only' && c.mode !== 'hitl' && c.mode !== 'autonomous') return null;
+  return { mode: c.mode, stopped: c.stopped };
+}
+
 type Severity = 'info' | 'warn' | 'block';
 interface RecommendedAction { key: string; label: string; detail: string }
 interface RenameProposal { file_id?: string; from: string; to: string; fields?: Record<string, string>; confidence?: number; note?: string }
@@ -798,6 +829,12 @@ export interface WriteCapability {
   verbs: string[];
   /** The same truth as prose, for the prompt. */
   sentence: string;
+  /**
+   * Set only when the mode already allows changes (`ok` and `no_lane`), so the
+   * prompt can name the mode the customer is actually in rather than assume
+   * asks-first. Never in the frame: the portal sent the mode, it knows it.
+   */
+  openMode?: 'hitl' | 'autonomous';
 }
 
 /** The wire frame the portal reads, first thing in a scoped turn. */
@@ -823,6 +860,8 @@ export function toCapabilityFrame(cap: WriteCapability): CapabilityFrame {
  *   2. a pressed STOP outranks everything, because it is the newest thing a
  *      human said and the mode row still says whatever it said before it;
  *   3. then the mode, a missing guard row reading as read_only (fail-closed);
+ *      and where the PORTAL sent a control block, its mode and its STOP are the
+ *      ones read — it owns that switch, we own only the fence below;
  *   4. then the fence, which can only matter once the mode allows a write at
  *      all. So `no_lane` never surfaces on a read-only account: the customer
  *      would be shown a setup problem when the real cause is their own switch.
@@ -832,6 +871,13 @@ export function mapWriteCapability(rails: {
   adAccountId?: string | null;
   guardRow?: { mode?: string | null; stopped_at?: string | null } | null;
   fence?: readonly string[] | null;
+  /**
+   * The portal's own switch, when the request carried one. It beats the guard
+   * row on the mode and the STOP, and on nothing else: the fence stays ours,
+   * so a portal that says hitl over an empty fence lands on `no_lane` rather
+   * than promising a verb that has nowhere to land.
+   */
+  control?: ControlInput | null;
 }): WriteCapability {
   const shut = (reason: Exclude<WriteCapabilityReason, 'ok'>): WriteCapability =>
     ({ canExecute: false, reason, verbs: [], sentence: CANNOT_WRITE_SENTENCE });
@@ -840,15 +886,23 @@ export function mapWriteCapability(rails: {
   // No client row, or a client with no ad account, is not a read-only account:
   // it is an account we could not look at. Calling that `mode_read_only` would
   // offer the customer a switch that fixes nothing.
+  // This holds even when the portal sent a mode: with no client row there is no
+  // fence to read, so `ok` and `no_lane` stay indistinguishable from here.
   if (!rails.adAccountId) return shut('unknown');
 
+  const control = rails.control ?? null;
   const gs = rails.guardRow ?? null;
-  if (gs?.stopped_at) return shut('mode_stopped');
-  const mode = gs?.mode ?? 'read_only';
-  if (!gs || (mode !== 'hitl' && mode !== 'autonomous')) return shut('mode_read_only');
+  const stopped = control ? control.stopped : Boolean(gs?.stopped_at);
+  if (stopped) return shut('mode_stopped');
+
+  const mode = control ? control.mode : (gs?.mode ?? 'read_only');
+  const openMode = mode === 'hitl' ? 'hitl' : mode === 'autonomous' ? 'autonomous' : null;
+  if (!openMode) return shut('mode_read_only');
 
   const fence = rails.fence ?? [];
-  if (fence.length === 0) return shut('no_lane');
+  // The mode says yes and the lane says nothing yet. That is ours to open, and
+  // openMode rides along so the prompt names the mode they are actually in.
+  if (fence.length === 0) return { ...shut('no_lane'), openMode };
 
   const where = fence.length === 1
     ? 'in the one campaign this account has opened to me'
@@ -856,6 +910,7 @@ export function mapWriteCapability(rails: {
   return {
     canExecute: true,
     reason: 'ok',
+    openMode,
     verbs: [...EXECUTABLE_VERBS],
     sentence:
       `Today I can put three kinds of change up for you to approve, ${where}: pausing something, ` +
@@ -867,7 +922,10 @@ export function mapWriteCapability(rails: {
 /** Nothing read yet, so nothing may be claimed — the unscoped path's default. */
 const UNKNOWN_WRITE_CAPABILITY: WriteCapability = mapWriteCapability({ readFailed: true });
 
-export async function resolveWriteCapability(clientCode: string): Promise<WriteCapability> {
+export async function resolveWriteCapability(
+  clientCode: string,
+  control?: ControlInput | null,
+): Promise<WriteCapability> {
   try {
     const sb = getSupabase();
     const { data: client } = await sb
@@ -884,11 +942,25 @@ export async function resolveWriteCapability(clientCode: string): Promise<WriteC
       .limit(1)
       .maybeSingle();
 
-    return mapWriteCapability({
+    const rails = {
       adAccountId: client.ad_account_id as string,
       guardRow: (gs as { mode?: string | null; stopped_at?: string | null } | null) ?? null,
       fence: (client.allowed_campaign_ids as string[] | null) ?? [],
-    });
+    };
+    const capability = mapWriteCapability({ ...rails, control: control ?? null });
+
+    // Worth a line when the two switches point different ways: it is how we
+    // learn a customer's guard row has gone stale, and BFM's did. Reason words
+    // only — the vocabulary is ours, the body's own values are never echoed.
+    if (control) {
+      const fromGuardRow = mapWriteCapability(rails);
+      if (fromGuardRow.reason !== capability.reason) {
+        console.debug(
+          `[ada-console-assist] control sources disagree for ${clientCode}: portal ${capability.reason}, guard row ${fromGuardRow.reason}`,
+        );
+      }
+    }
+    return capability;
   } catch (e) {
     console.warn('[ada-console-assist] write-capability read failed, using the conservative sentence:', (e as Error).message);
     return mapWriteCapability({ readFailed: true });
@@ -901,8 +973,8 @@ export async function resolveWriteCapability(clientCode: string): Promise<WriteC
  * a customer hunting for a switch that is beside her answer, and never implies
  * one exists where the fix is ours.
  */
-function writeCapabilityReasonLine(reason: WriteCapabilityReason): string {
-  switch (reason) {
+function writeCapabilityReasonLine(cap: WriteCapability): string {
+  switch (cap.reason) {
     case 'mode_read_only':
       return 'This account is in read-only mode right now, and that is a setting rather than a limit of yours. ' +
         'If they ask you to change something, say the account is in read-only mode and that the switch to change it is right here in the chat, beside your answer. ' +
@@ -910,9 +982,14 @@ function writeCapabilityReasonLine(reason: WriteCapabilityReason): string {
     case 'mode_stopped':
       return 'This account is STOPPED: someone pressed STOP, and nothing may be written until it is lifted. ' +
         'Say that plainly, and say the STOP is lifted on the Today page.\n';
-    case 'no_lane':
-      return 'This account\'s write lane has not been set up yet. That is a setup step on our side, not a switch they have. ' +
-        'Say so plainly, offer to have us open it, and never imply they can turn it on themselves.\n';
+    case 'no_lane': {
+      // Reachable only with the mode already open, so the mode is never the
+      // thing to apologise for here.
+      const setTo = cap.openMode === 'autonomous' ? 'to let you act without asking' : 'to asks-first';
+      return `Their account is set ${setTo}, so the mode is not what is stopping you: the lane that carries an approved change into Meta is not open for them yet. ` +
+        `Say it in that shape and say it as ours to open. Their account is set ${setTo}, the lane that lets you carry approved changes into Meta is not open yet, that is a setup step on our side, and you have asked for it. ` +
+        'Never imply they can open it themselves, and never give a date for when it will be open.\n';
+    }
     case 'unknown':
       return 'You could not read this account\'s write settings just now, so speak as if you can change nothing and do not guess at why. ' +
         'If they ask, say the setting did not come back and that we will look.\n';
@@ -988,7 +1065,7 @@ function buildScopedChatPrompt(
   parts.push(
     `### What you can actually do in this account\n` +
     `${writeCapability.sentence}\n` +
-    writeCapabilityReasonLine(writeCapability.reason) +
+    writeCapabilityReasonLine(writeCapability) +
     `That sentence is the truth about THIS account, read from its own settings — not a general description of what Ada can do. Say it in your own words whenever the customer asks you to change something, and never offer a verb it does not contain. If they ask for something outside it, say plainly that it is not something you can do, then describe exactly what you WOULD do so a person can do it in Ads Manager. Never dress an unavailable action up as going "through the approve rail".`,
   );
   parts.push(
@@ -1218,9 +1295,12 @@ async function handleChatStream(
   const heartbeat = setInterval(() => { if (!closed) { try { res.write(': ping\n\n'); } catch { /* noop */ } } }, 15_000);
   const safe = (event: string, data: unknown) => { if (!closed) { try { sseEvent(res, event, data); } catch { /* noop */ } } };
 
-  // The customer door states what Ada may really do to THIS account, read from
-  // the same rails the approve executor enforces. Fail-closed inside.
-  const writeCapability = scope ? await resolveWriteCapability(scope.clientCode) : UNKNOWN_WRITE_CAPABILITY;
+  // The portal's own switch, if it sent one and we understood it. Scoped turns
+  // only: the internal console has no account selected to send a mode for.
+  const control = scope ? parseControlInput(req.control) : null;
+  // The customer door states what Ada may really do to THIS account: the mode
+  // and STOP the portal owns, over the campaign fence we own. Fail-closed inside.
+  const writeCapability = scope ? await resolveWriteCapability(scope.clientCode, control) : UNKNOWN_WRITE_CAPABILITY;
   // ...and says the same thing to the PORTAL, before any text or tool frame, so
   // the read-only switch is drawn beside the answer that needed it rather than
   // after it. Customer door only: the internal console has real write tools and
