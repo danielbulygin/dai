@@ -116,3 +116,69 @@ executors re-derive it from `context.clientScope` as well.
 context reads `act_1726935217614830` with BFM's token. A model-supplied client
 code must never reach Graph. These are open account-level reads; without the
 forcing, a customer chat could read another tenant's Events Manager.
+
+---
+
+## Case 33 — "May I execute here?" as a frame (`/chat`, scoped)
+
+**Probed:** 2026-08-25, BFM (`act_1726935217614830`), read-only against the live
+`clients` + `guard_settings` rows.
+
+**Why:** a founder flipped his account to human-in-the-loop and asked Ada "does
+that work for you now?". She was honest and had to guess: "if that toggle
+changed something on your end, I'm not seeing a new verb on my side." She could
+read the rails; she had no shape to say the answer in that the portal could act
+on. The scoped `/chat` stream now opens with one frame, before any text or tool
+frame:
+
+```
+event: capability
+data: {"type":"capability","can_execute":false,"reason":"mode_read_only","verbs":[]}
+```
+
+`reason` is one of `ok | mode_read_only | mode_stopped | no_lane | unknown`, and
+`verbs` is `["pause","resume","set_daily_budget"]` (the tinkers `ActionCommand`
+vocabulary) or empty. The internal unscoped `/chat` and `/assist` never emit it:
+the console has real write tools and no switch to offer.
+
+**Shape read:** `clients.ad_account_id` + `clients.allowed_campaign_ids`, then
+`guard_settings(mode, stopped_at)` for that account — the same two rails
+`handleExecuteAction` enforces, read once and mapped once, so the sentence Ada
+speaks and the frame the portal reads cannot disagree.
+
+**Mapping, in precedence order** (NOT the order the rails are read):
+
+| Rail state | `reason` | Who can change it |
+|---|---|---|
+| a read failed, or no client / ad account | `unknown` | nobody yet — say the setting did not come back |
+| `stopped_at` set | `mode_stopped` | the customer, on the Today page |
+| no `guard_settings` row, or mode not hitl/autonomous | `mode_read_only` | the customer, on the switch the chat draws |
+| hitl/autonomous, `allowed_campaign_ids` empty or null | `no_lane` | us — it is a setup step, never their switch |
+| hitl/autonomous with a fence | `ok` | — the three verbs are live |
+
+STOP outranks the mode row it contradicts (it is the newest thing a human said);
+mode outranks the fence, so a read-only account is never shown a setup problem
+in place of its own switch.
+
+**Result on BFM:** `{"can_execute":false,"reason":"mode_read_only","verbs":[]}`.
+
+**The trap.** BFM has **no `guard_settings` row at all** and
+`allowed_campaign_ids` is **null**, while the founder had just set the account's
+**tinkers** `controlMode` to HITL. The two systems keep separate switches:
+tinkers `controlMode` lives in the tinkers Postgres and nothing there writes
+this Supabase table (grep: `guard_settings` appears nowhere in tinkers). So the
+frame says read-only, the portal offers the switch, and flipping it again would
+change the tinkers row and still leave this read at read-only. Note also that
+BFM would fall to `no_lane`, not `ok`, the moment a `guard_settings` row said
+hitl — the fence is empty, and `no_lane` is a lane only we can open.
+
+**Regression checks** (`tests/capability-frame.test.ts`, pure mapping with the
+two reads mocked):
+
+1. Every row of the table above, each reason reached on its own.
+2. Precedence: STOP over an open hitl+fence AND over read_only; mode over an
+   empty fence; a failed read over rails already in hand.
+3. `verbs` is empty and `can_execute` false for every reason but `ok`, and the
+   `ok` list is exactly the three — a verb named here is a promise.
+4. The guard row is looked up by the account the CLIENT row named, never by
+   anything that arrived beside the code.

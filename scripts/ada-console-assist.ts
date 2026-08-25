@@ -766,12 +766,108 @@ const ROOT_CAUSE_METHOD =
  *
  * Fail-closed on every read failure: "I might be able to" is the claim that
  * started this, so an unknown truth renders the conservative sentence.
+ *
+ * The same read now answers a SECOND question, for the portal rather than for
+ * Ada: can she execute here, and if not, which ONE thing is stopping her. A
+ * founder flipped his account to human-in-the-loop and asked her "does that
+ * work for you now?"; she was honest but had to guess ("if that toggle changed
+ * something on your end, I'm not seeing a new verb on my side"), because prose
+ * was the only shape she could say it in. `reason` is that same fact in a shape
+ * the portal can act on: `mode_read_only` is the one cause the CUSTOMER owns,
+ * so the chat draws the switch beside the answer. The sentence and the reason
+ * come from the one mapping below, so words and switch cannot disagree.
  */
 const CANNOT_WRITE_SENTENCE =
   'Today I cannot change anything in this account. I read it, I tell you what I would do and why, ' +
   'and a media buyer makes the change in Ads Manager while I watch the result.';
 
-async function resolveWriteCapability(clientCode: string): Promise<{ sentence: string; known: boolean }> {
+/**
+ * The only verbs a customer's approval can ever dispatch — the tinkers
+ * `ActionCommand` vocabulary (`packages/ads-core`). Anything else has no card
+ * to be approved on, so it is not a verb Ada has, however open the rails are.
+ */
+export const EXECUTABLE_VERBS = ['pause', 'resume', 'set_daily_budget'] as const;
+
+/** The ONE thing stopping Ada from executing, in the portal's vocabulary. */
+export type WriteCapabilityReason = 'ok' | 'mode_read_only' | 'mode_stopped' | 'no_lane' | 'unknown';
+
+export interface WriteCapability {
+  canExecute: boolean;
+  reason: WriteCapabilityReason;
+  /** Empty whenever canExecute is false: a verb listed here is a promise. */
+  verbs: string[];
+  /** The same truth as prose, for the prompt. */
+  sentence: string;
+}
+
+/** The wire frame the portal reads, first thing in a scoped turn. */
+export interface CapabilityFrame {
+  type: 'capability';
+  can_execute: boolean;
+  reason: WriteCapabilityReason;
+  verbs: string[];
+}
+
+export function toCapabilityFrame(cap: WriteCapability): CapabilityFrame {
+  return { type: 'capability', can_execute: cap.canExecute, reason: cap.reason, verbs: cap.verbs };
+}
+
+/**
+ * The rails as data, mapped to the one reason. Pure, so the frame the portal
+ * reads and the sentence Ada speaks are the same decision rather than two
+ * readings of it.
+ *
+ * Precedence is deliberate and is NOT the order the rails are read in:
+ *   1. a read we could not make is `unknown` — never a diagnosis we did not
+ *      earn, and never a switch offered against a cause we guessed;
+ *   2. a pressed STOP outranks everything, because it is the newest thing a
+ *      human said and the mode row still says whatever it said before it;
+ *   3. then the mode, a missing guard row reading as read_only (fail-closed);
+ *   4. then the fence, which can only matter once the mode allows a write at
+ *      all. So `no_lane` never surfaces on a read-only account: the customer
+ *      would be shown a setup problem when the real cause is their own switch.
+ */
+export function mapWriteCapability(rails: {
+  readFailed?: boolean;
+  adAccountId?: string | null;
+  guardRow?: { mode?: string | null; stopped_at?: string | null } | null;
+  fence?: readonly string[] | null;
+}): WriteCapability {
+  const shut = (reason: Exclude<WriteCapabilityReason, 'ok'>): WriteCapability =>
+    ({ canExecute: false, reason, verbs: [], sentence: CANNOT_WRITE_SENTENCE });
+
+  if (rails.readFailed) return shut('unknown');
+  // No client row, or a client with no ad account, is not a read-only account:
+  // it is an account we could not look at. Calling that `mode_read_only` would
+  // offer the customer a switch that fixes nothing.
+  if (!rails.adAccountId) return shut('unknown');
+
+  const gs = rails.guardRow ?? null;
+  if (gs?.stopped_at) return shut('mode_stopped');
+  const mode = gs?.mode ?? 'read_only';
+  if (!gs || (mode !== 'hitl' && mode !== 'autonomous')) return shut('mode_read_only');
+
+  const fence = rails.fence ?? [];
+  if (fence.length === 0) return shut('no_lane');
+
+  const where = fence.length === 1
+    ? 'in the one campaign this account has opened to me'
+    : `in the ${fence.length} campaigns this account has opened to me`;
+  return {
+    canExecute: true,
+    reason: 'ok',
+    verbs: [...EXECUTABLE_VERBS],
+    sentence:
+      `Today I can put three kinds of change up for you to approve, ${where}: pausing something, ` +
+      'turning something back on, and changing a daily budget. I cannot create campaigns or ad sets, ' +
+      'duplicate anything, or delete — those happen in Ads Manager, not by me.',
+  };
+}
+
+/** Nothing read yet, so nothing may be claimed — the unscoped path's default. */
+const UNKNOWN_WRITE_CAPABILITY: WriteCapability = mapWriteCapability({ readFailed: true });
+
+export async function resolveWriteCapability(clientCode: string): Promise<WriteCapability> {
   try {
     const sb = getSupabase();
     const { data: client } = await sb
@@ -779,7 +875,7 @@ async function resolveWriteCapability(clientCode: string): Promise<{ sentence: s
       .select('ad_account_id, allowed_campaign_ids')
       .eq('code', clientCode)
       .maybeSingle();
-    if (!client?.ad_account_id) return { sentence: CANNOT_WRITE_SENTENCE, known: false };
+    if (!client?.ad_account_id) return mapWriteCapability({ adAccountId: null });
 
     const { data: gs } = await sb
       .from('guard_settings')
@@ -788,28 +884,40 @@ async function resolveWriteCapability(clientCode: string): Promise<{ sentence: s
       .limit(1)
       .maybeSingle();
 
-    const mode = gs?.mode ?? 'read_only';
-    const laneOpen = Boolean(gs) && !gs?.stopped_at && (mode === 'hitl' || mode === 'autonomous');
-    if (!laneOpen) return { sentence: CANNOT_WRITE_SENTENCE, known: true };
-
-    // An open lane with an empty fence still writes nowhere: every verb the
-    // portal can card is fenced, and no campaign is inside the fence.
-    const fence = (client.allowed_campaign_ids as string[] | null) ?? [];
-    if (fence.length === 0) return { sentence: CANNOT_WRITE_SENTENCE, known: true };
-
-    const where = fence.length === 1
-      ? 'in the one campaign this account has opened to me'
-      : `in the ${fence.length} campaigns this account has opened to me`;
-    return {
-      sentence:
-        `Today I can put three kinds of change up for you to approve, ${where}: pausing something, ` +
-        'turning something back on, and changing a daily budget. I cannot create campaigns or ad sets, ' +
-        'duplicate anything, or delete — those happen in Ads Manager, not by me.',
-      known: true,
-    };
+    return mapWriteCapability({
+      adAccountId: client.ad_account_id as string,
+      guardRow: (gs as { mode?: string | null; stopped_at?: string | null } | null) ?? null,
+      fence: (client.allowed_campaign_ids as string[] | null) ?? [],
+    });
   } catch (e) {
     console.warn('[ada-console-assist] write-capability read failed, using the conservative sentence:', (e as Error).message);
-    return { sentence: CANNOT_WRITE_SENTENCE, known: false };
+    return mapWriteCapability({ readFailed: true });
+  }
+}
+
+/**
+ * The one extra instruction the reason earns. Ada's own sentence already says
+ * she cannot change anything; this says WHO can change that, so she never sends
+ * a customer hunting for a switch that is beside her answer, and never implies
+ * one exists where the fix is ours.
+ */
+function writeCapabilityReasonLine(reason: WriteCapabilityReason): string {
+  switch (reason) {
+    case 'mode_read_only':
+      return 'This account is in read-only mode right now, and that is a setting rather than a limit of yours. ' +
+        'If they ask you to change something, say the account is in read-only mode and that the switch to change it is right here in the chat, beside your answer. ' +
+        'Do not send them hunting for it elsewhere, and do not promise anything beyond those three changes once it is flipped.\n';
+    case 'mode_stopped':
+      return 'This account is STOPPED: someone pressed STOP, and nothing may be written until it is lifted. ' +
+        'Say that plainly, and say the STOP is lifted on the Today page.\n';
+    case 'no_lane':
+      return 'This account\'s write lane has not been set up yet. That is a setup step on our side, not a switch they have. ' +
+        'Say so plainly, offer to have us open it, and never imply they can turn it on themselves.\n';
+    case 'unknown':
+      return 'You could not read this account\'s write settings just now, so speak as if you can change nothing and do not guess at why. ' +
+        'If they ask, say the setting did not come back and that we will look.\n';
+    default:
+      return '';
   }
 }
 
@@ -831,7 +939,7 @@ function buildScopedChatPrompt(
   req: AssistRequest,
   clientCode: string,
   decisionLearnings: DecisionLearning[] = [],
-  writeCapability: string = CANNOT_WRITE_SENTENCE,
+  writeCapability: WriteCapability = UNKNOWN_WRITE_CAPABILITY,
 ): string {
   let clientContext: string | undefined;
   try {
@@ -879,7 +987,8 @@ function buildScopedChatPrompt(
   );
   parts.push(
     `### What you can actually do in this account\n` +
-    `${writeCapability}\n` +
+    `${writeCapability.sentence}\n` +
+    writeCapabilityReasonLine(writeCapability.reason) +
     `That sentence is the truth about THIS account, read from its own settings — not a general description of what Ada can do. Say it in your own words whenever the customer asks you to change something, and never offer a verb it does not contain. If they ask for something outside it, say plainly that it is not something you can do, then describe exactly what you WOULD do so a person can do it in Ads Manager. Never dress an unavailable action up as going "through the approve rail".`,
   );
   parts.push(
@@ -1109,6 +1218,15 @@ async function handleChatStream(
   const heartbeat = setInterval(() => { if (!closed) { try { res.write(': ping\n\n'); } catch { /* noop */ } } }, 15_000);
   const safe = (event: string, data: unknown) => { if (!closed) { try { sseEvent(res, event, data); } catch { /* noop */ } } };
 
+  // The customer door states what Ada may really do to THIS account, read from
+  // the same rails the approve executor enforces. Fail-closed inside.
+  const writeCapability = scope ? await resolveWriteCapability(scope.clientCode) : UNKNOWN_WRITE_CAPABILITY;
+  // ...and says the same thing to the PORTAL, before any text or tool frame, so
+  // the read-only switch is drawn beside the answer that needed it rather than
+  // after it. Customer door only: the internal console has real write tools and
+  // no switch to offer.
+  if (scope) safe('capability', toCapabilityFrame(writeCapability));
+
   // Loop 4: the client's settled decisions, newest first. Scoped runs always
   // have a code; internal runs only when the console has a client open. Fetched
   // AFTER the stream head so the heartbeat is already flowing, and fail-open —
@@ -1117,9 +1235,6 @@ async function handleChatStream(
   const decisionLearnings = decisionClientCode
     ? await fetchDecisionLearnings(decisionClientCode, scope ? 'customer' : 'internal')
     : [];
-  // The customer door states what Ada may really do to THIS account, read from
-  // the same rails the approve executor enforces. Fail-closed inside.
-  const writeCapability = scope ? (await resolveWriteCapability(scope.clientCode)).sentence : CANNOT_WRITE_SENTENCE;
   let proposalType: string | null = null;
 
   let fullText = '';
