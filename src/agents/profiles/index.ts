@@ -72,6 +72,13 @@ export const toolProfiles = {
     'get_pixel_event_stats', 'get_custom_conversions',
     'search_methodology_safe',
     'reply_in_thread',
+    // Built-ins, declared here the way `readonly`/`standard` declare them: the dai
+    // registry holds no entry for either, so getToolsForProfile skips them and this
+    // line carries INTENT, not the gate. The gate is guard.ts BUILTIN_READS (allow)
+    // plus CLIENT_WEB_SEARCH_ENABLED in runAgentSDK. Public facts only - the prompt
+    // rule forbids pointing them at the customer's own account, which is what the
+    // scoped tools are for.
+    'WebSearch', 'WebFetch',
   ],
   production_manager: [
     'recall', 'remember', 'search_memories',

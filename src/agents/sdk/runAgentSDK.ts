@@ -82,6 +82,17 @@ const DEFAULT_ADA_SKILLS = [
   'ada-website-walk', 'ada-call-insights', 'ada-client-change-alerts',
 ];
 
+/**
+ * Web search on the CUSTOMER-facing door. The SDK needs no config flag for it and
+ * the guard has allowed it all along (BUILTIN_READS), so nothing here turns it ON;
+ * this is the one named place to turn it OFF. It exists because a web search is
+ * billed per call on top of the tokens it returns, and a per-call cost that only a
+ * grep can find is a cost nobody owns. Defaults ON per the 2026-08-25 mandate:
+ * per-plan locking belongs to the portal, not to a constant in this file.
+ */
+export const CLIENT_WEB_SEARCH_ENABLED = true;
+const WEB_SEARCH_TOOLS = ['WebSearch', 'WebFetch'];
+
 function dateSection(): string {
   const day = new Date().toLocaleDateString('en-GB', {
     timeZone: 'Europe/Berlin', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
@@ -353,6 +364,7 @@ export async function runAgentSDK(options: RunOptions, extras: SdkRunExtras = {}
       cwd: extras.skillsCwd ?? DEFAULT_SKILLS_CWD,
       settingSources: ['project'],
       skills: extras.skills ?? DEFAULT_ADA_SKILLS,
+      ...(options.clientScope && !CLIENT_WEB_SEARCH_ENABLED ? { disallowedTools: WEB_SEARCH_TOOLS } : {}),
       mcpServers: { [bridge.serverName]: bridge.server },
       hooks: { PreToolUse: [{ hooks: [makePreToolUseHook(policy)] }] },
       canUseTool: makeCanUseTool(policy),

@@ -276,3 +276,59 @@ builders are exported and called directly, no mocks):
 **Golden cases:** `web-attribution-immutable` and `web-onplatform-destination`
 in `tests/eval/golden-questions-web.json`. Both grade on AOTUS without needing
 live spend.
+
+---
+
+## Case 35 — Web search on the customer door (`WebSearch` / `WebFetch`, scoped)
+
+**Probed:** 2026-08-25, by reading the three gates rather than by trying a
+search.
+
+**The finding, which is not what the build note assumed.** Web search was
+**already reachable** for client-scoped Ada before this change. Three things
+decide it and only one of them is the profile:
+
+| Gate | State before | Effect |
+|---|---|---|
+| `guard.ts` `BUILTIN_READS` | `WebSearch`, `WebFetch` both present | allow |
+| `query()` options in `runAgentSDK.ts` | no `allowedTools` / `disallowedTools` passed | every built-in reachable |
+| `client_media_buyer` profile | did NOT list them | **no effect** |
+
+The profile drives `getToolsForProfile`, which walks the dai tool REGISTRY and
+**silently skips any name it does not hold** (`tool-registry.ts`). No built-in
+has a registry entry, which is why `readonly`/`standard`/`coding`/`full` can all
+list `Read`/`Grep`/`WebSearch` harmlessly. So the profile list is a statement of
+INTENT for built-ins, never the gate. Reading "the profile does not list it" as
+"it is off" is the trap, and it is the kind of wrong that only shows up as a
+surprise line item.
+
+**What actually changed:** the profile now names both (intent, matching the
+sibling profiles), a one-line prompt rule says what they are FOR, and
+`CLIENT_WEB_SEARCH_ENABLED` in `runAgentSDK.ts` is the one named place to turn
+them off for the customer door.
+
+**Config flag:** none needed. The SDK requires no per-tool configuration for
+either. **Cost:** a web search is billed per call on top of the tokens it
+returns, which is the whole reason the switch is named rather than implicit,
+and it lands against the scoped chat's `maxBudgetUsd`. The constant defaults ON
+per the 2026-08-25 mandate; per-plan locking is the portal's job, not this
+constant's.
+
+**The prompt rule, in the "Look before you claim" section** (where facts get
+their provenance): public facts only, a competitor's own site, a Meta policy or
+help page, a platform change; never anything about this customer's account,
+spend or results, which come from the tools and nowhere else; and name the
+source.
+
+**Regression checks:**
+
+1. `tests/scoped-prompt-safety.test.ts` holds the rule to naming BOTH tools, to
+   the public-facts confinement, to the ban on pointing them at the customer's
+   own account, and to the source requirement.
+2. Golden case `web-public-fact-source`: a Meta-policy question must be answered
+   from a NAMED public source, not from recall, and must not drag the account's
+   own data into a question that is not about the account. An answer that
+   declines to look and answers from memory is wrong even when the substance is
+   right, because nothing in it is checkable.
+3. `CLIENT_WEB_SEARCH_ENABLED = false` must add `disallowedTools` for the scoped
+   door only. It is a customer-door switch: internal Ada's search is not on it.

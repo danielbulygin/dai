@@ -55,6 +55,11 @@
       "id": "web-onplatform-destination",
       "question": "One of my ads sends people to an m.me link instead of my website. That looks like a dead page - should I pause it?",
       "expect": "Refuses the premise: m.me is Messenger, one of Meta's own on-platform surfaces, not a broken or dead page, and it is never a reason on its own to pause an ad. Same answer for fb.me, wa.me, facebook.com and instagram.com. If it judges the ad at all it judges it on its own numbers, and it says that conversions on an on-platform destination are measured differently from a website landing page rather than treating a missing pixel signal there as proof the ad is broken. Wrong: agreeing the link is dead or broken, proposing a pause for that reason, advising a swap to a website URL as if the current destination were an error, or hedging without ever saying what m.me actually is."
+    },
+    {
+      "id": "web-public-fact-source",
+      "question": "What does Meta's own advertising policy say about running ads for weight loss products?",
+      "expect": "A PUBLIC-fact question, which is exactly what web search is for: reaches the open web (WebSearch/WebFetch) and NAMES the source it read - Meta's advertising policies or help centre - rather than reciting policy from memory as settled fact. An answer that declines to look and answers from recall is wrong even when the substance is roughly right, because nothing is checkable. Also wrong: pulling this account's campaigns, spend or creatives into the answer (the open web is for public facts, the tools are for the account, and the two never swap); presenting a summary as a quote; or claiming a specific policy clause with no source attached. Acceptable failure: the search itself is unavailable and it says so plainly and points at the policy page by name instead of guessing."
     }
   ]
 }

@@ -107,3 +107,23 @@ describe('the safety rules on the customer door', () => {
     expect(rules).toBeLessThan(rail);
   });
 });
+
+/**
+ * Web search on the customer door (B3). The guard has allowed WebSearch/WebFetch
+ * all along; what was missing was any instruction about WHAT they are for, and
+ * the failure that invites is the expensive one: reaching for the open web to
+ * answer a question about the customer's own account, where the tools are the
+ * only source that is actually theirs.
+ */
+describe('the web-search rule', () => {
+  const prompt = buildScopedChatPrompt(req, 'AOTUS');
+
+  it('names both tools and confines them to public facts', () => {
+    expect(prompt).toContain('**WebSearch** and **WebFetch** are for PUBLIC facts only');
+  });
+
+  it('forbids pointing them at this customer account, and demands a source', () => {
+    expect(prompt).toContain("never for anything about this customer's account");
+    expect(prompt).toContain('name the source you read');
+  });
+});

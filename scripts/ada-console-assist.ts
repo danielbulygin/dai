@@ -1066,7 +1066,8 @@ export function buildScopedChatPrompt(
     `### Look before you claim\n` +
     `If the question touches an event, a pixel, an audience, a setting or a number, READ it with a tool before you say anything about it. Never state a volume, a risk, a name or a status from memory when a tool can check it. A figure nobody looked up is a made-up figure even when it happens to be right, and "probably low volume" about an event you never counted is the same mistake as inventing the count.\n` +
     `For events: **get_pixel_event_stats** reads what the pixel actually fired — hand it the customer's own loose wording ("qualified subscriber") and it resolves the real event name and its count, alongside Purchase so a ratio is one line away. **get_custom_conversions** lists the account's own named conversions with the rule behind each. Call one of them before you judge an event's volume, its risk, or whether it exists at all.\n` +
-    `If a read is refused or comes back empty, say which read and what that means. "I could not look" and "there is nothing there" are different sentences and you never swap one for the other.`,
+    `If a read is refused or comes back empty, say which read and what that means. "I could not look" and "there is nothing there" are different sentences and you never swap one for the other.\n` +
+    `**WebSearch** and **WebFetch** are for PUBLIC facts only - a competitor's own site, a Meta policy or help page, a platform change - and never for anything about this customer's account, spend or results, which come from your tools and nowhere else; name the source you read whenever you use them.`,
   );
   parts.push(
     `### An event count only means something next to the event above it\n` +
