@@ -385,3 +385,171 @@ would grade their absence. That case is deliberately NOT in
    prompt rule is a soft control, not a wall. The hard version is a separate
    client-scoped skill list, which is a real change to the seam and is a
    founders' call, not a builder's.
+
+---
+
+## Case 37 — Pause and resume at any level (`pause_campaign`, `resume_*`)
+
+**Probed:** 2026-08-25 against AOTUS (`act_1570076840279279`), reads and dry
+runs only. Probe: `scripts/_b11-practice-dryrun.mts`.
+
+**Shape.** `POST /<object_id>` with `status=ACTIVE|PAUSED`, then a read-back.
+The read BEFORE the write is what had to change: which fields you may ask for
+depends on the level, and the level now comes from the verb rather than from
+"is this a pause_ad".
+
+| Level | Fields the rail asks for |
+|---|---|
+| ad | `id,name,status,effective_status,campaign_id,account_id` |
+| adset | the same plus `daily_budget` |
+| campaign | `id,name,status,effective_status,daily_budget,account_id` — **no `campaign_id`** |
+
+**Results:**
+
+| What | Finding |
+|---|---|
+| Ad-set-shaped read of a campaign id | `(#100) Tried accessing nonexisting field (campaign_id)`. A hard OAuthException, not a missing field. Every campaign-level verb went through that read, so `pause_campaign` could not have worked even on the day it was added to `EXEC_TYPES`. |
+| Campaign-shaped read | Answers with status, effective_status, daily_budget, account_id. |
+| `resume_campaign` inside the fence | dry run: `would resume campaign "AoT // New CBO // Scaling"`. |
+| `resume_campaign` outside the fence | refused: `campaign fence: <id> is not in AOTUS's allowed campaigns [...]`. Live, against the real client row. |
+| `pause_campaign` on a campaign already paused | `{ok: true, applied: false, note: "already paused"}`. |
+| `resume_ad_set` inside a fenced campaign | dry run: would resume. |
+
+**Regression checks:**
+
+1. A campaign-level verb never asks for `campaign_id` — not in the pre-read and
+   not in the read-back. The read-back is the worse of the two: it turns a write
+   that SUCCEEDED into a read that throws, so the customer is told the resume
+   failed while the money is already running.
+2. A resume outside the fence is refused before any POST. The campaign it is
+   compared against comes from Meta's answer about the object, never from the
+   intent — the rail reads the object to learn its campaign and only then
+   compares. `tests/execute-action-resume.test.ts` pins this at both levels.
+3. Resume is gated by the same three rails as pause — `guard_settings.mode`
+   with no `stopped_at`, the account gate, the campaign fence — and a shut mode
+   refuses before Meta is read at all.
+4. The reverse recorded for a resume is a PAUSE. An action log whose reverse
+   says `ACTIVE` for a resume undoes nothing.
+5. `already active` / `already paused` are `applied: false`, never a write.
+
+**Not probed:** an actual resume. Nothing has ever reached `/execute-action`
+from the monorepo, and the first live write belongs on a fresh approval rather
+than on a probe.
+
+**No golden question yet.** None of this is reachable from chat until tinkers
+sends the droplet's wire shape; that half is on `fix/execution-seam-intent-shape`
+and is unmerged. The question goes in with the first real dispatch.
+
+---
+
+## Case 38 — Creating a campaign, validated and never created
+
+**Probed:** 2026-08-25 against AOTUS. Probe: `scripts/_b13-practice-dryrun.mts`.
+
+**Shape:**
+
+```
+POST /act_<id>/campaigns
+  name, objective, status=PAUSED, buying_type=AUCTION,
+  special_ad_categories=[], bid_strategy, daily_budget=<cents>,
+  execution_options=["validate_only"]
+```
+
+**Results:**
+
+| What | Finding |
+|---|---|
+| The validate_only answer | `{"success": true}` for `OUTCOME_SALES`, PAUSED, CBO $50/day, `LOWEST_COST_WITHOUT_CAP`. No id comes back, because nothing was made. |
+| Campaign count | 13 before, 13 after. `validate_only` on `/campaigns` genuinely does not create — unlike `/copies` (case 15a), which is the trap this confirms is verb-specific. |
+| The executor's own dry run | `would_apply` on the same intent: write mode, budget ceiling and the fence bootstrap all passed. |
+| Budget ceiling | AOTUS has `clients.max_daily_budget_usd` NULL, so the $100 default applies and B13's real $500 would be refused by our own rail before Meta saw it. **Brain.fm needs its own `max_daily_budget_usd` above 500**, and tinkers' `ADA_MAX_DAILY_BUDGET` is unset in production, which refuses every budget change today. |
+| Fence bootstrap | `create_campaign` is the ONE verb exempt from the empty-fence refusal, because it is the only way an empty fence ever becomes non-empty. |
+
+**Regression checks:**
+
+1. The validate_only call happens BEFORE the real create, every time, and the
+   dry run stops between the two. A dry run that reaches the second call has
+   lost the whole point of being a dry run.
+2. Creates are PAUSED-only, and a budget over the ceiling is refused before
+   Meta is asked anything.
+3. Growing `clients.allowed_campaign_ids` with the new id is a STEP. PostgREST
+   reports a failed update by returning an error rather than by throwing, so
+   the update is read back, and a fence that did not grow fails the action
+   while naming the campaign id that does exist. A campaign nobody can copy
+   into, reported as a success, is the failure this replaces.
+4. The read-back carries `bid_strategy`. Adding a campaign budget makes Meta
+   silently set `LOWEST_COST_WITH_BID_CAP`, and a bid strategy nobody chose is
+   invisible unless it is asked for by name.
+5. `objective` still falls back to `OUTCOME_LEADS` when the intent omits it.
+   **That default is a known open item** — the B13 spec asks for a refusal
+   instead — and this is the case that changes when it does.
+
+---
+
+## Case 39 — Copying an ad set onto a different optimization event — NOT PROBED
+
+**Written 2026-08-25 and deliberately not run.** This is the one B13 verb that
+cannot be dry-run, and the case exists to say so plainly rather than to imply a
+capability nobody has checked.
+
+**Why there is no probe.** `/copies` ignores `execution_options=["validate_only"]`
+and creates a real ad set (case 15a). The only honest pre-flight is validating
+an equivalent ad create against the SOURCE, which tests page permission and
+lead-ads terms and says nothing at all about what the copy comes out as. There
+is no read-only way to learn the answer.
+
+**What the code does now** (`handleExecuteAction`, `duplicate_ad_set`):
+
+1. `POST /<source_adset_id>/copies` with `campaign_id`, `status_option=PAUSED`,
+   `rename_options={"rename_suffix":" // Ada copy"}`.
+2. `GET /<new_adset_id>/insights?fields=spend&date_preset=maximum` — the
+   lifetime-spend-zero assertion. A read that FAILS is not a zero; it refuses
+   the next step.
+3. `POST /<new_adset_id>` with `name`, `optimization_goal`, `promoted_object`,
+   `attribution_spec`, and the optional `bid_amount`.
+4. `GET /<new_adset_id>` for the read-back, carrying every field the portal
+   judges.
+
+**The open question, and it is a real one.** Step 3 assumes `attribution_spec`
+can be written to an ad set that already exists. The standing rule in this house
+is that `attribution_spec` is IMMUTABLE after ad set creation. If that is
+literally true, rather than shorthand for "after it starts delivering", then
+step 3 is refused on every copy, every copy lands `copy_not_configured` and has
+to be rebuilt, and **B13's copy-based plan does not work** — the campaign would
+have to be built from ad sets created with the right spec rather than copied.
+The code fails honestly either way, but the plan hangs on the answer.
+`optimization_goal` and `promoted_object` carry a milder version of the same
+doubt: editable while there is no delivery, rejected once there is.
+
+**The probe that settles it.** It creates a real object, so it needs sign-off:
+
+```
+1. Pick a PAUSED ad set in act_1570076840279279 with a known optimization_goal.
+2. POST /<id>/copies   campaign_id=<a fenced campaign>  status_option=PAUSED
+3. GET  /<new_id>?fields=<the whole object>     # the before
+4. POST /<new_id>      optimization_goal=... promoted_object=... attribution_spec=...
+5. GET  /<new_id>?fields=<the whole object>     # the after, diffed whole
+```
+
+Record Meta's exact refusal if step 4 is refused: the message is what says
+whether it is the window, the goal, or both.
+
+**One thing the earlier probe showed by accident.** An ad set in the practice
+account is named `... – Copy — ADA COPY`. That is the old hardcoded suffix, from
+a real earlier run, sitting in an account whose own convention is ` // `. It is
+why the suffix is now ` // Ada copy` and why an explicit `settings.name` beats
+it.
+
+**Regression checks** (`tests/execute-action-create-and-copy.test.ts` — the copy
+path is mocked, so these pin OUR behaviour, not Meta's):
+
+1. The event, promoted object, window and name are written to the COPY. The
+   source is never POSTed to.
+2. The spend assertion runs before the field write, and an insights read that
+   failed refuses the write instead of reading as a zero.
+3. Nothing is asked about spend when there is nothing to write.
+4. The rename suffix follows the account's ` // ` convention.
+5. An `attribution_spec` that is only nearly right is refused before anything
+   is copied.
+6. The read-back carries status, campaign, `optimization_goal`,
+   `promoted_object`, `attribution_spec`, `bid_strategy` and budget.
