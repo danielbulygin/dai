@@ -25,8 +25,19 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 const { state } = vi.hoisted(() => ({
   state: {
     graphCalls: [] as Array<{ path: string; params: Record<string, string>; token: string }>,
-    /** Pixel id -> stats payload, or an error string Meta would return. */
-    stats: {} as Record<string, { error: string } | { buckets: Array<Array<{ value: string; count: number }>> }>,
+    /**
+     * Pixel id -> stats payload, an error string Meta would return, or a
+     * function of the window asked for. The window-aware form exists because
+     * `last7dShare` is read from a SECOND call over a narrower window: a mock
+     * that answers the same thing whatever it is asked could not tell the two
+     * reads apart, and the share would test nothing.
+     */
+    stats: {} as Record<
+      string,
+      | { error: string }
+      | { buckets: Array<Array<{ value: string; count: number }>> }
+      | { byWindow: (from: number, to: number) => Array<Array<{ value: string; count: number }>> | { error: string } }
+    >,
     pixels: {} as Record<string, Array<{ id: string; name: string; last_fired_time?: string }>>,
     customConversions: {} as Record<string, Array<Record<string, unknown>>>,
   },
@@ -71,7 +82,11 @@ vi.mock('../src/integrations/meta-graph.js', () => ({
       const canned = state.stats[statsRead[1]!];
       if (canned === undefined) return { data: [] };
       if ('error' in canned) return { error: canned.error };
-      return { data: canned.buckets.map((entries) => ({ start_time: '2026-08-18T00:00:00+0000', data: entries })) };
+      const answered = 'byWindow' in canned
+        ? canned.byWindow(Number(params.start_time), Number(params.end_time))
+        : canned.buckets;
+      if (!Array.isArray(answered)) return { error: answered.error };
+      return { data: answered.map((entries) => ({ start_time: '2026-08-18T00:00:00+0000', data: entries })) };
     }
 
     const customConversions = /^(act_\d+)\/customconversions$/.exec(path);
@@ -267,6 +282,132 @@ describe('get_pixel_event_stats answers what was actually fired', () => {
       const span = Number(call.params.end_time) - Number(call.params.start_time);
       expect(span).toBeLessThanOrEqual(7 * 86_400);
     }
+  });
+});
+
+describe('a count is read against the funnel it belongs to', () => {
+  /**
+   * The 2026-08-25 failure this suite exists for: Ada read QualifiedSubscription
+   * at 58,828 against Purchase at 35,018 and called it "good signal density".
+   * A subscriber event is a SUBSET of purchases, so out-firing them 1.7x is
+   * over-counting, not density. The tool now hands the model the comparison
+   * rather than hoping it makes it.
+   */
+  it('flags an event that out-fires Purchase, with the multiple', async () => {
+    const res = await run(
+      'get_pixel_event_stats',
+      { clientCode: 'alpha', event: 'qualified subscriber' },
+      'alpha',
+    );
+    const check = res.pixels[0].funnelCheck;
+
+    expect(check.event).toBe('QualifiedSubscription');
+    expect(check.count).toBe(41_999);
+    expect(check.comparedWith).toEqual({ Purchase: 9305, CompleteRegistration: 30 });
+    expect(check.timesPurchase).toBe(4.5);
+    expect(check.verdict).toBe('higher_than_purchase');
+    expect(check.note).toContain('over-counting');
+  });
+
+  it('an event below the one above it is simply ok', async () => {
+    const res = await run(
+      'get_pixel_event_stats',
+      { clientCode: 'alpha', event: 'CompleteRegistration' },
+      'alpha',
+    );
+    const check = res.pixels[0].funnelCheck;
+
+    expect(check.event).toBe('CompleteRegistration');
+    expect(check.verdict).toBe('ok');
+    expect(check.note).toBeUndefined();
+    // 30 against 9,305 rounds away to nothing, and "0 times Purchase" would read
+    // as a measurement. The two counts are in the payload; the ratio is dropped.
+    expect(check.timesPurchase).toBeUndefined();
+  });
+
+  it('says there is no Purchase to compare against rather than passing the count', async () => {
+    state.stats['9001'] = { buckets: [[{ value: 'QualifiedSubscription', count: 500 }]] };
+    const res = await run(
+      'get_pixel_event_stats',
+      { clientCode: 'alpha', event: 'qualified subscription' },
+      'alpha',
+    );
+    const check = res.pixels[0].funnelCheck;
+
+    expect(check.verdict).toBe('no_purchase_event');
+    expect(check.comparedWith).toEqual({});
+    expect(check.note).toContain('nothing above it');
+  });
+
+  it('no funnel check when the name resolved to nothing', async () => {
+    const res = await run(
+      'get_pixel_event_stats',
+      { clientCode: 'alpha', event: 'newsletter_signup' },
+      'alpha',
+    );
+    expect(res.pixels[0].funnelCheck).toBeUndefined();
+  });
+
+  it('no funnel check and no extra read when no event was asked about', async () => {
+    const res = await run('get_pixel_event_stats', { clientCode: 'alpha', days: 28 }, 'alpha');
+
+    expect(res.pixels[0].funnelCheck).toBeUndefined();
+    expect(state.graphCalls.filter((c) => c.path.endsWith('/stats'))).toHaveLength(4);
+  });
+
+  it('reports what share of a long window landed in its last 7 days', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const week = 7 * 86_400;
+    state.stats['9001'] = {
+      byWindow: (from) =>
+        from > now - week - 120
+          ? [[{ value: 'QualifiedSubscription', count: 30_000 }, { value: 'Purchase', count: 5000 }]]
+          : [[{ value: 'QualifiedSubscription', count: 5000 }, { value: 'Purchase', count: 12_000 }]],
+    };
+
+    const res = await run(
+      'get_pixel_event_stats',
+      { clientCode: 'alpha', days: 28, event: 'qualified subscriber' },
+      'alpha',
+    );
+    const check = res.pixels[0].funnelCheck;
+
+    // Three older weeks at 5,000 plus 30,000 in the last one.
+    expect(check.count).toBe(45_000);
+    expect(check.last7dShare).toBe(0.67);
+    expect(check.note).toContain('still ramping');
+    // 45,000 against 41,000 purchases: the order is broken here too.
+    expect(check.verdict).toBe('higher_than_purchase');
+    // The 28 days walked in four chunks, plus the ONE extra read for the week.
+    expect(state.graphCalls.filter((c) => c.path.endsWith('/stats'))).toHaveLength(5);
+  });
+
+  it('a refused last-week read is a null share, never a zero one', async () => {
+    // The 28 days are four chunks; the fifth read is the extra one, and it is
+    // the only one refused. A window predicate could not separate it from the
+    // final chunk, which covers exactly the same seven days.
+    let statsReads = 0;
+    state.stats['9001'] = {
+      byWindow: () => {
+        statsReads += 1;
+        return statsReads > 4
+          ? { error: 'Facebook API error: (#100) Permission Denied' }
+          : [[{ value: 'QualifiedSubscription', count: 5000 }, { value: 'Purchase', count: 12_000 }]];
+      },
+    };
+
+    const res = await run(
+      'get_pixel_event_stats',
+      { clientCode: 'alpha', days: 28, event: 'qualified subscriber' },
+      'alpha',
+    );
+    const check = res.pixels[0].funnelCheck;
+
+    expect(check.last7dShare).toBeNull();
+    expect(check.note ?? '').not.toContain('ramping');
+    // The window itself was still read, so the funnel verdict still stands.
+    expect(check.count).toBe(20_000);
+    expect(check.verdict).toBe('ok');
   });
 });
 

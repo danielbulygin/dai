@@ -399,6 +399,87 @@ const TOP_EVENTS_RETURNED = 15;
 /** Meta's own per-bucket ceiling — hitting it means the tail is incomplete. */
 const STATS_BUCKET_EVENT_CAP = 100;
 
+/**
+ * Where a count sits relative to the events around it.
+ *
+ * Rule (2026-08-25): a count means nothing on its own. Events are a funnel and
+ * the order is not negotiable — a step further down is a SUBSET of the step above
+ * it, so it cannot honestly fire more often. Web-Ada read QualifiedSubscription
+ * at 58,828 against Purchase at 35,018 and called it "good signal density"; a
+ * subscriber event out-firing purchases by 1.7x is one firing repeatedly per
+ * person, or one that does not mean what it is named. The founder saw it in a
+ * second and the client confirmed the event was mis-defined. So the comparison
+ * now ships WITH the count instead of being left to whoever reads it.
+ */
+const FUNNEL_ANCHOR_EVENTS = ["Purchase", "StartTrial", "CompleteRegistration"];
+
+/** Past this share, a window's fires sit in its last week: the event is new, not steady. */
+const RAMPING_LAST7D_SHARE = 0.5;
+
+interface FunnelCheck {
+  event: string;
+  count: number;
+  comparedWith: Record<string, number>;
+  timesPurchase?: number;
+  verdict: "higher_than_purchase" | "ok" | "no_purchase_event";
+  last7dShare?: number | null;
+  note?: string;
+}
+
+/**
+ * One decimal is all the precision a ratio in prose can carry honestly, and a
+ * ratio that rounds away to nothing is left out entirely: the two raw counts are
+ * in the payload either way, and "0 times Purchase" reads as a measurement.
+ */
+function purchaseMultiple(count: number, purchase: number): number | undefined {
+  if (purchase <= 0) return undefined;
+  const ratio = count / purchase;
+  const rounded =
+    ratio >= 1 ? Math.round(ratio * 10) / 10 : Math.round(ratio * 100) / 100;
+  return rounded > 0 ? rounded : undefined;
+}
+
+function buildFunnelCheck(
+  event: string,
+  count: number,
+  counts: Map<string, number>,
+): FunnelCheck {
+  const comparedWith: Record<string, number> = {};
+  for (const anchor of FUNNEL_ANCHOR_EVENTS) {
+    const anchorCount = counts.get(anchor);
+    if (anchorCount !== undefined && anchor !== event)
+      comparedWith[anchor] = anchorCount;
+  }
+
+  const purchase = counts.get("Purchase");
+  if (purchase === undefined) {
+    return {
+      event,
+      count,
+      comparedWith,
+      verdict: "no_purchase_event",
+      note: "Purchase was not measured on this pixel in this window, so this count has nothing above it to be checked against. Say that rather than calling the volume healthy on the strength of the number alone.",
+    };
+  }
+  if (event === "Purchase" || count <= purchase) {
+    return {
+      event,
+      count,
+      comparedWith,
+      timesPurchase: purchaseMultiple(count, purchase),
+      verdict: "ok",
+    };
+  }
+  return {
+    event,
+    count,
+    comparedWith,
+    timesPurchase: purchaseMultiple(count, purchase),
+    verdict: "higher_than_purchase",
+    note: "This event fired MORE often than Purchase. A downstream event is a subset of the one above it, so a higher count means it is over-counting (firing repeatedly per person) or it means something different from its name. Say that FIRST, and never present this volume as good signal or healthy density.",
+  };
+}
+
 /** Case, space, underscore and hyphen insensitive: "qualified subscriber" == "Qualified_Subscriber". */
 function normalizeEventName(raw: string): string {
   return raw.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -480,6 +561,7 @@ interface PixelStatsRead {
   matched?:
     | { resolvedFrom: string; resolvedTo: string[]; matches: EventMatch[] }
     | { resolvedFrom: string; resolvedTo: null; note: string };
+  funnelCheck?: FunnelCheck;
   caveats?: string[];
 }
 
@@ -648,6 +730,34 @@ export async function getPixelEventStats(params: {
               resolvedTo: null,
               note: `No event on this pixel matches "${params.event}" in this window. Say so plainly rather than assuming the name is right.`,
             };
+
+        const top = matches[0];
+        if (top) {
+          const check = buildFunnelCheck(top.event, top.count, counts);
+          // WHERE in the window the fires landed. A brand-new event and a
+          // steady one carry the same 28-day number and mean opposite things,
+          // so the shape earns one extra call — only when an event was actually
+          // asked about, and only when the window is long enough to differ.
+          if (days > STATS_CHUNK_DAYS) {
+            const recent = await readPixelEventCounts(
+              pixel.id,
+              endUnix - STATS_CHUNK_DAYS * 86_400,
+              endUnix,
+              token,
+            );
+            if (recent.error || top.count <= 0) {
+              // A refused second read is not a zero share either.
+              check.last7dShare = null;
+            } else {
+              const share = (recent.counts.get(top.event) ?? 0) / top.count;
+              check.last7dShare = Math.round(share * 100) / 100;
+              if (check.last7dShare >= RAMPING_LAST7D_SHARE) {
+                check.note = `${check.note ? `${check.note} ` : ""}Most of this window's fires are in its last 7 days, so the event is new and still ramping. Say so, and treat the earlier part of the window as thin rather than as evidence.`;
+              }
+            }
+          }
+          read.funnelCheck = check;
+        }
       }
 
       reads.push(read);

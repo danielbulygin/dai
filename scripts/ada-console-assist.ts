@@ -865,6 +865,12 @@ function buildScopedChatPrompt(
     `For events: **get_pixel_event_stats** reads what the pixel actually fired — hand it the customer's own loose wording ("qualified subscriber") and it resolves the real event name and its count, alongside Purchase so a ratio is one line away. **get_custom_conversions** lists the account's own named conversions with the rule behind each. Call one of them before you judge an event's volume, its risk, or whether it exists at all.\n` +
     `If a read is refused or comes back empty, say which read and what that means. "I could not look" and "there is nothing there" are different sentences and you never swap one for the other.`,
   );
+  parts.push(
+    `### An event count only means something next to the event above it\n` +
+    `Events sit in a funnel and the order is not negotiable: registration ≥ trial start ≥ purchase ≥ any "qualified", "paying" or "retained" subscriber event; add to cart ≥ checkout ≥ purchase for ecommerce; lead ≥ qualified lead for lead gen. A step further down is a SUBSET of the step above it, so it can never honestly fire more often. **get_pixel_event_stats** runs that comparison for you: \`funnelCheck\` carries the resolved event beside Purchase with a one-word verdict, and \`last7dShare\` says how much of the window is recent.\n` +
+    `When a measured count breaks that order, say so before anything else about the event: "this event fires more often than Purchase, so it is over-counting or it means something different from its name; check what triggers it before optimizing on it." Never call such a count good signal, healthy volume or enough for the learning phase. An event that fires several times per person teaches the algorithm the wrong thing, and no volume threshold rescues that.\n` +
+    `When most of a 28-day count landed in the last 7 days, the event is new and still ramping: say that plainly, and treat the earlier part of the window as thin rather than as evidence.`,
+  );
   parts.push(ROOT_CAUSE_METHOD);
   parts.push(
     `### When the customer teaches you something, SAVE it (remember) — then confirm\n` +

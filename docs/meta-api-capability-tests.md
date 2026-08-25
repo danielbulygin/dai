@@ -37,7 +37,10 @@ Counts are summed per event `value` across the returned buckets.
 
 1. A 28-day request fires FOUR `/stats` calls, none spanning more than 7 days.
    One call for 28 days means the chunking was removed and the read now fails
-   silently on any busy pixel.
+   silently on any busy pixel. With an `event` named it fires FIVE: the extra
+   one is the last-7-days read behind `last7dShare`. It cannot be saved by
+   reusing the final chunk — that chunk only lines up with the last week when
+   the window is a multiple of seven days.
 2. A refused pixel returns `readable: false` with Meta's message and NO
    `total_events`. **`Permission Denied` must never render as a zero** — "this
    pixel fired nothing" and "I could not look" are different facts, and the
@@ -55,6 +58,17 @@ Counts are summed per event `value` across the returned buckets.
    original bug.
 5. `qualified lead` does NOT resolve to `QualifiedSubscription` — sharing one
    word is not a match.
+6. With an `event` named, the result carries `funnelCheck`: that event's count
+   beside `Purchase`, `StartTrial` and `CompleteRegistration`, a one-word
+   verdict, and `last7dShare`. `higher_than_purchase` is the case it exists for.
+   The live answer on 2026-08-25 read `QualifiedSubscription` at 58,828 against
+   35,018 `Purchase` over 28 days, 42k of it in the last 7, and called it "good
+   signal density". A qualified-subscriber event is a SUBSET of purchases, so
+   out-firing them means it is over-counting or is defined differently from its
+   name — the client confirmed the event was mis-defined. A verdict that stays
+   `ok` on such a pixel is a regression, and so is `no_purchase_event` handed
+   over as though the count were fine on its own. AOTUS cannot exercise this
+   (both its pixels refuse `/stats`); BFM is the probe account for it.
 
 **Trap:** the shared `graphGet` helper defaults to a 500-row cap. A 7-day read
 is 168 rows, but a 28-day read as ONE call would be 672 and would silently
