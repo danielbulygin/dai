@@ -750,6 +750,11 @@ export function buildChatPrompt(
     `- **Consult your Key Learnings before calling anything an anomaly.** Many "weird" patterns are normal for the account and may already be written in your learnings — e.g. more content-views (PDP views) than link clicks is EXPECTED (each clicker just browses several product pages), not a red flag. Check first; don't flag an expected pattern as a ⚠️ problem.`,
   );
 
+  parts.push(
+    `### Read before you ask, and deliver before you offer\n` +
+    `Never ask the customer for a fact about their own account that a tool can read. The Page and the Instagram identity, the pixel, the destination and the attribution window are on the account's own ads (**query_meta_creatives** and **get_creative_details** carry page_id, instagram_actor_id and object_story_spec; **get_ad_summary** carries the destination); a campaign's structure is in its summary. A copied ad set brings its ads and their identities with it, and a campaign needs no Page or Instagram of its own. Ask only for what is genuinely theirs to decide: budget, bid strategy, CBO or ABO, the optimization goal, which ad sets.\n` +
+    `When they say "prepare", "propose" or "build", the answer IS the artifact: the campaign parameters, the seed list with ids and numbers, the leading ad of each ad set with its hook rate, the go-live steps, and the open decisions named at the end. Read what the question names in the same turn - one more tool call is cheaper than a round trip - and never end a "prepare" with "want me to?".`,
+  );
   parts.push(ROOT_CAUSE_METHOD);
 
   parts.push(
@@ -1067,6 +1072,28 @@ export async function resolveWriteCapability(
  * a customer hunting for a switch that is beside her answer, and never implies
  * one exists where the fix is ours.
  */
+/**
+ * The card section of the prompt, derived from the SAME verbs as the frame, so
+ * the sentence that teaches Ada which cards exist can never disagree with the
+ * sentence that tells the customer what she may do. A founder was told "only
+ * three kinds of change" one deploy after the create verbs landed.
+ */
+export function proposalKindsSentence(cap: WriteCapability): string {
+  const v = new Set<string>(cap.verbs);
+  const kinds: string[] = [];
+  if (v.has('pause')) kinds.push('pausing something');
+  if (v.has('resume')) kinds.push('turning something back on');
+  if (v.has('set_daily_budget')) kinds.push('changing a daily budget');
+  if (v.has('create_campaign')) kinds.push('creating a new campaign (it lands paused)');
+  if (v.has('duplicate_ad_set')) kinds.push('copying an ad set into a campaign that is open to you');
+  if (kinds.length === 0) {
+    return 'In this account today NO change can become a review card: give the advice and say plainly what stands in the way, in the words of the line above.';
+  }
+  const list = kinds.length === 1 ? kinds[0] : `${kinds.slice(0, -1).join(', ')} and ${kinds[kinds.length - 1]}`;
+  const count = kinds.length === 1 ? 'ONE kind' : `${kinds.length} kinds`;
+  return `In this account today ${count} of change can become a review card the customer approves: ${list}. Deletes never have a card. A kind not in that list has no card here: give the advice and say what would open it, in the words of the line above.`;
+}
+
 function writeCapabilityReasonLine(cap: WriteCapability): string {
   switch (cap.reason) {
     case 'mode_read_only':
@@ -1275,6 +1302,11 @@ export function buildScopedChatPrompt(
     `When a measured count breaks that order, say so before anything else about the event: "this event fires more often than Purchase, so it is over-counting or it means something different from its name; check what triggers it before optimizing on it." Never call such a count good signal, healthy volume or enough for the learning phase. An event that fires several times per person teaches the algorithm the wrong thing, and no volume threshold rescues that.\n` +
     `When most of a 28-day count landed in the last 7 days, the event is new and still ramping: say that plainly, and treat the earlier part of the window as thin rather than as evidence.`,
   );
+  parts.push(
+    `### Read before you ask, and deliver before you offer\n` +
+    `Never ask the customer for a fact about their own account that a tool can read. The Page and the Instagram identity, the pixel, the destination and the attribution window are on the account's own ads (**query_meta_creatives** and **get_creative_details** carry page_id, instagram_actor_id and object_story_spec; **get_ad_summary** carries the destination); a campaign's structure is in its summary. A copied ad set brings its ads and their identities with it, and a campaign needs no Page or Instagram of its own. Ask only for what is genuinely theirs to decide: budget, bid strategy, CBO or ABO, the optimization goal, which ad sets.\n` +
+    `When they say "prepare", "propose" or "build", the answer IS the artifact: the campaign parameters, the seed list with ids and numbers, the leading ad of each ad set with its hook rate, the go-live steps, and the open decisions named at the end. Read what the question names in the same turn - one more tool call is cheaper than a round trip - and never end a "prepare" with "want me to?".`,
+  );
   parts.push(ROOT_CAUSE_METHOD);
   parts.push(
     `### When the customer teaches you something, SAVE it (remember) — then confirm\n` +
@@ -1290,11 +1322,14 @@ export function buildScopedChatPrompt(
   parts.push(SAFETY_RULES_SECTION);
   parts.push(
     `### Proposing account changes (the approve-first rail)\n` +
-    `You cannot change anything in the account yourself, and you never claim otherwise. Only THREE kinds of change can become a review card the customer approves: pausing something, turning something back on, and changing a daily budget. Creates, duplicates and deletes have no card at all — asked for one of those, give the advice and say plainly that the change itself happens in Ads Manager.\n` +
-    `When the ask IS a pause, a resume or a budget change, and the line above allows it:\n` +
+    `You cannot change anything in the account yourself, and you never claim otherwise. ${proposalKindsSentence(writeCapability)}\n` +
+    `When the ask is one of those kinds:\n` +
     `1. Briefly explain what you would do and why, grounded in their numbers and their operating rules. NEVER show raw JSON in your prose — the block below renders as a review card, not as text.\n` +
     `2. End your reply with EXACTLY ONE fenced json block of this shape (no other fenced json in the reply):\n` +
-    '```json\n{"proposal": {"type": "pause_campaign" | "pause_ad_set" | "pause_ad" | "resume_campaign" | "resume_ad_set" | "resume_ad" | "update_budget", "campaign_id": "<numeric id>", "campaign_name": "<name>", "target_id": "<the campaign, ad set or ad id the change lands on>", "target_name": "<its current name>", "settings": {"daily_budget_usd": 0}, "reason": "<one sentence>", "warnings": ["<anything the customer must see>"]}}\n```\n' +
+    '```json\n{"proposal": {"type": "pause_campaign" | "pause_ad_set" | "pause_ad" | "resume_campaign" | "resume_ad_set" | "resume_ad" | "update_budget" | "create_campaign" | "duplicate_ad_set", "campaign_id": "<numeric id>", "campaign_name": "<name>", "target_id": "<the campaign, ad set or ad id the change lands on>", "target_name": "<its current name>", "settings": {"daily_budget_usd": 0}, "reason": "<one sentence>", "warnings": ["<anything the customer must see>"]}}\n```\n' +
+    `For **create_campaign** there is no target_id (the campaign does not exist yet). settings MUST carry: name, objective (e.g. OUTCOME_SALES), status "PAUSED", daily_budget_usd, optimization_event (the pixel event exactly as it fires), pixel_id (read from the account), attribution_spec as a list of {"event_type": "CLICK_THROUGH" | "VIEW_THROUGH", "window_days": <n>} and attribution_source ("spend_weighted_account_default" unless the customer named a window). "choices" may offer budget_mode (cbo / abo) and bid_strategy when the customer has not decided them; a decision they HAVE given goes straight into settings. A field left out makes the card impossible to build, so read the pixel and the account default first instead of guessing.\n` +
+    `For **duplicate_ad_set** target_id is the SOURCE ad set (a read, never fenced) and settings MUST carry: destination_campaign_id (a campaign the customer already approved and Meta already created - never one that does not exist yet), name, status "PAUSED", optimization_goal (e.g. OFFSITE_CONVERSIONS), promoted_object {"pixel_id", "custom_event_type" ("OTHER" for a custom event), "custom_event_str"}, attribution_spec, and source_spend_30d + source_effective_status from your read. The copy brings the source's ads, Page and Instagram identity with it.\n` +
+    `A build is a sequence of cards: the create first; the copies only once the customer approved it and the campaign exists. Say that in ONE sentence, then put up the create card in the same reply - never hold the create back until the copies can be made, and never describe a card you could have emitted.\n` +
     `Rules for proposals:\n` +
     `- **target_id is required on every proposal.** Without it no card can be built and your answer arrives with nothing to approve.\n` +
     `- update_budget MUST carry settings.daily_budget_usd, and target_id is the object that HOLDS the budget — the campaign on a CBO account, the ad set otherwise. A change of 3x or more versus the current value MUST carry a warning naming both numbers.\n` +
@@ -1355,7 +1390,7 @@ function toolLabel(name: string): string {
  * that Ada did not literally write).
  */
 interface ChatProposal {
-  type: 'pause_campaign' | 'pause_ad_set' | 'pause_ad' | 'resume_campaign' | 'resume_ad_set' | 'resume_ad' | 'update_budget';
+  type: 'pause_campaign' | 'pause_ad_set' | 'pause_ad' | 'resume_campaign' | 'resume_ad_set' | 'resume_ad' | 'update_budget' | 'create_campaign' | 'duplicate_ad_set';
   campaign_id?: string;
   campaign_name?: string;
   target_id?: string;
@@ -1371,10 +1406,12 @@ interface ChatProposal {
   reason?: string;
   warnings?: string[];
 }
-// The portal maps exactly these onto a review card; creates and duplicates have
-// no intent shape there and are refused by name, so a proposal naming one would
-// reach the customer as a card that can never be approved.
-const PROPOSAL_TYPES = new Set(['pause_campaign', 'pause_ad_set', 'pause_ad', 'resume_campaign', 'resume_ad_set', 'resume_ad', 'update_budget']);
+// The portal maps exactly these onto a review card. create_campaign and
+// duplicate_ad_set joined when the create-shaped changes took the one pipeline
+// (tinkers docs/decisions/0080); create_ad, duplicate_ad and create_ad_set still
+// have no intent shape there and would reach the customer as a card that can
+// never be approved, so they stay out.
+const PROPOSAL_TYPES = new Set(['pause_campaign', 'pause_ad_set', 'pause_ad', 'resume_campaign', 'resume_ad_set', 'resume_ad', 'update_budget', 'create_campaign', 'duplicate_ad_set']);
 function parseChatProposal(text: string): ChatProposal | null {
   const fences = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
   for (const fence of fences.reverse()) {
