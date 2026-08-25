@@ -147,6 +147,12 @@ interface AssistRequest {
   // through a bare `as AssistRequest` cast, so the type system must force it
   // through parseControlInput before anything reads it.
   control?: unknown;
+  // What the PORTAL knows about the account this turn is about, sent on scoped
+  // requests only. Deliberately NOT `context`, which is this console's own
+  // screen context: one key answering to two shapes is a bug waiting for
+  // whoever reorders a `??` next year. `unknown` for the same reason `control`
+  // is — it must go through parsePortalContext before anything reads it.
+  portal_context?: unknown;
   // /diagnose only — the prior Ada turn the debugger second-opinions:
   answer?: string;                            // Ada's answer being checked
   trace?: { label: string; tool?: string }[]; // the tool/step trace Ada took
@@ -175,6 +181,71 @@ export function parseControlInput(raw: unknown): ControlInput | null {
   if (typeof c.stopped !== 'boolean') return null;
   if (c.mode !== 'read_only' && c.mode !== 'hitl' && c.mode !== 'autonomous') return null;
   return { mode: c.mode, stopped: c.stopped };
+}
+
+/**
+ * What the PORTAL knows about this account, sent with the question (tinkers
+ * ADR 0079). Ada was a thin proxy: everything a customer typed into the portal
+ * — their facts, their goal and bands, the rules they adopted — and everything
+ * the portal worked out on its own — the guard findings standing open — never
+ * reached her, so a customer who filled in the Setup checklist and then asked a
+ * question got an answer that ignored what they had just typed.
+ *
+ * Optional, and shaped by the portal. This side reads it, never writes it, and
+ * never trusts it for tenancy: the scope claim is still the only thing that
+ * decides whose data any tool may touch.
+ */
+interface PortalContextAccount {
+  id: string; external_id: string;
+  name: string | null; currency: string | null; timezone: string | null;
+  control_mode: 'read_only' | 'hitl' | 'autonomous'; stopped: boolean;
+  target: { metric: string; value: number; set_at: string | null } | null;
+  bands: { status: 'drafted' | 'confirmed'; ecstatic: number; happy: number; nervous: number; kill: number } | null;
+}
+interface PortalContextFact { id: string; topic: string; fact: string; source: string }
+interface PortalContextRule { id: string; rule: string; action: string; checkable: boolean }
+interface PortalContextFinding {
+  id: string; severity: 'red' | 'amber'; headline: string;
+  entity: { level: string | null; id: string | null; name: string | null } | null;
+  receipt: string | null; opened_at: string; status: string;
+}
+export interface PortalContext {
+  as_of: string;
+  account?: PortalContextAccount;
+  facts?: PortalContextFact[];
+  rules?: PortalContextRule[];
+  findings?: PortalContextFinding[];
+  /** Sections whose read FAILED. Absent from the block, and not empty. */
+  unavailable: string[];
+  /** Sections the portal's size cap cut. Present, and short. */
+  truncated: string[];
+}
+
+/**
+ * All-or-nothing, and gated on the version: a half-formed block is a caller we
+ * do not understand, and the fallback — saying nothing about the portal at all
+ * — is the safe one. Mirrors parseControlInput exactly.
+ */
+export function parsePortalContext(raw: unknown): PortalContext | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const c = raw as Record<string, unknown>;
+  if (c.v !== 1) return null;
+  if (typeof c.as_of !== 'string' || !c.as_of) return null;
+  const list = (v: unknown) => (Array.isArray(v) ? v : []);
+  const names = (v: unknown) => list(v).filter((s): s is string => typeof s === 'string');
+  return {
+    as_of: c.as_of,
+    ...(c.account && typeof c.account === 'object' && !Array.isArray(c.account)
+      ? { account: c.account as PortalContextAccount }
+      : {}),
+    // Present-and-empty is a real answer and must survive: only an ABSENT key
+    // means the portal could not read the section.
+    ...(Array.isArray(c.facts) ? { facts: c.facts as PortalContextFact[] } : {}),
+    ...(Array.isArray(c.rules) ? { rules: c.rules as PortalContextRule[] } : {}),
+    ...(Array.isArray(c.findings) ? { findings: c.findings as PortalContextFinding[] } : {}),
+    unavailable: names(c.unavailable),
+    truncated: names(c.truncated),
+  };
 }
 
 type Severity = 'info' | 'warn' | 'block';
@@ -1016,6 +1087,92 @@ These are settled, they are not preferences, and no number in the account overri
 - fb.me, m.me, wa.me, facebook.com and instagram.com are Meta's own surfaces, not broken or dead pages. Never call one dead, and never advise pausing an ad because it points at one.
 - Before you propose any change, have the readiness facts in hand: the pixel, the conversion event, the destination URL, and the Page and Instagram identity. If one is missing or you could not read it, say which one before you propose anything.`;
 
+/** Beyond this a single portal sentence is quoted as a prefix. */
+const PORTAL_CONTEXT_MAX_CHARS = 400;
+
+function portalLine(text: string): string {
+  const clean = (text ?? '').replace(/\s+/g, ' ').trim();
+  return clean.length > PORTAL_CONTEXT_MAX_CHARS
+    ? `${clean.slice(0, PORTAL_CONTEXT_MAX_CHARS - 1)}…`
+    : clean;
+}
+
+/**
+ * "What the portal knows", as one compact section. Ids ride in brackets so Ada
+ * can name a thing the customer can then find on a page.
+ *
+ * An ABSENT section renders nothing at all. An EMPTY one renders as the fact
+ * that the portal holds nothing, which is a different sentence and a useful
+ * one: it is what lets Ada say "you have not told me that yet" instead of
+ * inventing something.
+ */
+export function renderPortalContextBlock(ctx: PortalContext | null): string {
+  if (!ctx) return '';
+  const lines: string[] = [];
+
+  const a = ctx.account;
+  if (a) {
+    const bits = [`${a.name ?? 'this account'} [${a.id}]`, a.external_id];
+    if (a.currency) bits.push(a.currency);
+    if (a.timezone) bits.push(a.timezone);
+    lines.push(`- Account: ${bits.join(' · ')}`);
+    lines.push(`- What they have allowed: mode ${a.control_mode}${a.stopped ? ', and the account is STOPPED' : ''}`);
+    lines.push(a.target
+      ? `- Their goal: ${a.target.metric} ${a.target.value}${a.target.set_at ? `, set ${a.target.set_at}` : ''} (set on the Business page)`
+      : '- Their goal: not set yet.');
+    if (a.bands) {
+      lines.push(`- Their bands (${a.bands.status}): ecstatic ${a.bands.ecstatic} · happy ${a.bands.happy} · nervous ${a.bands.nervous} · kill ${a.bands.kill}`);
+    }
+  }
+
+  if (ctx.facts) {
+    lines.push(ctx.facts.length
+      ? `- What they have told you about the business (${ctx.facts.length}):`
+      : '- What they have told you about the business: nothing yet.');
+    for (const f of ctx.facts) {
+      lines.push(`  - ${f.topic}: ${portalLine(f.fact)} [${f.id}, from ${f.source}]`);
+    }
+  }
+
+  if (ctx.rules) {
+    lines.push(ctx.rules.length
+      ? `- Rules they run (${ctx.rules.length}):`
+      : '- Rules they run: none adopted yet.');
+    for (const r of ctx.rules) {
+      lines.push(`  - ${portalLine(r.rule)} → ${r.action} [${r.id}${r.checkable ? ', checked automatically' : ', words only, nothing checks it'}]`);
+    }
+  }
+
+  if (ctx.findings) {
+    lines.push(ctx.findings.length
+      ? `- Open catches on this account (${ctx.findings.length}):`
+      : '- Open catches on this account: none open right now.');
+    for (const f of ctx.findings) {
+      const on = f.entity?.name ? ` on ${f.entity.name}${f.entity.level ? ` (${f.entity.level.toLowerCase()})` : ''}` : '';
+      const why = f.receipt ? ` — ${portalLine(f.receipt)}` : '';
+      lines.push(`  - ${f.severity.toUpperCase()}: ${portalLine(f.headline)}${on}${why} [${f.id}, open since ${f.opened_at.slice(0, 10)}]`);
+    }
+  }
+
+  if (ctx.unavailable.length) {
+    lines.push(`- COULD NOT READ this turn: ${ctx.unavailable.join(', ')}. This is NOT "there is none" — say you could not look, and never answer as if the section were empty.`);
+  }
+  if (ctx.truncated.length) {
+    lines.push(`- SHORTENED to fit: ${ctx.truncated.join(', ')}. There are more than the ones listed — say so if it matters to the answer.`);
+  }
+
+  if (!lines.length) return '';
+
+  return (
+    `### What the portal knows (as of ${ctx.as_of})\n` +
+    `This is what the customer has actually typed into their workspace and what our own checks found, read a moment ago. Three rules:\n` +
+    `1. **This block wins.** Where it and anything in your client file disagree, this is right — it is what the customer set most recently.\n` +
+    `2. **Say where it came from when they ask.** "Your target of 40, set on the Business page", never "your target of 40".\n` +
+    `3. **Never read this back as a list.** It is context for an answer, not an answer. Use the parts that bear on what they asked and leave the rest unsaid.\n` +
+    lines.join('\n')
+  );
+}
+
 /**
  * Client-scoped chat prompt (Tinkers portal — rollout plan R5). A CLIENT user is
  * on the other end, NOT a member of our team, so this deliberately shares NOTHING
@@ -1054,12 +1211,31 @@ export function buildScopedChatPrompt(
 
   const parts: string[] = [];
   parts.push(buildClientOverlay({ clientCode, displayName, clientContext }));
+  // What the customer typed into the portal today, over what a hand-written
+  // client file said whenever they disagree. Its own key, never `context`,
+  // which is this console's screen context and stays untouched.
+  let portalBlock = '';
+  try {
+    portalBlock = renderPortalContextBlock(parsePortalContext(req.portal_context));
+  } catch (e) {
+    // The portal owns this shape and a turn must never die on it: an element we
+    // cannot render degrades to no block, exactly like a block we cannot parse.
+    console.warn('[ada-console-assist] portal_context render failed (block omitted):', (e as Error).message);
+    portalBlock = '';
+  }
+  if (portalBlock) parts.push(portalBlock);
   parts.push(
     `### How to answer\n` +
     `- Answer directly and usefully, grounded in real numbers from your tools — never guess a figure, and state the exact window when you cite metrics.\n` +
     `- Lead with ratios and rates (hook/hold rate, CTR, CVR, AOV, ROAS) and benchmark against the account, not raw counts in isolation.\n` +
     `- When you quote a cost per result, place it against this client's own goal bands (dream / happy / nervous / kill) whenever your context provides them, and SAY which band it lands in. A number past the kill band is never framed as still learning or early - name the breach and what you would do about it. No bands in context: compare against the account's own recent average and say that is the reference.\n` +
     `- When the customer refers to a campaign or ad by a name that could match more than one object, or the name in your data looks renamed or stale, say exactly which object you mean (current name plus its id) before judging it.\n` +
+    // Only when there IS a block: a staleness rule about a stamp that was never
+    // sent is a prompt pointing at nothing, and it would change the prompt every
+    // live customer reads before the portal deploy lands.
+    (portalBlock
+      ? `- The portal block above carries the time it was read. If that stamp is more than about 15 minutes behind now, say once that you are working from what the portal held a few minutes ago, and move on. Do not repeat it.\n`
+      : '') +
     `- Be concise and concrete. Markdown is welcome (short bold numbers, tight bullets, small tables). No preamble, no "as an AI", no restating the question.`,
   );
   parts.push(

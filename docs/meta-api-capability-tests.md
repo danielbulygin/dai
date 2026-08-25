@@ -553,3 +553,72 @@ path is mocked, so these pin OUR behaviour, not Meta's):
    is copied.
 6. The read-back carries status, campaign, `optimization_goal`,
    `promoted_object`, `attribution_spec`, `bid_strategy` and budget.
+
+---
+
+## Case 40 — What the portal knows (`portal_context` on the scoped `/chat` turn)
+
+**Probed:** 2026-08-25, in this repo, against the prompt builder itself. **No
+Meta call is involved, and that is the case.** This is the first thing Ada
+learned by being TOLD rather than by reading: the customer's business facts,
+their goal and its bands, the rules they adopted and the guard findings standing
+open all live in the tinkers portal's own database, and until now none of them
+reached the turn. A customer could fill in the whole Setup checklist, ask a
+question a minute later, and get an answer that ignored every word of it.
+
+**Shape.** The portal (tinkers PR #332, ADR 0079) sends an optional
+`portal_context` object on every scoped `/chat` request, beside the existing
+`control` object:
+
+```json
+{ "v": 1, "as_of": "2026-08-25T01:40:12.000Z",
+  "account":  { "id": "…", "external_id": "act_…", "control_mode": "read_only", "stopped": false,
+                "target": { "metric": "cpa", "value": 40, "set_at": "2026-08-20" },
+                "bands":  { "status": "confirmed", "ecstatic": 32, "happy": 40, "nervous": 48, "kill": 80 } },
+  "facts":    [{ "id": "…", "topic": "…", "fact": "…", "source": "customer" }],
+  "rules":    [{ "id": "…", "rule": "…", "action": "notify", "checkable": true }],
+  "findings": [{ "id": "…", "severity": "red", "headline": "…", "receipt": "…", "opened_at": "…", "status": "OPEN" }],
+  "unavailable": [], "truncated": [] }
+```
+
+**Results:**
+
+| What | Finding |
+|---|---|
+| The key | `portal_context`, its own. `context` stays the INTERNAL console's screen context: a scoped request carrying only `context` builds a **byte-identical** prompt to one carrying nothing, pinned against a fixture captured before the field existed. One key answering to two shapes is the bug this avoids. |
+| Version gate | `v` must be the number `1`. `"1"`, `2`, and a missing `v` all parse to null and render nothing at all. |
+| All-or-nothing | Mirrors `parseControlInput`. A half-formed block is not a partial truth to mix in, it is a caller we do not understand, and the fallback — saying nothing about the portal — is the safe one. |
+| Absent vs empty | The whole reason the shape exists. `facts: []` renders "nothing yet", which lets Ada say *you have not told me that yet*. `facts` ABSENT plus `unavailable: ["facts"]` renders "COULD NOT READ this turn" and NO list. Collapsing the two is a fabricated receipt. |
+| Ceilings | The portal caps the serialized block at 8 KB and names what it cut in `truncated`, which renders as "there are more than the ones listed". This side caps one quoted sentence at 400 characters and appends `…`. |
+| Tenancy | The block is **never** a tenancy input. The signed scope claim is still the only thing that decides whose data a tool may touch. `portal_context` only decides what Ada may say she was told. |
+| Which switch executes | `control` (top level) remains the authority for what may EXECUTE. `account.control_mode` and `account.stopped` in the block are the authority for what Ada may SAY about the mode. Both derive from the same single portal read, so they cannot disagree inside a turn. Flipping `resolveWriteCapability` onto the block is deliberately a later change, after blocks are confirmed arriving. |
+| Staleness | The block carries `as_of` and the prompt gains one bullet asking Ada to say once, if the stamp is more than ~15 minutes old, that she is working from what the portal held a few minutes ago. That bullet is added **only when a block is present** — a staleness rule about a stamp nobody sent points at nothing. |
+
+**Regression checks** (`tests/portal-context.test.ts`, 26 cases):
+
+1. `parsePortalContext` returns null for absent, `null`, `{}`, an array, a
+   string, a missing `v`, `v: 2`, `v: "1"`, a missing `as_of` and an empty one.
+2. `facts: []` survives as `[]`; an absent `facts` stays absent (`'facts' in ctx`
+   is false). These two are the feature.
+3. Every section renders its ids, and an ABSENT section renders **nothing** —
+   asserted on the heading word not appearing, not on the list being empty.
+4. `unavailable: ["findings"]` renders the could-not-read sentence and no
+   findings list; `truncated` renders the there-are-more sentence.
+5. A scoped request with no `portal_context`, and one carrying only the console's
+   own `context`, both produce the pre-patch prompt byte for byte. Every live
+   customer was on that path when this landed.
+6. A block that cannot be PARSED, and an element that cannot be RENDERED (a
+   finding with no `severity`), both degrade to no block with a `console.warn`.
+   A wire bug the portal owns costs an omitted block, never the turn.
+7. The block never reaches the internal console prompt.
+
+**Not verified yet, and it needs a deploy.** Nothing has served a real
+`portal_context` — the running `ada-console-assist` predates this commit. The
+web-parity goldens the spec names ("what is my target?", "what did you catch this
+week?", "what do you know about my business?", "what rules am I running?", "can
+you change something?") are therefore **deliberately not in
+`tests/eval/golden-questions-web.json` yet**: `scripts/eval-ada.ts --target http`
+sends only `question`, `session_id`, `client_scope` and `scope_claim`, so those
+questions would be graded against a turn with no block — grading the absence of
+the capability and calling it a pass. Add them together with the harness field,
+after the deploy, and grade them on AOTUS.
