@@ -1922,6 +1922,14 @@ interface ExecuteActionRequest {
   client_code?: string;
   user_id?: string;
   /**
+   * The portal's own switch for the account, sent with the dispatch the way
+   * every /chat request sends it. The portal is the authority on mode and
+   * STOP; this table's row is what an account has when it connected through
+   * the droplet, and an agency-run account never gets one. Parsed through
+   * parseControlInput; anything malformed reads as absent, never as open.
+   */
+  control?: unknown;
+  /**
    * Check-only. Runs every rail, resolves every id the intent names against
    * Graph, and asks Meta itself via validate_only — then STOPS before the
    * mutating call. Nothing is written and nothing is logged as a write.
@@ -2126,12 +2134,22 @@ export async function handleExecuteAction(body: ExecuteActionRequest): Promise<R
     .eq('ad_account_id', acct)
     .limit(1)
     .maybeSingle();
-  const mode = gs?.mode ?? 'read_only';
-  if (!gs || gs.stopped_at || (mode !== 'hitl' && mode !== 'autonomous')) {
+  // The portal's block, when the dispatch carried one, beats the row on the
+  // mode and on STOP (the same precedence /chat gives it): the first approved
+  // action ever dispatched for a customer was refused here with "no settings
+  // row" for an account the portal had switched to asks-first, because the row
+  // only exists for accounts that connected through the droplet. Without a
+  // block the row decides, fail-closed, exactly as before.
+  const control = parseControlInput(body.control);
+  const mode = control ? control.mode : (gs?.mode ?? 'read_only');
+  const stopped = control ? control.stopped : Boolean(gs?.stopped_at);
+  const modeKnown = control !== null || Boolean(gs);
+  if (!modeKnown || stopped || (mode !== 'hitl' && mode !== 'autonomous')) {
+    const source = control ? 'portal' : (gs ? 'settings row' : 'no settings row');
     return {
       ok: false,
       refused: 'writes_not_enabled_for_this_account',
-      detail: `Ada's write rail is switched off for ${client.name}'s account (mode: ${gs ? mode : 'no settings row'}${gs?.stopped_at ? ', STOP pressed' : ''}). Daniel enables accounts one by one.`,
+      detail: `Ada's write rail is switched off for ${client.name}'s account (mode: ${modeKnown ? mode : 'no settings row'}${stopped ? ', STOP pressed' : ''}; ${source}). Daniel enables accounts one by one.`,
     };
   }
 

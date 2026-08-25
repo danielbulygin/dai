@@ -226,6 +226,44 @@ describe('resume — the one verb that turns spend on', () => {
     expect(state.graph).toHaveLength(0);
   });
 
+  it('honors the PORTAL mode over a missing settings row: hitl on the wire opens the lane', async () => {
+    delete state.guardSettings.act_100;
+    pausedAdSetInFence();
+    const out = await run({ type: 'resume_ad_set', target_id: '6001' }, { control: { mode: 'hitl', stopped: false } });
+
+    expect(out.refused).not.toBe('writes_not_enabled_for_this_account');
+    expect(state.graph.length).toBeGreaterThan(0);
+  });
+
+  it('honors the PORTAL mode over an open row: read_only on the wire refuses, without reading Meta', async () => {
+    state.guardSettings.act_100 = { mode: 'hitl', enabled: true, stopped_at: null };
+    pausedAdSetInFence();
+    const out = await run({ type: 'resume_ad_set', target_id: '6001' }, { control: { mode: 'read_only', stopped: false } });
+
+    expect(out.refused).toBe('writes_not_enabled_for_this_account');
+    expect(String(out.detail)).toContain('portal');
+    expect(state.graph).toHaveLength(0);
+  });
+
+  it('honors a STOP on the wire even when the row is open', async () => {
+    state.guardSettings.act_100 = { mode: 'hitl', enabled: true, stopped_at: null };
+    pausedAdSetInFence();
+    const out = await run({ type: 'resume_ad_set', target_id: '6001' }, { control: { mode: 'hitl', stopped: true } });
+
+    expect(out.refused).toBe('writes_not_enabled_for_this_account');
+    expect(String(out.detail)).toContain('STOP pressed');
+    expect(state.graph).toHaveLength(0);
+  });
+
+  it('reads a malformed control block as absent, so the row still decides', async () => {
+    delete state.guardSettings.act_100;
+    pausedAdSetInFence();
+    const out = await run({ type: 'resume_ad_set', target_id: '6001' }, { control: { mode: 'open sesame' } });
+
+    expect(out.refused).toBe('writes_not_enabled_for_this_account');
+    expect(String(out.detail)).toContain('no settings row');
+  });
+
   it('resumes an ad set inside the fence, and reads the result back', async () => {
     pausedAdSetInFence();
     const out = await run({ type: 'resume_ad_set', target_id: '6001' });
