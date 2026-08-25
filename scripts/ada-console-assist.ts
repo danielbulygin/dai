@@ -1328,8 +1328,10 @@ export function buildScopedChatPrompt(
     `2. End your reply with EXACTLY ONE fenced json block of this shape (no other fenced json in the reply):\n` +
     '```json\n{"proposal": {"type": "pause_campaign" | "pause_ad_set" | "pause_ad" | "resume_campaign" | "resume_ad_set" | "resume_ad" | "update_budget" | "create_campaign" | "duplicate_ad_set", "campaign_id": "<numeric id>", "campaign_name": "<name>", "target_id": "<the campaign, ad set or ad id the change lands on>", "target_name": "<its current name>", "settings": {"daily_budget_usd": 0}, "reason": "<one sentence>", "warnings": ["<anything the customer must see>"]}}\n```\n' +
     `For **create_campaign** there is no target_id (the campaign does not exist yet). settings MUST carry: name, objective (e.g. OUTCOME_SALES), status "PAUSED", daily_budget_usd, optimization_event (the pixel event exactly as it fires), pixel_id (read from the account), attribution_spec as a list of {"event_type": "CLICK_THROUGH" | "VIEW_THROUGH", "window_days": <n>} and attribution_source ("spend_weighted_account_default" unless the customer named a window). "choices" MUST offer the two calls that are the customer's to make unless they already made them in this conversation, and it is a LIST OF GROUPS with labels, never a bare list of values: "choices": [{"key": "budget_mode", "label": "Where the budget sits", "options": [{"value": "cbo", "label": "One budget for the whole campaign"}, {"value": "abo", "label": "A budget on each ad set"}], "selected": "cbo", "why": "Your Main + Testing campaign runs one budget, so the copy behaves like the original."}, {"key": "bid_strategy", "label": "How Meta bids", "options": [{"value": "LOWEST_COST_WITHOUT_CAP", "label": "Lowest cost, no cap"}, {"value": "COST_CAP", "label": "Cost cap"}], "selected": "LOWEST_COST_WITHOUT_CAP", "why": "A new event has no cost history to cap against yet."}]. EVERY group carries "selected" (your recommendation, the one a beginner should be able to accept as-is) and "why" (ONE sentence, grounded in their account, in the customer's words). A decision they HAVE given goes straight into settings AND the group still appears with that value selected, so the modal shows what they chose. A field left out makes the card impossible to build, so read the pixel and the account default first instead of guessing.\n` +
-    `For **duplicate_ad_set** target_id is the SOURCE ad set (a read, never fenced) and settings MUST carry: destination_campaign_id (a campaign the customer already approved and Meta already created - never one that does not exist yet), name, status "PAUSED", optimization_goal (e.g. OFFSITE_CONVERSIONS), promoted_object {"pixel_id", "custom_event_type" ("OTHER" for a custom event), "custom_event_str"}, attribution_spec, and source_spend_30d + source_effective_status from your read. The copy brings the source's ads, Page and Instagram identity with it.\n` +
-    `A build is a sequence of cards: the create first; the copies only once the customer approved it and the campaign exists. Say that in ONE sentence, then put up the create card in the same reply - never hold the create back until the copies can be made, and never describe a card you could have emitted.\n` +
+    `For **duplicate_ad_set** target_id is the SOURCE ad set (a read, never fenced) and settings MUST carry: destination_campaign_id (a campaign the customer already approved and Meta already created, or inside a plan "$step:0" for the campaign the plan's own create step makes - never a campaign that neither exists nor is an earlier step of the same plan), name, status "PAUSED", optimization_goal (e.g. OFFSITE_CONVERSIONS), promoted_object {"pixel_id", "custom_event_type" ("OTHER" for a custom event), "custom_event_str"}, attribution_spec, and source_spend_30d + source_effective_status from your read. The copy brings the source's ads, Page and Instagram identity with it.\n` +
+    `A BUILD - a new campaign and what goes into it, or several copies into one campaign - is ONE plan, not a chain of cards: the create and every copy in one fenced json block, which then stands in for the proposal block as the only fenced json in the reply:\n` +
+    '```json\n{"plan": {\n  "summary": "New campaign for QualifiedSubscription, seeded with your 5 running ad sets",\n  "reason": "<one sentence, the why of the whole build>",\n  "warnings": ["<anything the customer must see about the build as a whole>"],\n  "steps": [\n    { "type": "create_campaign", "settings": { ...exactly as a single create proposal... }, "choices": [ ...groups with selected + why... ], "reason": "..." },\n    { "type": "duplicate_ad_set", "target_id": "<source ad set id>", "target_name": "<source name>",\n      "settings": { "destination_campaign_id": "$step:0", ...exactly as a single copy proposal... },\n      "reason": "...", "warnings": [] }\n  ]\n}}\n```\n' +
+    `Every step is a complete proposal of its kind - the same required settings, target_id on every step except the create, everything PAUSED. A copy into the campaign that step 0 creates carries destination_campaign_id "$step:0", which means the id Meta gives back for that step; a reference may only point at an EARLIER step, and nothing else in a plan carries one. Choices sit on the step that owns them (budget mode and bid strategy on the create). Say ONE line ("Here is the whole build on one card"), then the block - never list the steps in words, the card is the list. A single change stays a proposal.\n` +
     `Rules for proposals:\n` +
     `- **target_id is required on every proposal.** Without it no card can be built and your answer arrives with nothing to approve.\n` +
     `- update_budget MUST carry settings.daily_budget_usd, and target_id is the object that HOLDS the budget — the campaign on a CBO account, the ad set otherwise. A change of 3x or more versus the current value MUST carry a warning naming both numbers.\n` +
@@ -1420,6 +1422,79 @@ function parseChatProposal(text: string): ChatProposal | null {
       const p = obj.proposal;
       if (p && typeof p === 'object' && PROPOSAL_TYPES.has(p.type)) return p;
     } catch { /* not this fence */ }
+  }
+  return null;
+}
+
+/**
+ * A BUILD (a new campaign and what goes into it, or several copies into one
+ * campaign) arrives as ONE {"plan": {...}} block, a sibling of the proposal
+ * block: the customer approves once and the portal's runner sequences the
+ * steps. Every step is a ChatProposal held to the same PROPOSAL_TYPES, and a
+ * plan with one step the card could not run is not a plan, so any fault drops
+ * the WHOLE block rather than the step. "$step:n" in destination_campaign_id
+ * means the id Meta gave back for step n; the portal resolves it from its own
+ * read-backs, never from prose, so it may only name an EARLIER step, and no
+ * other field may carry a reference (the runner would not resolve it there).
+ */
+export interface ChatPlan {
+  summary: string;
+  reason?: string;
+  warnings?: string[];
+  steps: ChatProposal[];
+}
+const PLAN_MAX_STEPS = 25;
+const STEP_REFERENCE = /^\$step:(\d+)$/;
+const STEP_REFERENCE_SLOT = 'settings.destination_campaign_id';
+
+/** Every string in the step that LOOKS like a step reference, with its dotted path. */
+function stepReferences(value: unknown, path: string, out: Array<{ path: string; value: string }>): void {
+  if (typeof value === 'string') {
+    if (value.startsWith('$step')) out.push({ path, value });
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item, i) => stepReferences(item, `${path}[${i}]`, out));
+    return;
+  }
+  if (value && typeof value === 'object') {
+    for (const [key, inner] of Object.entries(value)) stepReferences(inner, path ? `${path}.${key}` : key, out);
+  }
+}
+
+function isPlanStep(step: unknown, index: number): step is ChatProposal {
+  if (!step || typeof step !== 'object' || Array.isArray(step)) return false;
+  const s = step as ChatProposal;
+  if (!PROPOSAL_TYPES.has(s.type)) return false;
+  if (s.settings !== undefined && (s.settings === null || typeof s.settings !== 'object' || Array.isArray(s.settings))) return false;
+  const refs: Array<{ path: string; value: string }> = [];
+  stepReferences(s, '', refs);
+  for (const ref of refs) {
+    if (ref.path !== STEP_REFERENCE_SLOT) return false;
+    const m = STEP_REFERENCE.exec(ref.value);
+    if (!m || Number(m[1]) >= index) return false;
+  }
+  return true;
+}
+
+export function parseChatPlan(text: string): ChatPlan | null {
+  const fences = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
+  for (const fence of fences.reverse()) {
+    let obj: { plan?: unknown };
+    try {
+      obj = JSON.parse((fence[1] ?? '').trim()) as { plan?: unknown };
+    } catch { continue; }
+    if (obj === null || typeof obj !== 'object' || !('plan' in obj)) continue;
+    const plan = obj.plan as Partial<ChatPlan> | null;
+    if (!plan || typeof plan !== 'object' || Array.isArray(plan)) return null;
+    if (typeof plan.summary !== 'string' || !plan.summary.trim()) return null;
+    if (plan.reason !== undefined && typeof plan.reason !== 'string') return null;
+    if (plan.warnings !== undefined && !(Array.isArray(plan.warnings) && plan.warnings.every((w) => typeof w === 'string'))) return null;
+    const steps = plan.steps;
+    if (!Array.isArray(steps) || steps.length < 1 || steps.length > PLAN_MAX_STEPS) return null;
+    if (!steps.every((step, i) => isPlanStep(step, i))) return null;
+    if (steps.filter((step) => step.type === 'create_campaign').length > 1) return null;
+    return plan as ChatPlan;
   }
   return null;
 }
@@ -1678,6 +1753,8 @@ async function handleChatStream(
     if (scope) {
       const proposal = parseChatProposal(fullText);
       if (proposal) { proposalType = proposal.type; safe('proposal', { proposal }); }
+      const plan = parseChatPlan(fullText);
+      if (plan) { proposalType = `plan:${plan.steps.length}`; safe('plan', { plan }); }
     }
     const creatives = parseChatCreatives(fullText);
     if (creatives.length) safe('creatives', { creatives });
