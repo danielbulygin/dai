@@ -72,21 +72,23 @@ const {
   EXECUTABLE_VERBS,
 } = await import('../scripts/ada-console-assist.js');
 
-/** The three tinkers `ActionCommand` verbs — the whole ceiling, not a sample. */
-const THREE_VERBS = ['pause', 'resume', 'set_daily_budget'];
+/** The five tinkers `ActionCommand` verbs — the whole ceiling, not a sample. */
+const ALL_VERBS = ['pause', 'resume', 'set_daily_budget', 'create_campaign', 'duplicate_ad_set'];
+/** The one verb an EMPTY fence still lets through: the create that then becomes the fence. */
+const CREATE_ONLY = ['create_campaign'];
 
 const CANNOT = 'Today I cannot change anything in this account.';
 
 describe('mapWriteCapability — which ONE thing is stopping her', () => {
-  it('names the three verbs when the mode is open and the fence has a campaign', () => {
+  it('names the five verbs when the mode is open and the fence has a campaign', () => {
     const cap = mapWriteCapability({
       adAccountId: 'act_1', guardRow: { mode: 'hitl', stopped_at: null }, fence: ['120000'],
     });
-    expect(cap).toMatchObject({ canExecute: true, reason: 'ok', verbs: THREE_VERBS });
+    expect(cap).toMatchObject({ canExecute: true, reason: 'ok', verbs: ALL_VERBS });
     expect(cap.sentence).toContain('in the one campaign this account has opened to me');
     expect(cap.sentence).toContain('pausing something');
-    // The ceiling is the ceiling: no create, duplicate or delete, ever.
-    expect(cap.sentence).toContain('I cannot create campaigns or ad sets');
+    // The ceiling is the ceiling: never delete, and nothing runs unapproved.
+    expect(cap.sentence).toContain('I can never delete anything');
   });
 
   it('counts the fence in the sentence, and autonomous is an open mode too', () => {
@@ -156,9 +158,8 @@ describe('mapWriteCapability — which ONE thing is stopping her', () => {
       mapWriteCapability({ adAccountId: null }),
       mapWriteCapability({ adAccountId: 'act_1', guardRow: { mode: 'read_only' } }),
       mapWriteCapability({ adAccountId: 'act_1', guardRow: { mode: 'hitl', stopped_at: 'now' }, fence: ['1'] }),
-      mapWriteCapability({ adAccountId: 'act_1', guardRow: { mode: 'hitl' }, fence: [] }),
     ];
-    expect(shut.map((c) => c.reason)).toEqual(['unknown', 'unknown', 'mode_read_only', 'mode_stopped', 'no_lane']);
+    expect(shut.map((c) => c.reason)).toEqual(['unknown', 'unknown', 'mode_read_only', 'mode_stopped']);
     for (const cap of shut) {
       expect(cap.canExecute).toBe(false);
       expect(cap.verbs).toEqual([]);
@@ -168,10 +169,18 @@ describe('mapWriteCapability — which ONE thing is stopping her', () => {
     }
   });
 
+  it('lets exactly one verb through an empty fence: the create that becomes the fence', () => {
+    const lane = mapWriteCapability({ adAccountId: 'act_1', guardRow: { mode: 'hitl' }, fence: [] });
+    expect(lane).toMatchObject({ canExecute: true, reason: 'no_lane', verbs: CREATE_ONLY, openMode: 'hitl' });
+    expect(lane.sentence).toContain('creating a new campaign');
+    expect(lane.sentence).toContain('Your existing campaigns are not open to me yet');
+    expect(lane.sentence).not.toContain(CANNOT);
+  });
+
   it('hands out a copy of the verb list, so a caller cannot widen the ceiling', () => {
     const cap = mapWriteCapability({ adAccountId: 'act_1', guardRow: { mode: 'hitl' }, fence: ['1'] });
     cap.verbs.push('delete_campaign');
-    expect([...EXECUTABLE_VERBS]).toEqual(THREE_VERBS);
+    expect([...EXECUTABLE_VERBS]).toEqual(ALL_VERBS);
   });
 });
 
@@ -180,7 +189,7 @@ describe('toCapabilityFrame — the wire shape the portal reads', () => {
     const open = toCapabilityFrame(mapWriteCapability({
       adAccountId: 'act_1', guardRow: { mode: 'hitl' }, fence: ['120000'],
     }));
-    expect(open).toEqual({ type: 'capability', can_execute: true, reason: 'ok', verbs: THREE_VERBS });
+    expect(open).toEqual({ type: 'capability', can_execute: true, reason: 'ok', verbs: ALL_VERBS });
     expect(Object.keys(open).sort()).toEqual(['can_execute', 'reason', 'type', 'verbs']);
     // The prose Ada speaks stays out of the frame — the portal renders a switch,
     // not a second copy of the answer.
@@ -204,7 +213,7 @@ describe('resolveWriteCapability — the two reads behind the frame', () => {
     state.guardSettings.act_1726935217614830 = { mode: 'hitl', stopped_at: null };
 
     const cap = await resolveWriteCapability('BFM');
-    expect(cap).toMatchObject({ canExecute: true, reason: 'ok', verbs: THREE_VERBS });
+    expect(cap).toMatchObject({ canExecute: true, reason: 'ok', verbs: ALL_VERBS });
     // The guard row is looked up by the account the CLIENT row named, never by
     // anything the caller passed in beside the code.
     expect(state.filters).toEqual([
@@ -287,16 +296,17 @@ describe('mapWriteCapability — the portal owns the mode, we own the fence', ()
       adAccountId: 'act_1', guardRow: staleGuardRow, fence: ['120000'],
       control: { mode: 'hitl', stopped: false },
     });
-    expect(cap).toMatchObject({ canExecute: true, reason: 'ok', openMode: 'hitl', verbs: THREE_VERBS });
+    expect(cap).toMatchObject({ canExecute: true, reason: 'ok', openMode: 'hitl', verbs: ALL_VERBS });
   });
 
   it('still calls an empty fence a lane, however open the portal says the mode is', () => {
-    // The half we own. A verb promised here would have nowhere to land.
+    // The half we own: the reason still names it, and the one verb an empty
+    // fence lets through is the only one promised.
     const cap = mapWriteCapability({
       adAccountId: 'act_1', guardRow: staleGuardRow, fence: [],
       control: { mode: 'hitl', stopped: false },
     });
-    expect(cap).toMatchObject({ canExecute: false, reason: 'no_lane', verbs: [], openMode: 'hitl' });
+    expect(cap).toMatchObject({ canExecute: true, reason: 'no_lane', verbs: CREATE_ONLY, openMode: 'hitl' });
     expect(mapWriteCapability({
       adAccountId: 'act_1', fence: null, control: { mode: 'autonomous', stopped: false },
     }).openMode).toBe('autonomous');
@@ -345,7 +355,7 @@ describe('mapWriteCapability — the portal owns the mode, we own the fence', ()
       adAccountId: 'act_1', fence: [], control: { mode: 'hitl', stopped: false },
     }));
     expect(Object.keys(frame).sort()).toEqual(['can_execute', 'reason', 'type', 'verbs']);
-    expect(frame).toEqual({ type: 'capability', can_execute: false, reason: 'no_lane', verbs: [] });
+    expect(frame).toEqual({ type: 'capability', can_execute: true, reason: 'no_lane', verbs: CREATE_ONLY });
   });
 });
 
@@ -363,7 +373,7 @@ describe('resolveWriteCapability — the control block reaches the mapping', () 
 
     const debug = vi.spyOn(console, 'debug').mockImplementation(() => undefined);
     const cap = await resolveWriteCapability('BFM', { mode: 'hitl', stopped: false });
-    expect(cap).toMatchObject({ canExecute: true, reason: 'ok', verbs: THREE_VERBS });
+    expect(cap).toMatchObject({ canExecute: true, reason: 'ok', verbs: ALL_VERBS });
     debug.mockRestore();
   });
 

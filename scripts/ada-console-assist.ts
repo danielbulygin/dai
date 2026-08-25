@@ -884,11 +884,22 @@ const CANNOT_WRITE_SENTENCE =
   'and a media buyer makes the change in Ads Manager while I watch the result.';
 
 /**
+ * The mode is open and no existing campaign is open to her yet. The executor
+ * still lets ONE change through an empty fence — creating a campaign, which
+ * lands paused and becomes the campaign the fence holds — so this is a lane
+ * with exactly one verb, not a shut account.
+ */
+const NEW_CAMPAIGN_ONLY_SENTENCE =
+  'Today I can put one kind of change up for you to approve in this account: creating a new campaign. ' +
+  'It lands paused and nothing runs until you approve the card. Once it exists I can also pause, resume, ' +
+  'set a daily budget and copy ad sets into it, each as a card you approve. Your existing campaigns are not open to me yet.';
+
+/**
  * The only verbs a customer's approval can ever dispatch — the tinkers
  * `ActionCommand` vocabulary (`packages/ads-core`). Anything else has no card
  * to be approved on, so it is not a verb Ada has, however open the rails are.
  */
-export const EXECUTABLE_VERBS = ['pause', 'resume', 'set_daily_budget'] as const;
+export const EXECUTABLE_VERBS = ['pause', 'resume', 'set_daily_budget', 'create_campaign', 'duplicate_ad_set'] as const;
 
 /** The ONE thing stopping Ada from executing, in the portal's vocabulary. */
 export type WriteCapabilityReason = 'ok' | 'mode_read_only' | 'mode_stopped' | 'no_lane' | 'unknown';
@@ -971,9 +982,20 @@ export function mapWriteCapability(rails: {
   if (!openMode) return shut('mode_read_only');
 
   const fence = rails.fence ?? [];
-  // The mode says yes and the lane says nothing yet. That is ours to open, and
-  // openMode rides along so the prompt names the mode they are actually in.
-  if (fence.length === 0) return { ...shut('no_lane'), openMode };
+  // The mode says yes and no existing campaign is open to her yet. Not a shut
+  // state: the executor lets a create through an empty fence (the new campaign
+  // then IS the fence), so the frame carries that one verb, and the reason
+  // names what is still closed — their existing campaigns — for the portal to
+  // draw the way in. openMode rides along so the prompt names their real mode.
+  if (fence.length === 0) {
+    return {
+      canExecute: true,
+      reason: 'no_lane',
+      openMode,
+      verbs: ['create_campaign'],
+      sentence: NEW_CAMPAIGN_ONLY_SENTENCE,
+    };
+  }
 
   const where = fence.length === 1
     ? 'in the one campaign this account has opened to me'
@@ -984,9 +1006,10 @@ export function mapWriteCapability(rails: {
     openMode,
     verbs: [...EXECUTABLE_VERBS],
     sentence:
-      `Today I can put three kinds of change up for you to approve, ${where}: pausing something, ` +
-      'turning something back on, and changing a daily budget. I cannot create campaigns or ad sets, ' +
-      'duplicate anything, or delete — those happen in Ads Manager, not by me.',
+      `Today I can put five kinds of change up for you to approve, ${where}: pausing something, ` +
+      'turning something back on, changing a daily budget, creating a new campaign (it lands paused), ' +
+      'and copying an ad set into one of those campaigns. Nothing runs until you approve the card, ' +
+      'and I can never delete anything.',
   };
 }
 
@@ -1057,9 +1080,10 @@ function writeCapabilityReasonLine(cap: WriteCapability): string {
       // Reachable only with the mode already open, so the mode is never the
       // thing to apologise for here.
       const setTo = cap.openMode === 'autonomous' ? 'to let you act without asking' : 'to asks-first';
-      return `Their account is set ${setTo}, so the mode is not what is stopping you: the lane that carries an approved change into Meta is not open for them yet. ` +
-        `Say it in that shape and say it as ours to open. Their account is set ${setTo}, the lane that lets you carry approved changes into Meta is not open yet, that is a setup step on our side, and you have asked for it. ` +
-        'Never imply they can open it themselves, and never give a date for when it will be open.\n';
+      return `Their account is set ${setTo}, so the mode is not what limits you. What does: none of their existing campaigns is open to you yet. ` +
+        'The one change you CAN put up for approval today is creating a new campaign (it lands paused; once it exists you can pause, resume, set a daily budget and copy ad sets into it, each as a card). ' +
+        'When they ask for a change inside an existing campaign, answer in this shape: you cannot do that in this account yet; if they want you to, it has to be switched on for this account, and the way to do that is right under your answer. ' +
+        'Never give a date, never say the switch is theirs alone to flip, and never say you already asked for it.\n';
     }
     case 'unknown':
       return 'You could not read this account\'s write settings just now, so speak as if you can change nothing and do not guess at why. ' +
