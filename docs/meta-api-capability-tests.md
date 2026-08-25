@@ -332,3 +332,56 @@ source.
    right, because nothing in it is checkable.
 3. `CLIENT_WEB_SEARCH_ENABLED = false` must add `disallowedTools` for the scoped
    door only. It is a customer-door switch: internal Ada's search is not on it.
+
+---
+
+## Case 36 — The house playbooks as skills (`ada-playbook-*`)
+
+**Probed:** 2026-08-25. The three playbooks in `docs/playbooks/` are now three
+Agent-SDK skills in `skills/ada-playbook-*/SKILL.md`: `ada-playbook-ecom`,
+`ada-playbook-leadgen`, `ada-playbook-nina-deltas`. Each is frontmatter, a
+four-line "How Ada applies this" head, then the playbook text verbatim.
+
+**Shape.** Skills are NOT controlled by tool profiles. Two things decide which
+ones Ada can load:
+
+- `cwd` in `runAgentSDK.ts` — `ADA_SDK_SKILLS_CWD`, defaulting to
+  `/root/ada-sdk-spike/skills-root`, whose `.claude/skills/` holds the six
+  existing skills as **symlinks into `/root/bmad/.claude/skills/`**.
+- `skills:` in the `query()` options — `DEFAULT_ADA_SKILLS`, a **context
+  filter**, not a sandbox. Per the SDK types, a name the cwd has never
+  discovered is simply not offered; it is not an error. That is what makes it
+  safe to land the three names ahead of the symlinks.
+
+`/root/dai/.claude/` is gitignored, so the skills live at `skills/` in the repo
+root, where they are tracked.
+
+**The sync step the serving checkout needs** (not run here — the serving
+checkout is off limits to the builder, and this changes what Ada can load):
+
+```sh
+ln -s /root/dai/skills/ada-playbook-ecom        /root/ada-sdk-spike/skills-root/.claude/skills/ada-playbook-ecom
+ln -s /root/dai/skills/ada-playbook-leadgen     /root/ada-sdk-spike/skills-root/.claude/skills/ada-playbook-leadgen
+ln -s /root/dai/skills/ada-playbook-nina-deltas /root/ada-sdk-spike/skills-root/.claude/skills/ada-playbook-nina-deltas
+```
+
+Until those exist the three names are inert, so a golden question added today
+would grade their absence. That case is deliberately NOT in
+`golden-questions-web.json` yet; it goes in with the sync.
+
+**Two things to decide before the symlinks go in.**
+
+1. **Size.** 120KB / 86KB / 44KB. A skill body loads whole on invoke, so
+   `ada-playbook-ecom` is roughly 30k input tokens against a scoped chat capped
+   at `maxBudgetUsd` 1.5-2. If that proves too heavy, the fix is a short
+   SKILL.md that points at a bundled reference file per section, not a trimmed
+   playbook.
+2. **Third-party names.** The playbooks quote other agency clients by name with
+   their numbers (Audibene, Brain.fm, Teethlovers, Nine Pine, Strayz, Slumber,
+   forpeople, Laori). `DEFAULT_ADA_SKILLS` is shared by BOTH doors, so admitting
+   them admits them to the customer door too. Rule 3 of the head is the control
+   today — never name another account, another client or their numbers to a
+   customer, the method travels but the accounts it came from do not — and a
+   prompt rule is a soft control, not a wall. The hard version is a separate
+   client-scoped skill list, which is a real change to the seam and is a
+   founders' call, not a builder's.

@@ -80,6 +80,11 @@ export interface SdkRunExtras {
 const DEFAULT_ADA_SKILLS = [
   'ada-media-library', 'ada-sweetspot-namer', 'ada-ready-to-upload',
   'ada-website-walk', 'ada-call-insights', 'ada-client-change-alerts',
+  // The house method as skills (skills/ada-playbook-*/SKILL.md in this repo).
+  // They are DISCOVERED from the skills-root cwd, not from this list — listing a
+  // name the cwd has never seen is a no-op filter entry, not an error, so this
+  // line is safe to land before the skills-root symlinks exist.
+  'ada-playbook-ecom', 'ada-playbook-leadgen', 'ada-playbook-nina-deltas',
 ];
 
 /**
