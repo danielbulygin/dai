@@ -643,7 +643,7 @@ function logDecisionLearningsInContext(input: {
 
 /** Build the chat framing message. Deliberately NOT error-shaped — a data
  *  question gets a data answer, never a "nothing to fix" button. */
-function buildChatPrompt(
+export function buildChatPrompt(
   req: AssistRequest,
   ledgerEvents: LedgerEvent[] = [],
   recentLedger: RecentLedgerEvent[] = [],
@@ -999,6 +999,24 @@ function writeCapabilityReasonLine(cap: WriteCapability): string {
 }
 
 /**
+ * The founder's standing safety rules, in Ada's own voice. Not preferences, and
+ * not graded against the numbers: each one exists because breaking it costs the
+ * customer something no later analysis can give back. Attribution is immutable
+ * once an ad set exists; editing a spent object throws away the learning it paid
+ * for; a delete cannot be undone. Ada states the rule that applies when it bears
+ * on her answer, and never writes a proposal or a build sheet that breaks one.
+ * Exported so the prompt-content test can hold it to its own wording.
+ */
+export const SAFETY_RULES_SECTION = `### Rules I never break
+These are settled, they are not preferences, and no number in the account overrides them. State the one that applies whenever it bears on your answer, and never write a proposal or a build sheet that breaks one.
+- Attribution is chosen once, when the ad set is created, and cannot be changed afterwards. Say which setting anything new would use, and default to the account's current spend-weighted setting rather than leaving it unsaid.
+- Never edit an ad set or an ad that has already spent. Copy it and change the copy instead. Pausing something, and adding new ads to an existing ad set, are both fine.
+- Never delete anything, ever, and never offer to. Everything new lands PAUSED and a person turns it on; anything no longer wanted stays PAUSED rather than being removed.
+- CBO or ABO, bid strategy and optimization goal are the customer's decisions. Ask, or put the choice on the card. Never pick one quietly and mention it afterwards.
+- fb.me, m.me, wa.me, facebook.com and instagram.com are Meta's own surfaces, not broken or dead pages. Never call one dead, and never advise pausing an ad because it points at one.
+- Before you propose any change, have the readiness facts in hand: the pixel, the conversion event, the destination URL, and the Page and Instagram identity. If one is missing or you could not read it, say which one before you propose anything.`;
+
+/**
  * Client-scoped chat prompt (Tinkers portal — rollout plan R5). A CLIENT user is
  * on the other end, NOT a member of our team, so this deliberately shares NOTHING
  * with buildChatPrompt: no "OUR team" framing, no cross-client read access, no
@@ -1012,7 +1030,7 @@ function writeCapabilityReasonLine(cap: WriteCapability): string {
  * Tool-level scoping (forced input.client_code) is the real data wall; this only
  * governs voice/behaviour. The client_media_buyer profile is read-only.
  */
-function buildScopedChatPrompt(
+export function buildScopedChatPrompt(
   req: AssistRequest,
   clientCode: string,
   decisionLearnings: DecisionLearning[] = [],
@@ -1068,6 +1086,7 @@ function buildScopedChatPrompt(
     writeCapabilityReasonLine(writeCapability) +
     `That sentence is the truth about THIS account, read from its own settings — not a general description of what Ada can do. Say it in your own words whenever the customer asks you to change something, and never offer a verb it does not contain. If they ask for something outside it, say plainly that it is not something you can do, then describe exactly what you WOULD do so a person can do it in Ads Manager. Never dress an unavailable action up as going "through the approve rail".`,
   );
+  parts.push(SAFETY_RULES_SECTION);
   parts.push(
     `### Proposing account changes (the approve-first rail)\n` +
     `You cannot change anything in the account yourself, and you never claim otherwise. Only THREE kinds of change can become a review card the customer approves: pausing something, turning something back on, and changing a daily budget. Creates, duplicates and deletes have no card at all — asked for one of those, give the advice and say plainly that the change itself happens in Ads Manager.\n` +

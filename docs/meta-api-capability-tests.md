@@ -230,3 +230,49 @@ two reads mocked):
    however open the portal says the mode is.
 7. The disagreement line matches a strict whole-line pattern: the client code
    and two words from our own closed vocabulary, no account id, nothing echoed.
+
+---
+
+## Case 34 — The founder's safety rules on the customer door (`/chat`, scoped)
+
+**Probed:** 2026-08-25, by reading the scoped prompt itself. No Meta call: this
+is a case about what Ada is TOLD, and the reason it belongs in this corpus is
+that every rule in it protects something the Graph API will happily let her
+destroy.
+
+**Shape:** one section, `SAFETY_RULES_SECTION` in
+`scripts/ada-console-assist.ts`, pushed into `buildScopedChatPrompt` between the
+capability sentence and the proposal rail. Six rules, one line each:
+
+| Rule | What it protects |
+|---|---|
+| Attribution is chosen once, at ad set creation, and cannot be changed after | `attribution_spec` is immutable on a created ad set. Ada saying otherwise sends a customer looking for a control Meta does not expose. |
+| Never edit an ad set or ad that has already spent; copy it instead | An edit to a spent object throws away the learning that spend paid for. Pausing, and adding new ads to an existing set, stay allowed. |
+| Never delete anything, ever; everything new lands PAUSED | A delete is unrecoverable and there is no delete verb anywhere in the write lane. Disposables stay PAUSED. |
+| CBO or ABO, bid strategy, optimization goal are the customer's decisions | These are structural and effectively one-way after spend. A quiet default is a decision taken on someone else's behalf. |
+| fb.me, m.me, wa.me, facebook.com, instagram.com are Meta surfaces | They look like dead pages to any check that expects a website, and "pause the ad, its page is dead" is the wrong advice with high confidence attached. |
+| The readiness facts before any proposal: pixel, conversion event, destination URL, Page and Instagram identity | A proposal built without them is a recommendation with an unnamed dependency. |
+
+**The trap.** The rules are stated on the SCOPED door only. The internal console
+prompt frames a teammate holding a real write surface and different rails; the
+same six lines there would read as a description of what internal Ada may do,
+which is not what they say.
+
+**Regression checks** (`tests/scoped-prompt-safety.test.ts`, pure — the prompt
+builders are exported and called directly, no mocks):
+
+1. Exactly six rule lines, and each rule asserted on its load-bearing phrase
+   rather than its whole sentence: a reword passes, a dropped rule does not.
+2. Attribution carries the DEFAULT as well as the prohibition. "State it
+   explicitly" with no default only moves the guess one step later.
+3. The section is in the scoped prompt and absent from the internal one.
+4. It sits BEFORE the proposal rail. The rules constrain what may be proposed,
+   so a prompt that reads the rail first has them arriving as an afterthought to
+   a card already drafted.
+5. No em-dash anywhere in the section. The rest of the prompt is guidance Ada
+   paraphrases; these are sentences she is told to state as written, so they are
+   held to the customer-copy rule.
+
+**Golden cases:** `web-attribution-immutable` and `web-onplatform-destination`
+in `tests/eval/golden-questions-web.json`. Both grade on AOTUS without needing
+live spend.
