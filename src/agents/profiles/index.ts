@@ -67,7 +67,7 @@ export const toolProfiles = {
     'get_campaign_summary', 'get_campaign_performance',
     'get_adset_summary', 'get_adset_performance',
     'get_ad_summary', 'get_ad_performance', 'get_breakdowns',
-    'get_creative_details', 'get_alerts', 'get_learnings',
+    'get_creative_details', 'get_learnings',
     'query_meta_insights', 'query_meta_creatives',
     'get_pixel_event_stats', 'get_custom_conversions',
     'search_methodology_safe',
