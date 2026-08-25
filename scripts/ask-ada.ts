@@ -8,7 +8,7 @@
  *   pnpm exec tsx scripts/ask-ada.ts --scope BFM  "How is the account doing?"   # the customer door
  *   … --session <id>   # continue a conversation: reuse the session_id from a previous done frame
  *   … --control hitl   # send the portal's control block (mode hitl|autonomous|read_only, add ",stopped")
- *   … --context '{...}'  # send a portal_context block as the portal would
+ *   … --context '{...}'  # send a portal_context block as the portal would\n *   … --context auto     # build the account block (name, currency, timezone, mode) from the clients row
  *
  * Reads ADA_ASSIST_SECRET (X-Assist-Key) and, for --scope, ADA_SCOPE_SIGNING_SECRET
  * from the environment, falling back to /root/ada-console-assist.env, the
@@ -20,9 +20,13 @@ import { readFileSync } from "node:fs";
 function envFrom(name: string): string {
   if (process.env[name]) return process.env[name] as string;
   try {
-    for (const line of readFileSync("/root/ada-console-assist.env", "utf8").split("\n")) {
-      const m = line.match(/^([A-Z0-9_]+)=(.*)$/);
-      if (m && m[1] === name) return m[2].replace(/^"|"$/g, "");
+    for (const file of ["/root/ada-console-assist.env", "/root/dai/.env"]) {
+      let text = "";
+      try { text = readFileSync(file, "utf8"); } catch { continue; }
+      for (const line of text.split("\n")) {
+        const m = line.match(/^([A-Z0-9_]+)=(.*)$/);
+        if (m && m[1] === name) return m[2].replace(/^"|"$/g, "");
+      }
     }
   } catch {}
   return "";
@@ -63,7 +67,39 @@ if (control) {
 }
 // --context <json>: a portal_context block, the way the portal sends it.
 const contextJson = flag("--context");
-if (contextJson) body.portal_context = JSON.parse(contextJson);
+if (contextJson === "auto" && scope) {
+  // The portal sends a versioned block with the account (name, currency,
+  // timezone, mode) on every request; a faithful QC must too, or Ada guesses the
+  // currency. Built from the droplet's own clients row, the closest thing to the
+  // portal's ad_account row; facts, rules and findings are empty, as they are for
+  // an account nobody has taught yet.
+  const { createClient } = await import("@supabase/supabase-js");
+  const sb = createClient(
+    envFrom("SUPABASE_URL") || envFrom("DAI_SUPABASE_URL"),
+    envFrom("SUPABASE_SERVICE_ROLE_KEY") || envFrom("SUPABASE_SERVICE_KEY") || envFrom("DAI_SUPABASE_SERVICE_ROLE_KEY"),
+  );
+  const { data: row } = await sb.from("clients").select("code,name,ad_account_id,currency,timezone").eq("code", scope).maybeSingle();
+  if (row) {
+    const ctl = (body.control as { mode?: string; stopped?: boolean } | undefined) ?? { mode: "read_only", stopped: false };
+    body.portal_context = {
+      v: 1,
+      as_of: new Date().toISOString(),
+      account: {
+        id: "qc-" + scope.toLowerCase(),
+        external_id: row.ad_account_id,
+        name: row.name,
+        currency: row.currency ?? null,
+        timezone: row.timezone ?? null,
+        control_mode: ctl.mode ?? "read_only",
+        stopped: Boolean(ctl.stopped),
+      },
+      facts: [], rules: [], findings: [], unavailable: [], truncated: [],
+    };
+    console.error("# context: auto (" + row.name + ", " + (row.currency ?? "no currency") + ", " + (row.timezone ?? "no tz") + ")");
+  } else {
+    console.error("# context: auto requested but no clients row for " + scope);
+  }
+} else if (contextJson) body.portal_context = JSON.parse(contextJson);
 else body.context = { client_code: client };
 
 const started = Date.now();
