@@ -746,6 +746,74 @@ const ROOT_CAUSE_METHOD =
   `Apply the SAME rigor to good movement ("why was yesterday a record?") — the mechanism is what makes it repeatable. End every diagnosis with the one-sentence story plus a concrete so-what (the next step you recommend). If you cannot find the co-movers, say plainly that the cause is unlocated and name which ledger you could not check.`;
 
 /**
+ * What this customer's Ada may ACTUALLY do to their account today.
+ *
+ * Rule (2026-08-25): Ada never offers a verb she lacks. She was asked about a
+ * new conversion event and offered to create a campaign and duplicate ad sets
+ * "through the approve-first rail" for an account whose write rail is switched
+ * off and whose verbs never existed there. Nothing renders that sentence
+ * honestly but the code, so it is derived here from the two rails
+ * handleExecuteAction below already enforces:
+ *   1. guard_settings.mode for their ad account — read_only, a missing row, or
+ *      a pressed STOP means nothing may be written at all.
+ *   2. clients.allowed_campaign_ids — the campaign fence, fail-closed.
+ *
+ * The VERB ceiling is narrower than EXEC_TYPES and is not per-client: the
+ * portal only turns pause, resume and daily-budget proposals into a review
+ * card — creates and duplicates have no intent shape there and are refused by
+ * name — so those are the only verbs a customer can ever be offered, however
+ * open their own rails are.
+ *
+ * Fail-closed on every read failure: "I might be able to" is the claim that
+ * started this, so an unknown truth renders the conservative sentence.
+ */
+const CANNOT_WRITE_SENTENCE =
+  'Today I cannot change anything in this account. I read it, I tell you what I would do and why, ' +
+  'and a media buyer makes the change in Ads Manager while I watch the result.';
+
+async function resolveWriteCapability(clientCode: string): Promise<{ sentence: string; known: boolean }> {
+  try {
+    const sb = getSupabase();
+    const { data: client } = await sb
+      .from('clients')
+      .select('ad_account_id, allowed_campaign_ids')
+      .eq('code', clientCode)
+      .maybeSingle();
+    if (!client?.ad_account_id) return { sentence: CANNOT_WRITE_SENTENCE, known: false };
+
+    const { data: gs } = await sb
+      .from('guard_settings')
+      .select('mode, stopped_at')
+      .eq('ad_account_id', client.ad_account_id as string)
+      .limit(1)
+      .maybeSingle();
+
+    const mode = gs?.mode ?? 'read_only';
+    const laneOpen = Boolean(gs) && !gs?.stopped_at && (mode === 'hitl' || mode === 'autonomous');
+    if (!laneOpen) return { sentence: CANNOT_WRITE_SENTENCE, known: true };
+
+    // An open lane with an empty fence still writes nowhere: every verb the
+    // portal can card is fenced, and no campaign is inside the fence.
+    const fence = (client.allowed_campaign_ids as string[] | null) ?? [];
+    if (fence.length === 0) return { sentence: CANNOT_WRITE_SENTENCE, known: true };
+
+    const where = fence.length === 1
+      ? 'in the one campaign this account has opened to me'
+      : `in the ${fence.length} campaigns this account has opened to me`;
+    return {
+      sentence:
+        `Today I can put three kinds of change up for you to approve, ${where}: pausing something, ` +
+        'turning something back on, and changing a daily budget. I cannot create campaigns or ad sets, ' +
+        'duplicate anything, or delete — those happen in Ads Manager, not by me.',
+      known: true,
+    };
+  } catch (e) {
+    console.warn('[ada-console-assist] write-capability read failed, using the conservative sentence:', (e as Error).message);
+    return { sentence: CANNOT_WRITE_SENTENCE, known: false };
+  }
+}
+
+/**
  * Client-scoped chat prompt (Tinkers portal — rollout plan R5). A CLIENT user is
  * on the other end, NOT a member of our team, so this deliberately shares NOTHING
  * with buildChatPrompt: no "OUR team" framing, no cross-client read access, no
@@ -763,6 +831,7 @@ function buildScopedChatPrompt(
   req: AssistRequest,
   clientCode: string,
   decisionLearnings: DecisionLearning[] = [],
+  writeCapability: string = CANNOT_WRITE_SENTENCE,
 ): string {
   let clientContext: string | undefined;
   try {
@@ -790,6 +859,12 @@ function buildScopedChatPrompt(
     `- When the customer refers to a campaign or ad by a name that could match more than one object, or the name in your data looks renamed or stale, say exactly which object you mean (current name plus its id) before judging it.\n` +
     `- Be concise and concrete. Markdown is welcome (short bold numbers, tight bullets, small tables). No preamble, no "as an AI", no restating the question.`,
   );
+  parts.push(
+    `### Look before you claim\n` +
+    `If the question touches an event, a pixel, an audience, a setting or a number, READ it with a tool before you say anything about it. Never state a volume, a risk, a name or a status from memory when a tool can check it. A figure nobody looked up is a made-up figure even when it happens to be right, and "probably low volume" about an event you never counted is the same mistake as inventing the count.\n` +
+    `For events: **get_pixel_event_stats** reads what the pixel actually fired — hand it the customer's own loose wording ("qualified subscriber") and it resolves the real event name and its count, alongside Purchase so a ratio is one line away. **get_custom_conversions** lists the account's own named conversions with the rule behind each. Call one of them before you judge an event's volume, its risk, or whether it exists at all.\n` +
+    `If a read is refused or comes back empty, say which read and what that means. "I could not look" and "there is nothing there" are different sentences and you never swap one for the other.`,
+  );
   parts.push(ROOT_CAUSE_METHOD);
   parts.push(
     `### When the customer teaches you something, SAVE it (remember) — then confirm\n` +
@@ -797,20 +872,27 @@ function buildScopedChatPrompt(
     `**Save every rejection that comes with a reason — it is the most valuable thing they tell you.** When they turn down, override or correct something you proposed and say WHY ("we never touch that campaign, it's our media buyer's", "don't scale that fast"), call **remember** right away and capture the reason in THEIR words — quote the sentence rather than tidying it into your own phrasing, because the wording IS the rule. From then on it is settled: never propose the rejected thing again unless the conditions named in their reason have actually changed, and if you think they have, name the changed condition before proposing it.`,
   );
   parts.push(
-    `### Proposing account changes (card 57 — the approve-first rail)\n` +
-    `You cannot change anything in the account yourself, and you never claim otherwise. When the customer asks you to CHANGE something (create a campaign or ad set, duplicate an ad set, pause an ad or ad set, change a budget), do this instead of refusing:\n` +
+    `### What you can actually do in this account\n` +
+    `${writeCapability}\n` +
+    `That sentence is the truth about THIS account, read from its own settings — not a general description of what Ada can do. Say it in your own words whenever the customer asks you to change something, and never offer a verb it does not contain. If they ask for something outside it, say plainly that it is not something you can do, then describe exactly what you WOULD do so a person can do it in Ads Manager. Never dress an unavailable action up as going "through the approve rail".`,
+  );
+  parts.push(
+    `### Proposing account changes (the approve-first rail)\n` +
+    `You cannot change anything in the account yourself, and you never claim otherwise. Only THREE kinds of change can become a review card the customer approves: pausing something, turning something back on, and changing a daily budget. Creates, duplicates and deletes have no card at all — asked for one of those, give the advice and say plainly that the change itself happens in Ads Manager.\n` +
+    `When the ask IS a pause, a resume or a budget change, and the line above allows it:\n` +
     `1. Briefly explain what you would do and why, grounded in their numbers and their operating rules. NEVER show raw JSON in your prose — the block below renders as a review card, not as text.\n` +
     `2. End your reply with EXACTLY ONE fenced json block of this shape (no other fenced json in the reply):\n` +
-    '```json\n{"proposal": {"type": "create_ad_set" | "pause_ad_set" | "pause_ad" | "update_budget" | "create_campaign" | "duplicate_ad_set" | "duplicate_ad" | "create_ad", "campaign_id": "<numeric id>", "campaign_name": "<name>", "target_id": "<ad set / ad id, for pause, budget and duplicate types>", "settings": {"name": "...", "status": "PAUSED", "daily_budget_usd": 0, "bid_strategy": "...", "bid_amount_usd": 0, "optimization_goal": "...", "billing_event": "...", "destination_campaign_id": "...", "targeting_summary": "..."}, "choices": [{"key": "budget_mode", "label": "How should the budget live?", "options": [{"value": "cbo", "label": "One campaign budget (CBO)", "detail": "the campaign spreads it across ad sets"}, {"value": "abo", "label": "Per ad set (ABO)", "detail": "each ad set carries its own budget"}]}], "reason": "<one sentence>", "warnings": ["<anything the customer must see>"]}}\n```\n' +
-    `If "budget_mode" cbo is among the options, ALWAYS include settings.daily_budget_usd too (pick a sensible number from their spend and say so in the reason — it applies only if CBO is chosen, and the modal shows it). Same for bid caps: offering LOWEST_COST_WITH_BID_CAP means settings.bid_amount_usd must be present.\n` +
-    `For create_campaign, ALWAYS put the structure decisions in "choices" instead of deciding yourself — budget_mode (cbo/abo) and bid_strategy (LOWEST_COST_WITHOUT_CAP / LOWEST_COST_WITH_BID_CAP / COST_CAP) at minimum, objective too if the ask is ambiguous (OUTCOME_LEADS / OUTCOME_SALES / OUTCOME_TRAFFIC). Campaign structure is the customer's call, never yours. For duplicate_ad_set, target_id is the SOURCE ad set and settings.destination_campaign_id is where the copy lands. For duplicate_ad, intent.source_id is the ad to copy and settings.adset_id the destination ad set. create_ad reuses an EXISTING creative (settings.creative_id + settings.adset_id). Brand-new creatives from raw media go through the UPLOADS tab instead (card 65, live 2026-07-30): the customer pastes a Google Drive folder link there, I read every file, write the copy, they review each ad and approve, and everything lands PAUSED in a campaign from their fence. Google Drive only, no Dropbox yet. If their UPLOADS tab still says setting up, the wiring is not on for their account: say that plainly rather than promising it.\n` +
+    '```json\n{"proposal": {"type": "pause_campaign" | "pause_ad_set" | "pause_ad" | "resume_campaign" | "resume_ad_set" | "resume_ad" | "update_budget", "campaign_id": "<numeric id>", "campaign_name": "<name>", "target_id": "<the campaign, ad set or ad id the change lands on>", "target_name": "<its current name>", "settings": {"daily_budget_usd": 0}, "reason": "<one sentence>", "warnings": ["<anything the customer must see>"]}}\n```\n' +
     `Rules for proposals:\n` +
-    `- Include EVERY setting the change would carry — the customer sees this in a confirmation modal and nothing not listed there may happen. Omit settings keys that do not apply.\n- Settings values must be REAL values (enum constants, numbers, objects). To mirror a setting from the campaign's existing ad sets, OMIT that key entirely (the executor mirrors a sibling ad set for anything omitted) — never write prose like "mirror existing" into a value.\n` +
-    `- Creates are ALWAYS status PAUSED. Never propose anything that starts delivery or turns a campaign on.\n` +
-    `- A budget change of 3x or more versus the current value MUST carry a warning naming both numbers.\n` +
+    `- **target_id is required on every proposal.** Without it no card can be built and your answer arrives with nothing to approve.\n` +
+    `- update_budget MUST carry settings.daily_budget_usd, and target_id is the object that HOLDS the budget — the campaign on a CBO account, the ad set otherwise. A change of 3x or more versus the current value MUST carry a warning naming both numbers.\n` +
+    `- Include EVERY setting the change would carry: the customer sees this in a confirmation modal and nothing absent from it may happen. Omit keys that do not apply, and never write prose like "mirror existing" into a value.\n` +
+    `- When your proposal carries "choices", do NOT enumerate the same options again in your prose. One sentence pointing at the card is the whole answer ("Pick the budget mode and bid strategy on the card").\n` +
+    `- The card is the form; your text is the note on it. Never restate in words what the customer is about to read on the card.\n` +
     `- You NEVER propose deletes. If asked to delete something, say plainly that deleting is something you never do, and offer pausing instead (as a proposal).\n` +
-    `- If asked to touch a different account or a campaign outside your allowed list, refuse plainly — no proposal.\n` +
-    `- If the ask is ambiguous (no campaign, no budget), ask the clarifying question instead of proposing.`,
+    `- If asked to touch a different account, or a campaign outside the ones opened to you, refuse plainly — no proposal.\n` +
+    `- If the ask is ambiguous (no object named, no budget given), ask the clarifying question instead of proposing.\n` +
+    `Brand-new creatives from raw media are not a proposal at all: they go through the UPLOADS tab, where the customer pastes a Google Drive folder link, I read every file and write the copy, they review each ad, and everything lands PAUSED. Google Drive only, no Dropbox. If their UPLOADS tab still says setting up, the wiring is not on for their account: say that plainly rather than promising it.`,
   );
   // Loop 4: directly after the proposal rail and directly before their message —
   // the settled decisions are the last thing read before drafting a proposal.
@@ -829,6 +911,7 @@ const TOOL_LABELS: Record<string, string> = {
   get_adset_summary: 'Reading ad-set summary', get_adset_performance: 'Reading ad-set performance',
   get_ad_summary: 'Reading ad summary', get_ad_performance: 'Reading ad performance',
   query_meta_insights: 'Querying Meta insights', query_meta_creatives: 'Querying Meta creatives',
+  get_pixel_event_stats: 'Reading your pixel events', get_custom_conversions: 'Reading your custom conversions',
   get_breakdowns: 'Pulling breakdowns', get_triplewhale_summary: 'Pulling Triple Whale revenue',
   get_domo_funnel: 'Reading funnel data', get_account_changes: 'Checking recent account changes',
   get_creative_details: 'Reading creative details', get_alerts: 'Checking alerts',
@@ -860,7 +943,7 @@ function toolLabel(name: string): string {
  * that Ada did not literally write).
  */
 interface ChatProposal {
-  type: 'create_ad_set' | 'pause_ad_set' | 'pause_ad' | 'update_budget' | 'create_campaign' | 'duplicate_ad_set';
+  type: 'pause_campaign' | 'pause_ad_set' | 'pause_ad' | 'resume_campaign' | 'resume_ad_set' | 'resume_ad' | 'update_budget';
   campaign_id?: string;
   campaign_name?: string;
   target_id?: string;
@@ -876,7 +959,10 @@ interface ChatProposal {
   reason?: string;
   warnings?: string[];
 }
-const PROPOSAL_TYPES = new Set(['create_ad_set', 'pause_ad_set', 'pause_ad', 'update_budget', 'create_campaign', 'duplicate_ad_set', 'duplicate_ad', 'create_ad']);
+// The portal maps exactly these onto a review card; creates and duplicates have
+// no intent shape there and are refused by name, so a proposal naming one would
+// reach the customer as a card that can never be approved.
+const PROPOSAL_TYPES = new Set(['pause_campaign', 'pause_ad_set', 'pause_ad', 'resume_campaign', 'resume_ad_set', 'resume_ad', 'update_budget']);
 function parseChatProposal(text: string): ChatProposal | null {
   const fences = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
   for (const fence of fences.reverse()) {
@@ -1025,6 +1111,9 @@ async function handleChatStream(
   const decisionLearnings = decisionClientCode
     ? await fetchDecisionLearnings(decisionClientCode, scope ? 'customer' : 'internal')
     : [];
+  // The customer door states what Ada may really do to THIS account, read from
+  // the same rails the approve executor enforces. Fail-closed inside.
+  const writeCapability = scope ? (await resolveWriteCapability(scope.clientCode)).sentence : CANNOT_WRITE_SENTENCE;
   let proposalType: string | null = null;
 
   let fullText = '';
@@ -1040,7 +1129,7 @@ async function handleChatStream(
         source: scope ? 'api-console-chat-scoped' : 'api-console-chat',
         agentId: 'ada',
         userMessage: scope
-          ? buildScopedChatPrompt(req, scope.clientCode, decisionLearnings)
+          ? buildScopedChatPrompt(req, scope.clientCode, decisionLearnings, writeCapability)
           : buildChatPrompt(req, ledgerEvents, recentLedger, decisionLearnings),
         // Scoped: attribute the run (and its memory/quick-context) to the real
         // client user from the verified claim; internal: the shared console user.

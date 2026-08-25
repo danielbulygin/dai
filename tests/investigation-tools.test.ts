@@ -489,6 +489,16 @@ describe('registry wiring', () => {
 
   // getToolsForProfile silently DROPS a name with no registry entry, so a typo
   // in either list produces a tool the model never sees and no error anywhere.
+  //
+  // The generous timeout is about the IMPORT, not the assertion: this is the
+  // first `await import` of the tool registry in this file, and transforming it
+  // plus everything it pulls in already costs ~4.5s of the default 5s budget on
+  // the droplet. Without it, adding any tool to the registry turns these two red
+  // for a reason unrelated to what they check (and the second then fails with
+  // "Cannot access 'REGISTRY' before initialization", because the first test's
+  // import is still running).
+  const REGISTRY_IMPORT_TIMEOUT_MS = 30_000;
+
   it('resolves all four on media_buyer and full', async () => {
     const { getToolsForProfile } = await import('../src/agents/tool-registry.js');
     for (const profile of ['media_buyer', 'full'] as const) {
@@ -496,11 +506,11 @@ describe('registry wiring', () => {
       const resolved = definitions.map((d) => d.name);
       for (const name of NAMES) expect(resolved, `${name} on ${profile}`).toContain(name);
     }
-  });
+  }, REGISTRY_IMPORT_TIMEOUT_MS);
 
   it('withholds all four from client_media_buyer', async () => {
     const { getToolsForProfile } = await import('../src/agents/tool-registry.js');
     const resolved = getToolsForProfile('client_media_buyer').definitions.map((d) => d.name);
     for (const name of NAMES) expect(resolved, name).not.toContain(name);
-  });
+  }, REGISTRY_IMPORT_TIMEOUT_MS);
 });

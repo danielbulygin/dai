@@ -107,6 +107,8 @@ const READ_TOOLS = new Set<string>([
   'get_alerts', 'get_learnings', 'get_briefs', 'get_concepts',
   'get_domo_funnel', 'get_weather_daily', 'get_triplewhale_summary',
   'query_meta_insights', 'query_meta_creatives', 'audit_dataset_health',
+  // Events Manager reads -- HTTP GET only, tenant pinned by the scoped executor
+  'get_pixel_event_stats', 'get_custom_conversions',
   'get_rival_reports',
   // meetings
   'search_meetings', 'get_meeting_summary', 'get_meeting_transcript', 'list_recent_meetings',

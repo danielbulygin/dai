@@ -478,6 +478,66 @@ register({
 
 register({
   definition: {
+    name: "get_pixel_event_stats",
+    description:
+      "Read what this account's Meta pixel (dataset) ACTUALLY fired, straight from Events Manager's own numbers. Use this BEFORE saying anything about an event's volume, its risk, whether it is 'low volume', or even whether it exists. Give `event` a loosely typed name (\"qualified subscriber\") and it resolves to the real event name on the pixel (\"QualifiedSubscription\") with its count, case/space/underscore-insensitive. Always returns the top events by count plus Purchase, CompleteRegistration, StartTrial and Subscribe, so a ratio (\"it fires 4.5x more often than Purchase\") is one line away. A pixel Meta refuses to let us read comes back readable=false with the refusal — that is NOT a zero and must never be reported as 'nothing fired'.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        clientCode: {
+          type: "string",
+          description: "Client code",
+        },
+        days: {
+          type: "number",
+          description:
+            "Days to look back, 1-28 (default 7). Longer windows are walked in weekly chunks and summed.",
+        },
+        event: {
+          type: "string",
+          description:
+            'Optional loose event name to resolve, e.g. "qualified subscriber", "add to cart". Returns the real event name(s) it matched with an explicit resolvedFrom -> resolvedTo, or says nothing matched.',
+        },
+      },
+      required: ["clientCode"],
+    },
+  },
+  async execute(input, context) {
+    return await metaApiTools.getPixelEventStats({
+      clientCode: (context.clientScope?.clientCode ??
+        input.clientCode) as string,
+      days: input.days as number | undefined,
+      event: input.event as string | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: "get_custom_conversions",
+    description:
+      "List the CUSTOM CONVERSIONS defined on this account, with the rule that defines each one (which raw event and which URL it is built from), its custom_event_type, its pixel, and whether it is archived. Half of 'what is that event?' questions are about a custom conversion rather than a raw pixel event. Read this alongside get_pixel_event_stats before advising on what to optimise for. Rules are truncated to their first ~160 characters.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        clientCode: {
+          type: "string",
+          description: "Client code",
+        },
+      },
+      required: ["clientCode"],
+    },
+  },
+  async execute(input, context) {
+    return await metaApiTools.getCustomConversions({
+      clientCode: (context.clientScope?.clientCode ??
+        input.clientCode) as string,
+    });
+  },
+});
+
+register({
+  definition: {
     name: 'check_ads_in_meta',
     description:
       'For each AOT ad_id_code (e.g. PLx3942, ADBNx3475), check whether it has been uploaded to the client\'s Meta ad account by searching ad-set names AND ad names. Returns found=true if the code appears in either an ad set name OR an ad name (status-agnostic — paused, archived, and active all count as "uploaded successfully"). Use this to reconcile open "Upload and Configure Campaign" tasks against Meta reality: if found=true the Notion task is stale (close it); if found=false the upload is genuinely owed. Returns matched_adsets and matched_ads with id, name, effective_status, and parent IDs. Naming convention is reliable: every ad/ad-set carries its ad_id_code in the name.',
@@ -4541,6 +4601,11 @@ const SCOPED_BMAD_TOOLS = new Set([
   'get_triplewhale_summary',
   'query_meta_insights',
   'query_meta_creatives',
+  // Events Manager reads: the pixel's own event counts and the account's
+  // custom conversions. Same rule as every read above -- the tenant comes
+  // from the verified scope, never from the model.
+  'get_pixel_event_stats',
+  'get_custom_conversions',
   // Open-ended Graph reads MUST be scoped — the model never picks the tenant.
   'meta_graph_get',
 ]);
