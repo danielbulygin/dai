@@ -1661,7 +1661,11 @@ async function loadCampaignFences(): Promise<Record<string, string[] | null>> {
 }
 
 const PRACTICE_ACCOUNT = 'act_1570076840279279';
-const EXEC_TYPES = new Set(['create_ad_set', 'pause_ad_set', 'pause_ad', 'update_budget', 'create_campaign', 'duplicate_ad_set', 'duplicate_ad', 'create_ad']);
+// pause_campaign and the three resume verbs were in PROPOSAL_TYPES and not
+// here, so Ada could offer a change this executor refused by name. The portal
+// only ever builds a card for pause, resume and daily budget, so this set and
+// that one now agree on those seven.
+export const EXEC_TYPES = new Set(['create_ad_set', 'pause_campaign', 'pause_ad_set', 'pause_ad', 'resume_campaign', 'resume_ad_set', 'resume_ad', 'update_budget', 'create_campaign', 'duplicate_ad_set', 'duplicate_ad', 'create_ad']);
 const GRAPH = 'https://graph.facebook.com/v21.0';
 /**
  * Default daily-budget ceiling for the approve rail, in USD.
@@ -1771,7 +1775,7 @@ async function validateCreativePlacement(
   }
 }
 
-async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<string, unknown>> {
+export async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<string, unknown>> {
   const clientCode = (body.client_code ?? '').toUpperCase().trim();
   const dryRun = body.dry_run === true;
   /** Stop here when checking: everything upstream passed, nothing was written. */
@@ -1864,24 +1868,32 @@ async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<s
   if (type !== 'create_ad_set' && !selfFenced) {
     const targetId = String(intent.target_id ?? '');
     if (!targetId) return { ok: false, refused: 'missing target_id' };
-    const edge = type === 'pause_ad' ? 'ad' : 'adset';
+    const edge = type.endsWith('_campaign') ? 'campaign' : type.endsWith('_ad') ? 'ad' : 'adset';
+    const FIELDS = {
+      ad: 'id,name,status,effective_status,campaign_id,account_id',
+      adset: 'id,name,status,effective_status,daily_budget,campaign_id,account_id',
+      // A campaign has no campaign_id field of its own; asking for one throws.
+      campaign: 'id,name,status,effective_status,daily_budget,account_id',
+    } as const;
     try {
-      before = await graphCall(
-        targetId,
-        token,
-        { fields: edge === 'ad' ? 'id,name,status,effective_status,campaign_id,account_id' : 'id,name,status,effective_status,daily_budget,campaign_id,account_id' },
-      );
+      before = await graphCall(targetId, token, { fields: FIELDS[edge] });
     } catch (e) {
       // A campaign id has no campaign_id field, so the adset-shaped read
-      // throws. For update_budget only, retry campaign-shaped.
+      // throws. For update_budget only, retry campaign-shaped — it is the one
+      // verb whose type does not say which level it targets.
       if (type !== 'update_budget') throw e;
-      before = await graphCall(targetId, token, { fields: 'id,name,status,effective_status,daily_budget,account_id' });
+      before = await graphCall(targetId, token, { fields: FIELDS.campaign });
       budgetTargetIsCampaign = true;
     }
     if (`act_${String(before.account_id)}` !== acct) {
       return { ok: false, refused: `target ${targetId} lives in a different account — refused` };
     }
-    campaignId = budgetTargetIsCampaign ? targetId : String(before.campaign_id ?? campaignId);
+    // A campaign-level verb fences on the campaign itself; everything else
+    // fences on the campaign Meta says the object lives in, never on a value
+    // the caller supplied.
+    campaignId = budgetTargetIsCampaign || edge === 'campaign'
+      ? targetId
+      : String(before.campaign_id ?? campaignId);
   }
   if (!selfFenced && (!campaignId || !allowed.includes(campaignId))) {
     return {
@@ -2154,18 +2166,36 @@ async function handleExecuteAction(body: ExecuteActionRequest): Promise<Record<s
     return { ok: true, applied: true, object: after };
   }
 
-  if (type === 'pause_ad_set' || type === 'pause_ad') {
-    if (before?.status === 'PAUSED') {
-      return { ok: true, applied: false, object: before, note: 'already paused' };
+  // Resume turns spend ON, which no other verb on this rail does. It is not
+  // covered by the paused-only-creates rule and is not meant to be: it reaches
+  // here only behind the SAME gates as a pause — a named human approved the
+  // card, guard_settings.mode is hitl or autonomous with no STOP pressed, and
+  // the object's own campaign is inside this client's fence. Nothing below
+  // loosens any of them.
+  if (type.startsWith('pause_') || type.startsWith('resume_')) {
+    const resuming = type.startsWith('resume_');
+    const wanted = resuming ? 'ACTIVE' : 'PAUSED';
+    const noun = type.endsWith('_campaign') ? 'campaign' : type.endsWith('_ad') ? 'ad' : 'ad set';
+    const name = String(before?.name ?? intent.target_id);
+    // Nothing to do is reported as nothing done, never as a change: the caller
+    // records a noop and the customer is told what is already true.
+    if (before?.status === wanted) {
+      return { ok: true, applied: false, object: before, note: resuming ? 'already active' : 'already paused' };
     }
-    if (dryRun) return wouldApply(`would pause ${type === 'pause_ad' ? 'ad' : 'ad set'} "${String(before?.name ?? intent.target_id)}"`);
-    await graphCall(String(intent.target_id), token, { status: 'PAUSED' }, 'POST');
-    const after = await graphCall(String(intent.target_id), token, { fields: 'id,name,status,effective_status,campaign_id' });
+    if (dryRun) return wouldApply(`would ${resuming ? 'resume' : 'pause'} ${noun} "${name}"`);
+    await graphCall(String(intent.target_id), token, { status: wanted }, 'POST');
+    // A campaign has no campaign_id; asking for it turns a successful write
+    // into a read that throws, which would then be reported as a failure.
+    const after = await graphCall(String(intent.target_id), token, {
+      fields: type.endsWith('_campaign')
+        ? 'id,name,status,effective_status'
+        : 'id,name,status,effective_status,campaign_id',
+    });
     logWrite({
       context, toolName: `execute_action:${type}`, targetSystem: 'meta',
       targetId: String(intent.target_id), before, after,
-      reverse: { method: 'POST', path: String(intent.target_id), params: { status: String(before?.status ?? 'ACTIVE') } },
-      summary: `Paused ${type === 'pause_ad' ? 'ad' : 'ad set'} ${String(before?.name ?? intent.target_id)} (approve-modal)`,
+      reverse: { method: 'POST', path: String(intent.target_id), params: { status: String(before?.status ?? (resuming ? 'PAUSED' : 'ACTIVE')) } },
+      summary: `${resuming ? 'Resumed' : 'Paused'} ${noun} ${name} (approve-modal)`,
       initiatedBy: 'client_approved',
     });
     return { ok: true, applied: true, object: after };
