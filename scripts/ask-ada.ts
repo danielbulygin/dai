@@ -6,6 +6,7 @@
  *
  *   pnpm exec tsx scripts/ask-ada.ts --client BFM "How is the account doing?"
  *   pnpm exec tsx scripts/ask-ada.ts --scope BFM  "How is the account doing?"   # the customer door
+ *   … --session <id>   # continue a conversation: reuse the session_id from a previous done frame
  *
  * Reads ADA_ASSIST_SECRET (X-Assist-Key) and, for --scope, ADA_SCOPE_SIGNING_SECRET
  * from the environment, falling back to /root/ada-console-assist.env, the
@@ -29,7 +30,7 @@ const argv = process.argv.slice(2);
 const flag = (f: string) => (argv.includes(f) ? argv[argv.indexOf(f) + 1] ?? "" : "");
 const client = flag("--client").toUpperCase();
 const scope = flag("--scope").toUpperCase();
-const question = argv.filter((a, i) => !a.startsWith("--") && argv[i - 1] !== "--client" && argv[i - 1] !== "--scope").join(" ").trim();
+const question = argv.filter((a, i) => !a.startsWith("--") && argv[i - 1] !== "--client" && argv[i - 1] !== "--scope" && argv[i - 1] !== "--session").join(" ").trim();
 if (!question || (!client && !scope)) {
   console.error("usage: ask-ada.ts (--client CODE | --scope CODE) \"question\"");
   process.exit(2);
@@ -46,7 +47,8 @@ function mintScopeClaim(code: string): string {
   return `${body}.${sig}`;
 }
 
-const body: Record<string, unknown> = { question, session_id: `parity-${randomUUID()}` };
+const session = flag("--session") || `parity-${randomUUID()}`;
+const body: Record<string, unknown> = { question, session_id: session };
 if (scope) { body.client_scope = scope; body.scope_claim = mintScopeClaim(scope); }
 else body.context = { client_code: client };
 
