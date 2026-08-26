@@ -278,12 +278,19 @@ function copyRoutes(spend = '0') {
     account_id: '100',
     optimization_goal: 'OFFSITE_CONVERSIONS',
     promoted_object: { pixel_id: '999', custom_event_type: 'PURCHASE' },
-    attribution_spec: [{ event_type: 'CLICK_THROUGH', window_days: 7 }],
+    // The SAME windows the card asks for, in Meta's own order: a copy
+    // inherits these and can never be told different ones.
+    attribution_spec: [
+      { event_type: 'VIEW_THROUGH', window_days: 1 },
+      { event_type: 'CLICK_THROUGH', window_days: 7 },
+    ],
   };
   // No ads on the source: the page/lead-ToS pre-flight has nothing to sample
   // and is not what these tests are about.
   state.routes[`GET ${SOURCE_ADSET}/ads`] = { data: [] };
   state.routes[`POST ${SOURCE_ADSET}/copies`] = { copied_adset_id: COPY_ADSET };
+  // The receipt's own count: a deep copy of a source with no ads has none.
+  state.routes[`GET ${COPY_ADSET}/ads`] = { data: [], summary: { total_count: 0 } };
   state.routes[`GET ${COPY_ADSET}/insights`] = spend === '' ? { error: { message: 'insights unavailable' } } : { data: spend === '0' ? [] : [{ spend }] };
   state.routes[`POST ${COPY_ADSET}`] = { success: true };
   state.routes[`GET ${COPY_ADSET}`] = {
@@ -300,7 +307,7 @@ function copyRoutes(spend = '0') {
 }
 
 describe('duplicate_ad_set — the copy is told what the card promised', () => {
-  it('writes the event, the promoted object, the window and the name onto the COPY', async () => {
+  it('writes the event, the promoted object and the name onto the COPY, and never the window', async () => {
     copyRoutes();
     const out = await run({ type: 'duplicate_ad_set', target_id: SOURCE_ADSET, settings: COPY_SETTINGS });
 
@@ -308,11 +315,25 @@ describe('duplicate_ad_set — the copy is told what the card promised', () => {
     const configure = calls('POST', COPY_ADSET)[0];
     expect(configure.params.optimization_goal).toBe('OFFSITE_CONVERSIONS');
     expect(JSON.parse(configure.params.promoted_object)).toMatchObject({ custom_event_str: 'QualifiedSubscription' });
-    expect(JSON.parse(configure.params.attribution_spec)).toEqual(COPY_SETTINGS.attribution_spec);
     expect(configure.params.name).toBe(COPY_SETTINGS.name);
+    // Meta refuses attribution_spec on an ad set that exists, and it refuses it
+    // as a generic "unexpected error" that kills the WHOLE post: on 2026-08-26
+    // that took the rename down with it and orphaned the copy. The window the
+    // card asked for is the source's own, verified before copying, so there is
+    // nothing here to write.
+    expect(configure.params.attribution_spec).toBeUndefined();
     // The SOURCE is read and never written to. That is the whole no-edits-
     // after-spend guarantee for this verb.
     expect(calls('POST', SOURCE_ADSET)).toHaveLength(0);
+  });
+
+  it('tells Meta to bring the source\u2019s ads along, because a copy without them cannot run', async () => {
+    copyRoutes();
+    await run({ type: 'duplicate_ad_set', target_id: SOURCE_ADSET, settings: COPY_SETTINGS });
+
+    // deep_copy defaults to FALSE. Live on 2026-08-26 a source with 3 ads
+    // produced a copy with 0 while the receipt said the ads had come with it.
+    expect(calls('POST', `${SOURCE_ADSET}/copies`)[0].params.deep_copy).toBe('true');
   });
 
   it('names the copy in the account convention, not in a dash suffix', async () => {
@@ -429,7 +450,137 @@ describe('duplicate_ad_set — a shape Ada will not guess at', () => {
 
     expect(out).toMatchObject({ ok: true, dry_run: true, would_apply: true });
     expect(String(out.detail)).toContain('optimization_goal');
-    expect(String(out.detail)).toContain('attribution_spec');
+    expect(String(out.detail)).toContain('deep copy');
+    // The window is inherited, not set — and the dry run has to say so in the
+    // words the customer asked in, or the receipt promises a write nobody makes.
+    expect(String(out.detail)).toContain('inherits it from the source');
+    expect(String(out.detail)).toContain('7-day click');
+    expect(String(out.detail)).not.toContain('set attribution');
     expect(state.graph.filter((c) => c.method === 'POST')).toHaveLength(0);
+  });
+});
+
+describe('duplicate_ad_set — the window a copy can never be told', () => {
+  it('refuses a window the source does not already have, BEFORE a copy exists', async () => {
+    copyRoutes();
+    const out = await run({
+      type: 'duplicate_ad_set', target_id: SOURCE_ADSET,
+      settings: {
+        ...COPY_SETTINGS,
+        attribution_spec: [
+          { event_type: 'CLICK_THROUGH', window_days: 1 },
+          { event_type: 'VIEW_THROUGH', window_days: 1 },
+        ],
+      },
+    });
+
+    expect(out.ok).toBe(false);
+    // Nothing exists to clean up. The live failure on 2026-08-26 refused the
+    // window AFTER the copy was made, leaving 120247820138370225 in the
+    // account under the wrong name because the rename shared that same post.
+    expect(calls('POST', `${SOURCE_ADSET}/copies`)).toHaveLength(0);
+    expect(calls('POST', COPY_ADSET)).toHaveLength(0);
+    // The refusal names both windows in words, and why it is a rebuild.
+    expect(String(out.refused)).toContain('7-day click');
+    expect(String(out.refused)).toContain('1-day view');
+    expect(String(out.refused)).toContain('cannot be changed once an ad set exists');
+    expect(String(out.refused)).toContain('built from scratch');
+  });
+
+  it('copies without asking for a window when the source already has the one wanted', async () => {
+    copyRoutes();
+    const out = await run({ type: 'duplicate_ad_set', target_id: SOURCE_ADSET, settings: COPY_SETTINGS });
+
+    expect(out).toMatchObject({ ok: true, applied: true });
+    expect(calls('POST', `${SOURCE_ADSET}/copies`)).toHaveLength(1);
+    expect(calls('POST', COPY_ADSET)[0].params.attribution_spec).toBeUndefined();
+  });
+});
+
+describe('duplicate_ad_set — the ads that come along are validated, not assumed', () => {
+  function sourceWithOneAd() {
+    copyRoutes();
+    state.routes[`GET ${SOURCE_ADSET}/ads`] = { data: [{ id: '8001', creative: { id: 'c_1' } }] };
+    state.routes['POST act_100/ads'] = { id: 'preflight-never-created' };
+    state.routes[`GET ${COPY_ADSET}/ads`] = { data: [{ id: '9001' }], summary: { total_count: 3 } };
+  }
+
+  it('refuses when the ads on the source cannot be read, and copies nothing', async () => {
+    copyRoutes();
+    state.routes[`GET ${SOURCE_ADSET}/ads`] = { error: { message: 'Please reduce the amount of data' } };
+    const out = await run({ type: 'duplicate_ad_set', target_id: SOURCE_ADSET, settings: COPY_SETTINGS });
+
+    expect(out.ok).toBe(false);
+    expect(String(out.refused)).toContain('Please reduce the amount of data');
+    expect(String(out.refused)).toContain('Nothing has been copied');
+    expect(calls('POST', `${SOURCE_ADSET}/copies`)).toHaveLength(0);
+  });
+
+  it('refuses when the sample ad fails the page gate, and copies nothing', async () => {
+    sourceWithOneAd();
+    state.routes['POST act_100/ads'] = {
+      error: { message: 'You do not have access to create ads for this page' },
+    };
+    const out = await run({ type: 'duplicate_ad_set', target_id: SOURCE_ADSET, settings: COPY_SETTINGS });
+
+    expect(out.ok).toBe(false);
+    expect(String(out.refused)).toContain('page permission');
+    expect(calls('POST', `${SOURCE_ADSET}/copies`)).toHaveLength(0);
+  });
+
+  it('validates the sample ad, then says how many ads arrived with the copy', async () => {
+    sourceWithOneAd();
+    const out = await run({ type: 'duplicate_ad_set', target_id: SOURCE_ADSET, settings: COPY_SETTINGS });
+
+    expect(out).toMatchObject({ ok: true, applied: true, copiedAds: 3 });
+    expect(calls('POST', 'act_100/ads')[0].params.execution_options).toContain('validate_only');
+    expect(String((state.writes[0] as { summary: string }).summary)).toContain('arrived with 3 ads');
+  });
+
+  it('proceeds without the gate when the source has no ads, and counts the empty copy', async () => {
+    copyRoutes();
+    const out = await run({ type: 'duplicate_ad_set', target_id: SOURCE_ADSET, settings: COPY_SETTINGS });
+
+    expect(out).toMatchObject({ ok: true, applied: true, copiedAds: 0 });
+    // Nothing to sample means nothing to validate — an empty source honestly
+    // yields an empty copy rather than an unvalidated one.
+    expect(calls('POST', 'act_100/ads')).toHaveLength(0);
+    expect(String((state.writes[0] as { summary: string }).summary)).toContain('arrived with 0 ads');
+  });
+
+  it('does not fail the step when the ad count cannot be read', async () => {
+    copyRoutes();
+    delete state.routes[`GET ${COPY_ADSET}/ads`];
+    const out = await run({ type: 'duplicate_ad_set', target_id: SOURCE_ADSET, settings: COPY_SETTINGS });
+
+    expect(out).toMatchObject({ ok: true, applied: true, copiedAds: null });
+    expect(String((state.writes[0] as { summary: string }).summary)).toContain('ad count unknown');
+  });
+});
+
+describe('duplicate_ad_set — reading the new id out of a deep copy', () => {
+  it('takes the ADSET entry out of ad_object_ids, not the first one', async () => {
+    copyRoutes();
+    state.routes[`POST ${SOURCE_ADSET}/copies`] = {
+      ad_object_ids: [
+        { ad_object_type: 'AD', source_id: '8001', copied_id: '9001' },
+        { ad_object_type: 'ADSET', source_id: SOURCE_ADSET, copied_id: COPY_ADSET },
+      ],
+    };
+    const out = await run({ type: 'duplicate_ad_set', target_id: SOURCE_ADSET, settings: COPY_SETTINGS });
+
+    expect(out).toMatchObject({ ok: true, applied: true });
+    expect(calls('POST', COPY_ADSET)).toHaveLength(1);
+    expect(calls('POST', '9001')).toHaveLength(0);
+    expect(state.writes[0]).toMatchObject({ targetId: COPY_ADSET });
+  });
+
+  it('still fails loudly when no id comes back at all', async () => {
+    copyRoutes();
+    state.routes[`POST ${SOURCE_ADSET}/copies`] = { ad_object_ids: [{ ad_object_type: 'AD', copied_id: '9001' }] };
+    const out = await run({ type: 'duplicate_ad_set', target_id: SOURCE_ADSET, settings: COPY_SETTINGS });
+
+    expect(out.error).toBe('copy_returned_no_id');
+    expect(String(out.detail)).toContain('check the campaign before retrying');
   });
 });

@@ -486,11 +486,16 @@ POST /act_<id>/campaigns
 
 ---
 
-## Case 39 — Copying an ad set onto a different optimization event — NOT PROBED
+## Case 39 — Copying an ad set onto a different optimization event — ANSWERED 2026-08-26
 
-**Written 2026-08-25 and deliberately not run.** This is the one B13 verb that
-cannot be dry-run, and the case exists to say so plainly rather than to imply a
-capability nobody has checked.
+**Written 2026-08-25 and deliberately not run; run for real on 2026-08-26.** This
+is the one B13 verb that cannot be dry-run, and the case existed to say so plainly
+rather than to imply a capability nobody had checked. The probe below was executed
+against `act_1570076840279279` on plan `cmt9x8soa` and it settled both open
+questions the hard way: **Case 41** (the window is immutable, and its refusal takes
+the whole POST down with it) and **Case 42** (`/copies` defaults `deep_copy` to
+false, so the copy arrived with none of the source's ads). The behaviour recorded
+below is the behaviour AFTER those two answers landed in the code.
 
 **Why there is no probe.** `/copies` ignores `execution_options=["validate_only"]`
 and creates a real ad set (case 15a). The only honest pre-flight is validating
@@ -500,26 +505,34 @@ is no read-only way to learn the answer.
 
 **What the code does now** (`handleExecuteAction`, `duplicate_ad_set`):
 
+0. `GET /<source_adset_id>?fields=…,attribution_spec` — and the requested window
+   is compared to the SOURCE's, order-insensitively, BEFORE anything is copied.
+   A window that differs is refused here, with no copy in existence (Case 41).
 1. `POST /<source_adset_id>/copies` with `campaign_id`, `status_option=PAUSED`,
-   `rename_options={"rename_suffix":" // Ada copy"}`.
+   `deep_copy=true` (Case 42), `rename_options={"rename_suffix":" // Ada copy"}`.
+   The new id is read from `copied_adset_id`, then `id`, then the `ad_object_ids`
+   entry whose `ad_object_type` says ad set — a deep copy may answer for the
+   whole tree, and the first entry is as likely to be one of the ads.
 2. `GET /<new_adset_id>/insights?fields=spend&date_preset=maximum` — the
    lifetime-spend-zero assertion. A read that FAILS is not a zero; it refuses
    the next step.
-3. `POST /<new_adset_id>` with `name`, `optimization_goal`, `promoted_object`,
-   `attribution_spec`, and the optional `bid_amount`.
+3. `POST /<new_adset_id>` with `name`, `optimization_goal`, `promoted_object` and
+   the optional `bid_amount`. **No `attribution_spec`** — see Case 41.
 4. `GET /<new_adset_id>` for the read-back, carrying every field the portal
    judges.
+5. `GET /<new_adset_id>/ads?fields=id&limit=1&summary=true` — how many ads
+   actually arrived, reported as `copiedAds`. A count Ada could not read is
+   `null` ("ad count unknown") and never fails the step: the object read-back
+   already settled it.
 
-**The open question, and it is a real one.** Step 3 assumes `attribution_spec`
-can be written to an ad set that already exists. The standing rule in this house
-is that `attribution_spec` is IMMUTABLE after ad set creation. If that is
-literally true, rather than shorthand for "after it starts delivering", then
-step 3 is refused on every copy, every copy lands `copy_not_configured` and has
-to be rebuilt, and **B13's copy-based plan does not work** — the campaign would
-have to be built from ad sets created with the right spec rather than copied.
-The code fails honestly either way, but the plan hangs on the answer.
-`optimization_goal` and `promoted_object` carry a milder version of the same
-doubt: editable while there is no delivery, rejected once there is.
+**The open question, answered.** `attribution_spec` is IMMUTABLE literally, not
+as shorthand for "after it starts delivering" (Case 41). B13's copy-based plan
+still works, but only because a copy INHERITS the source's window: the plan is
+sound whenever the window wanted is the window the source already runs, and it is
+impossible whenever it is not. That is now decided before a copy exists rather
+than discovered after one does. `optimization_goal` and `promoted_object` proved
+to be the milder case they were suspected of being: both were accepted on the
+unspent copy once the window was out of the same POST.
 
 **The probe that settles it.** It creates a real object, so it needs sign-off:
 
@@ -543,16 +556,24 @@ it.
 **Regression checks** (`tests/execute-action-create-and-copy.test.ts` — the copy
 path is mocked, so these pin OUR behaviour, not Meta's):
 
-1. The event, promoted object, window and name are written to the COPY. The
-   source is never POSTed to.
+1. The event, promoted object and name are written to the COPY, and the window
+   is written NOWHERE. The source is never POSTed to.
 2. The spend assertion runs before the field write, and an insights read that
    failed refuses the write instead of reading as a zero.
 3. Nothing is asked about spend when there is nothing to write.
 4. The rename suffix follows the account's ` // ` convention.
-5. An `attribution_spec` that is only nearly right is refused before anything
-   is copied.
+5. An `attribution_spec` that is only nearly right, and one that is well formed
+   but differs from the source's, are both refused before anything is copied —
+   asserted on there being no `/copies` call at all.
 6. The read-back carries status, campaign, `optimization_goal`,
    `promoted_object`, `attribution_spec`, `bid_strategy` and budget.
+7. `/copies` carries `deep_copy=true`.
+8. The sample-ad page/lead-ToS gate is load-bearing: a source WITH ads whose ad
+   read or gate check fails refuses the copy; a source with NO ads proceeds
+   without the gate and the receipt says the copy arrived with 0 ads.
+9. A `/copies` answer shaped as `ad_object_ids` resolves to the ad set's id, not
+   the first entry's; an answer with no ad set entry at all still fails loudly
+   as `copy_returned_no_id`.
 
 ---
 
@@ -622,3 +643,78 @@ sends only `question`, `session_id`, `client_scope` and `scope_claim`, so those
 questions would be graded against a turn with no block — grading the absence of
 the capability and calling it a pass. Add them together with the harness field,
 after the deploy, and grade them on AOTUS.
+---
+
+## Case 41 — `attribution_spec` on an ad set that already exists (VERIFIED, REFUSED)
+
+**Probed live 2026-08-26** on `act_1570076840279279`, plan `cmt9x8soa`, running
+the Case 39 probe exactly as written. It is the answer to Case 39's open
+question, and it cost a real object to get.
+
+**What was sent.** One `POST /<new_adset_id>` bundling `name`,
+`optimization_goal`, `promoted_object`, `attribution_spec` and `bid_amount` onto
+the fresh, never-spent copy of ad set `120229727882490225`.
+
+**What Meta answered.** A refusal, and a **generic** one: Graph's "unexpected
+error" with nothing in it naming the window. Not a field error, not a subcode
+that says `attribution_spec`.
+
+**Results:**
+
+| What | Finding |
+|---|---|
+| Is the window immutable? | **Yes, literally.** Not "after it delivers" — after it EXISTS. The copy had never spent and Meta still refused. |
+| Does the refusal name the field? | **No.** A generic "unexpected error". Anyone reading only the message would look for the bug in the goal or the pixel. |
+| What does the refusal cost? | **The whole POST.** `name`, `optimization_goal` and `promoted_object` were in the same call and all died with it. The rename died too, so the copy stayed under the ` // Ada copy` suffix instead of the name the card promised. |
+| What was left behind | Ad set `120247820138370225`, PAUSED, in the destination campaign, under the wrong name, with the source's own settings. **Kept deliberately as evidence** — Ada never deletes, and it is the only live artefact of this case. |
+| Where does the copy's window come from | The SOURCE. `/copies` carries `attribution_spec` over with everything else, so a copy always has a window; it just has the one it inherited. |
+
+**The rule this sets.** A window is decided BEFORE a copy exists, or not at all.
+The executor now reads the source's `attribution_spec` (it was already asking for
+it), compares it to the requested one as a SET of `{event_type, window_days}`
+pairs (Meta returns them in its own order, and `CLICK_THROUGH` and
+`click_through` are one event), and either proceeds — writing the window nowhere,
+ever — or refuses with both windows named in words: *a copy inherits 7-day click
+and 1-day view from "…", and an attribution window cannot be changed once an ad
+set exists.* A different window means a new ad set built from scratch, and the
+customer is told that while nothing has been created.
+
+**Corollary, and it is the general lesson.** Never bundle an immutable field
+into a POST with mutable ones. Meta refuses the call, not the field, so one
+un-writable value silently takes every writable one down with it.
+
+---
+
+## Case 42 — `/copies` and `deep_copy` (VERIFIED, DEFAULTS TO FALSE)
+
+**Verified against Meta 2026-08-26**, same account and plan as Case 41.
+
+**What was sent.** `POST /120229727882490225/copies` with `campaign_id`,
+`status_option=PAUSED` and `rename_options` — and **no `deep_copy`**.
+
+**What arrived.** An ad set. Nothing in it.
+
+**Results:**
+
+| What | Finding |
+|---|---|
+| Source ad count | 3 ads on `120229727882490225`. |
+| Copy ad count | **0.** `GET /<new_id>/ads` came back empty. |
+| Default | `deep_copy` defaults to **false**. A shallow copy is the ad set object alone: settings, targeting, budget, identity — and no ads. |
+| What the code believed | The opposite. The handler's own comment said "the copied ad set brings its ads along", it validated a sample ad's Page permission on that belief, and the customer-facing card promised the same. A finished build was a shell that could never run. |
+| The fix | `deep_copy: 'true'` on every copy this rail makes. |
+| The receipt | `GET /<new_id>/ads?fields=id&limit=1&summary=true` after the read-back, reported as `copiedAds`, so the summary says "arrived with 3 ads from the source" rather than asserting it. |
+
+**What deep_copy makes load-bearing.** The sample-ad Page/lead-ToS gate (Case
+15a's pre-flight) used to be best effort — a `catch` that logged and carried on.
+With the ads actually coming along, an unvalidated copy is a copy of ads that may
+be unadvertisable, so the gate now refuses: if the source has ads and either the
+ad read or the gate check fails, no copy is made. A source with NO ads has
+nothing to validate, proceeds without the gate, and says out loud that the copy
+arrived empty — an empty source honestly yields an empty copy.
+
+**Not probed.** Whether `deep_copy=true` also copies ads that are DELETED or
+ARCHIVED on the source, and what it does with an ad whose creative was since
+removed. Both would show up as a copy carrying fewer ads than expected, which is
+exactly what `copiedAds` is there to make visible.
+

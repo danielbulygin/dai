@@ -2088,6 +2088,62 @@ const attributionish = (v: unknown): Array<Record<string, unknown>> | undefined 
     Number.isFinite(Number((e as { window_days?: unknown }).window_days)));
   return wellFormed ? (v as Array<Record<string, unknown>>) : undefined;
 };
+/**
+ * Two attribution windows are the SAME window when they name the same
+ * {event, days} pairs. Meta hands them back in its own order, and it answers
+ * `CLICK_THROUGH` where a proposal may say `click_through`, so comparing the
+ * lists literally would refuse a copy that needs nothing changed at all.
+ */
+const sameAttribution = (
+  a: Array<Record<string, unknown>>,
+  b: Array<Record<string, unknown>>,
+): boolean => {
+  const key = (spec: Array<Record<string, unknown>>) =>
+    [...new Set(spec.map((e) => `${String(e.event_type ?? '').toUpperCase()}:${Number(e.window_days)}`))]
+      .sort()
+      .join('|');
+  return key(a) === key(b);
+};
+/**
+ * An attribution window in the words it was asked for: `7-day click and 1-day
+ * view`. Nobody reads `[{"event_type":"CLICK_THROUGH","window_days":7}]` off a
+ * refusal and knows which windows they are being told they cannot have.
+ */
+const describeAttribution = (spec: Array<Record<string, unknown>>): string => {
+  if (spec.length === 0) return 'the windows Meta gives it by default (it reports none on the source)';
+  const parts = spec.map((e) => {
+    const days = Number(e.window_days);
+    const event = String(e.event_type ?? '').toLowerCase().replace(/_through$/, '').replace(/_/g, ' ');
+    return `${Number.isFinite(days) ? days : 'unknown'}-day ${event || 'unknown'}`;
+  });
+  return parts.length === 1
+    ? parts[0]
+    : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
+};
+/**
+ * The id of the ad set a `/copies` call just made.
+ *
+ * A shallow copy answers `{copied_adset_id}`. A DEEP copy copies a whole tree,
+ * and Meta may answer for it with `ad_object_ids`: one entry per object it
+ * made. The ad set's id is the entry whose type SAYS ad set, never the first
+ * entry, which is as likely to be one of the ads that came along.
+ */
+const copiedAdSetId = (copied: Record<string, unknown>): string => {
+  const direct = copied.copied_adset_id ?? copied.id;
+  if (typeof direct === 'string' && direct) return direct;
+  if (typeof direct === 'number' && Number.isFinite(direct)) return String(direct);
+  const made = copied.ad_object_ids;
+  if (Array.isArray(made)) {
+    for (const entry of made) {
+      const row = entry as { ad_object_type?: unknown; copied_id?: unknown } | null;
+      const kind = String(row?.ad_object_type ?? '').toUpperCase().replace(/[^A-Z]/g, '');
+      if (kind.endsWith('ADSET') && row?.copied_id !== undefined && row?.copied_id !== null) {
+        return String(row.copied_id);
+      }
+    }
+  }
+  return '';
+};
 
 /**
  * The no-edits-after-spend rule, asserted instead of assumed.
@@ -2472,7 +2528,8 @@ export async function handleExecuteAction(body: ExecuteActionRequest): Promise<R
     if (!sourceId) return { ok: false, refused: 'missing target_id (the ad set to duplicate)' };
     // Read the source's own event and window too: they are what the copy is
     // being changed AWAY from, and the audit log's before/after is the only
-    // place anyone can see that diff afterwards.
+    // place anyone can see that diff afterwards. The window is also the one
+    // thing the copy INHERITS and can never be told, so it is compared here.
     const source = await graphCall(sourceId, token, {
       fields: 'id,name,campaign_id,account_id,optimization_goal,promoted_object,attribution_spec',
     });
@@ -2491,21 +2548,6 @@ export async function handleExecuteAction(body: ExecuteActionRequest): Promise<R
     if (!freshAllowed.includes(dest)) {
       return { ok: false, refused: `campaign fence: destination ${dest} is not in ${clientCode}'s allowed campaigns ${JSON.stringify(freshAllowed)}` };
     }
-    // Card 76: the copied ad set brings its ads along, and THOSE need page
-    // permission + lead-ads terms. Validate with one sample ad's creative
-    // against the source set (page/ToS gates are account+page level, not
-    // destination-specific) before copying or claiming "would apply".
-    try {
-      const sampleAds = await graphCall(`${sourceId}/ads`, token, { fields: 'id,creative', limit: '1' });
-      const sample = ((sampleAds.data as Array<{ creative?: { id?: string } }> | undefined) ?? [])[0];
-      const sampleCreativeId = String(sample?.creative?.id ?? '');
-      if (sampleCreativeId) {
-        const gate = await validateCreativePlacement(acct, token, sourceId, sampleCreativeId);
-        if (!gate.ok) return { ok: false, refused: gate.refused };
-      }
-    } catch (e) {
-      console.error('[execute-action] duplicate_ad_set sample validation skipped:', e);
-    }
     // What the approval asked to be DIFFERENT on the copy. Every one of these
     // is written to the fresh copy; the source is read and never written back
     // to, which is what keeps no-edits-after-spend intact.
@@ -2522,9 +2564,60 @@ export async function handleExecuteAction(body: ExecuteActionRequest): Promise<R
     if (settings.attribution_spec !== undefined && !wantedAttribution) {
       return { ok: false, refused: 'attribution_spec is not a list of {event_type, window_days} — it cannot be corrected once the ad set exists, so Ada does not guess at it' };
     }
+    // Attribution is settled BEFORE anything is copied, because it can never be
+    // settled after. Meta refuses attribution_spec on an ad set that already
+    // exists, and it refuses it as a generic "unexpected error" that kills the
+    // whole POST: on 2026-08-26 that took the rename down with it and left copy
+    // 120247820138370225 in the account under the wrong name. /copies hands the
+    // copy the SOURCE's windows, so a requested window either already matches
+    // the source, in which case there is nothing to write anywhere, or it needs
+    // an ad set built from scratch, and the honest place to say so is before a
+    // copy exists.
+    const sourceAttribution = attributionish(source.attribution_spec) ?? [];
+    if (wantedAttribution && !sameAttribution(wantedAttribution, sourceAttribution)) {
+      return {
+        ok: false,
+        refused:
+          `attribution: a copy inherits ${describeAttribution(sourceAttribution)} from "${String(source.name)}", ` +
+          `and an attribution window cannot be changed once an ad set exists. The change asked for ` +
+          `${describeAttribution(wantedAttribution)}, which needs a new ad set built from scratch instead of a copy. ` +
+          `Nothing has been copied.`,
+      };
+    }
+    // Card 76: the copy is a DEEP copy, so the source's ads come with it, and
+    // THOSE need page permission + lead-ads terms. That makes this gate
+    // load-bearing rather than best effort: a copy that will carry ads is not
+    // made while the gate is unproven. One sample ad's creative is validated
+    // against the source set (page/ToS gates are account+page level, not
+    // destination-specific). A source with no ads has nothing to validate and
+    // yields an empty copy, which is said out loud rather than glossed.
+    let sourceHasAds = false;
+    try {
+      const sampleAds = await graphCall(`${sourceId}/ads`, token, { fields: 'id,creative', limit: '1' });
+      const ads = (sampleAds.data as Array<{ creative?: { id?: string } }> | undefined) ?? [];
+      sourceHasAds = ads.length > 0;
+      const sampleCreativeId = String(ads[0]?.creative?.id ?? '');
+      if (sampleCreativeId) {
+        const gate = await validateCreativePlacement(acct, token, sourceId, sampleCreativeId);
+        if (!gate.ok) return { ok: false, refused: gate.refused };
+      }
+    } catch (e) {
+      return {
+        ok: false,
+        refused:
+          `Ada could not check the ads on "${String(source.name)}" (${sourceId}) before copying it: ` +
+          `${(e as Error).message}. A copy brings the source's ads with it, so it is not made until their Page ` +
+          `permission and lead-ads terms are confirmed. Nothing has been copied.`,
+      };
+    }
     const copyParams: Record<string, string> = {
       campaign_id: dest,
       status_option: 'PAUSED',
+      // The source's ads come along. Meta defaults deep_copy to FALSE, and on
+      // 2026-08-26 that is exactly what happened: a source with 3 ads produced
+      // a copy with 0, so an approved build was a shell that could never run
+      // while its receipt said the ads had come with it.
+      deep_copy: 'true',
       // The suffix is what lands FIRST, so the copy stays marked as one even if
       // the rename below never happens. An explicit settings.name then replaces
       // it with the name the account's own convention produces.
@@ -2533,24 +2626,32 @@ export async function handleExecuteAction(body: ExecuteActionRequest): Promise<R
     // Everything the copy has to be TOLD after it exists. /copies carries the
     // source's settings over wholesale, so an optimization event a customer
     // approved is not applied by copying — it is applied here or not at all.
+    // Attribution is deliberately absent: it is not writable here, it was
+    // proven to match the source above, and bundling it into this POST is what
+    // killed the rename on the first live copy.
     const configure: Record<string, string> = {};
     if (copyName) configure.name = copyName;
     if (wantedGoal) configure.optimization_goal = wantedGoal;
     if (wantedPromoted) configure.promoted_object = JSON.stringify(wantedPromoted);
-    if (wantedAttribution) configure.attribution_spec = JSON.stringify(wantedAttribution);
     // The optional bid override on a fresh copy (the BitCap flow), ceiling-guarded.
     const bidUsd = Number(settings.bid_amount_usd ?? 0);
     if (bidUsd > 0 && bidUsd <= maxDailyBudgetUsd) configure.bid_amount = String(Math.round(bidUsd * 100));
     const configured = Object.keys(configure);
     if (dryRun) {
       return wouldApply(
-        `would duplicate ad set "${String(source.name)}" into campaign ${dest}, PAUSED` +
+        `would duplicate ad set "${String(source.name)}" into campaign ${dest}, PAUSED, bringing the source's ads ` +
+        `along with it (deep copy)` +
+        (sourceHasAds ? '' : ', though the source has no ads, so the copy would arrive empty') +
         (configured.length ? `, then set ${configured.join(', ')} on the copy` : '') +
-        ' (validated: page permission, lead-ads terms)',
+        `. Attribution stays as the copy inherits it from the source, ${describeAttribution(sourceAttribution)}` +
+        (wantedAttribution ? ', which is what was asked for (verified against the source before copying)' : '') +
+        (sourceHasAds
+          ? '. (validated: page permission, lead-ads terms)'
+          : '. (nothing to validate: the source has no ads)'),
       );
     }
     const copied = await graphCall(`${sourceId}/copies`, token, copyParams, 'POST');
-    const newId = String((copied.copied_adset_id as string | undefined) ?? copied.id ?? '');
+    const newId = copiedAdSetId(copied);
     if (!newId) {
       return {
         ok: false,
@@ -2578,12 +2679,28 @@ export async function handleExecuteAction(body: ExecuteActionRequest): Promise<R
     }
     // ONE read-back, after every write, carrying the fields the portal judges.
     const after = await graphCall(newId, token, { fields: ADSET_JUDGED_FIELDS }).catch(() => copied);
+    // How many ads actually arrived. "It brings its ads along" is the claim the
+    // card makes, and only Meta can confirm it — but a count is not the write,
+    // so a count Ada could not read is reported as unknown and never fails the
+    // step the object read-back above already settled.
+    let copiedAds: number | null = null;
+    try {
+      const arrived = await graphCall(`${newId}/ads`, token, { fields: 'id', limit: '1', summary: 'true' });
+      const total = Number((arrived.summary as { total_count?: unknown } | undefined)?.total_count);
+      const rows = (arrived.data as unknown[] | undefined) ?? [];
+      copiedAds = Number.isFinite(total) ? total : (rows.length === 0 ? 0 : null);
+    } catch (e) {
+      console.error('[execute-action] duplicate_ad_set could not count the ads on the copy:', e);
+    }
+    const adsNote = copiedAds === null
+      ? ', ad count unknown'
+      : `, arrived with ${copiedAds} ${copiedAds === 1 ? 'ad' : 'ads'} from the source`;
     logWrite({
       context, toolName: 'execute_action:duplicate_ad_set', targetSystem: 'meta',
       targetId: newId, before: source, after,
       reverse: { note: 'delete requires a human — Ada never deletes', object: 'adset', id: newId },
       summary:
-        `Duplicated ad set "${String(source.name)}" into campaign ${dest}, PAUSED` +
+        `Duplicated ad set "${String(source.name)}" into campaign ${dest}, PAUSED` + adsNote +
         (configured.length ? `, set ${configured.join(', ')}` : '') +
         (configureError ? ' — SETTINGS NOT APPLIED' : '') + ' (approve-modal)',
     });
@@ -2592,13 +2709,14 @@ export async function handleExecuteAction(body: ExecuteActionRequest): Promise<R
         ok: false,
         error: 'copy_not_configured',
         object: after,
+        copiedAds,
         detail:
           `Ad set ${newId} was copied into campaign ${dest} and is paused, but Ada could not set ` +
-          `${configured.join(', ')} on it: ${configureError}. An attribution window cannot be changed once ` +
-          `an ad set exists, so this copy has to be rebuilt rather than corrected.`,
+          `${configured.join(', ')} on it: ${configureError}. The copy exists and still carries the source's own ` +
+          `settings, so it has to be corrected by hand or rebuilt before anyone switches it on.`,
       };
     }
-    return { ok: true, applied: true, object: after };
+    return { ok: true, applied: true, object: after, copiedAds };
   }
 
   if (type === 'create_ad_set') {
@@ -2871,7 +2989,14 @@ const server = http.createServer(async (req, res) => {
         }
         sendJson(res, 200, result);
       } catch (e) {
-        console.error('[ada-console-assist] /execute-action error:', e);
+        // Identifiers only, never the claim, the token or the intent: a
+        // readiness probe (user_id write-readiness-probe) and a customer's
+        // change that broke read identically in the journal without them.
+        console.error(
+          '[ada-console-assist] /execute-action error:',
+          `client=${(parsed.client_code ?? 'none').toUpperCase()} user=${parsed.user_id ?? 'none'}`,
+          e,
+        );
         void getSupabase()
           .from('ops_events')
           .insert({ level: 'error', source: 'executor', client_code: (parsed.client_code ?? '').toUpperCase() || null, message: `execution threw: ${(e as Error).message}`.slice(0, 2000), meta: { type: parsed.intent?.type ?? null } })
