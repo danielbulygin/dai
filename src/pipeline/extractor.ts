@@ -15,7 +15,7 @@ import { normalizeAccountCode } from '../utils/account-codes.js';
 import type { MeetingClassification } from './classifier.js';
 import type { ExtractionContext } from './context-builder.js';
 
-const EXTRACTION_MODEL = 'claude-sonnet-4-6';
+const EXTRACTION_MODEL = 'claude-sonnet-5';
 const MIN_TRANSCRIPT_LENGTH = 200;
 
 // ---------------------------------------------------------------------------

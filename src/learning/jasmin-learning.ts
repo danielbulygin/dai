@@ -17,7 +17,7 @@ import { logger } from "../utils/logger.js";
 // ---------------------------------------------------------------------------
 
 const EXTRACTION_MODEL = "claude-haiku-4-5-20251001";
-const SYNTHESIS_MODEL = "claude-sonnet-4-6";
+const SYNTHESIS_MODEL = "claude-sonnet-5";
 
 // ---------------------------------------------------------------------------
 // Anthropic client (lazy singleton)

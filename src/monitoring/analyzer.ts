@@ -19,7 +19,7 @@ function getClient(): Anthropic {
   return client;
 }
 
-const ANALYSIS_MODEL = "claude-sonnet-4-6";
+const ANALYSIS_MODEL = "claude-sonnet-5";
 
 export interface AnalysisResult {
   blockers: string[];

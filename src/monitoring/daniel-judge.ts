@@ -15,7 +15,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { env } from '../env.js';
 import { logger } from '../utils/logger.js';
 
-const MODEL = 'claude-sonnet-4-6';
+const MODEL = 'claude-sonnet-5';
 
 export interface JudgeVerdict {
   scores: {
@@ -98,7 +98,6 @@ export async function judgeBrief(briefText: string): Promise<JudgeVerdict> {
   const res = await anthropic.messages.create({
     model: MODEL,
     max_tokens: 1500,
-    temperature: 0,
     system: [{ type: 'text', text: RUBRIC, cache_control: { type: 'ephemeral' } }],
     messages: [
       {

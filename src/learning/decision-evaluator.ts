@@ -5,7 +5,7 @@ import { getPendingDecisions, recordOutcome, type Decision } from '../memory/dec
 import { addLearning } from '../memory/learnings.js';
 import { getClientPerformance } from '../agents/tools/supabase-tools.js';
 
-const EVAL_MODEL = 'claude-sonnet-4-6';
+const EVAL_MODEL = 'claude-sonnet-5';
 
 let client: Anthropic | null = null;
 
