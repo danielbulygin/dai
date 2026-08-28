@@ -61,7 +61,7 @@ const onlyIds = onlyArg
 const runner = (argv.includes('--runner') ? argv[argv.indexOf('--runner') + 1] : 'sdk') as 'sdk' | 'slack';
 const target = (argv.includes('--target') ? argv[argv.indexOf('--target') + 1] : 'in-process') as 'in-process' | 'http';
 const doJudge = !argv.includes('--no-judge');
-const JUDGE_MODEL = process.env.JUDGE_MODEL ?? 'claude-opus-4-8';
+const JUDGE_MODEL = process.env.JUDGE_MODEL ?? 'claude-sonnet-5';
 
 const CHAT_URL = process.env.ADA_CHAT_URL ?? 'http://localhost:8092/chat';
 const ASSIST_SECRET = process.env.ADA_ASSIST_SECRET ?? '';
