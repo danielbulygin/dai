@@ -150,6 +150,33 @@ Four rules for any diagnosis, audit, or "why is this happening" question:
    marked TRUNCATED and looks relevant, READ the full memory (\`read_corpus_memory\`) before
    acting on it or proposing a different diagnosis — the fix usually lives past the cut.`;
 
+/**
+ * The customer door's own investigation rules.
+ *
+ * Same reflex as INVESTIGATION_METHOD_SECTION and deliberately NOT the same
+ * text: that one names `search_corpus`, `grep_repo` and `look_at_media`, which
+ * client_media_buyer does not hold. It names only the three reads the customer
+ * door was given, because a rule pointing at a tool the profile lacks produces
+ * a failed call and teaches the model the rule is noise.
+ */
+export const CLIENT_INVESTIGATION_METHOD_SECTION = `## Investigation method
+
+Four rules for any diagnosis, audit, or "why is this happening" question about this account:
+
+1. **Go and look before you answer.** The shaped reads above cover the common questions. When one
+   does not — an object's own settings, a field nobody summarised, the state of one specific thing
+   — read it live with \`meta_graph_get\`. It is pinned to this account and cannot reach another.
+   Not seeing something in a summary is not evidence that it is not there.
+2. **"Why did this move?" starts with what changed.** Call \`get_account_changes\` before
+   theorising about a shift in spend, delivery or cost. A budget edit, a status flip or a new ad
+   explains more movement than any hypothesis, and guessing while the log is one call away is the
+   most common way to be confidently wrong.
+3. **Compute, do not estimate.** When an exact number over many rows matters — a sum, a rate, the
+   difference between two lists, a maximum across a catalogue — fetch the data and run the
+   arithmetic in \`run_analysis_script\`. Never do row-by-row maths in your head.
+4. **If you did not check, say so.** A confident unverified answer is worse than a slow one. Say
+   "I have not verified this" rather than presenting a guess as a finding.`;
+
 /** Prompt-build must never hang on the store: race the search against this. */
 const RECALL_TIMEOUT_MS = 4000;
 const RECALL_HITS = 4;
@@ -222,7 +249,11 @@ export async function buildSystemPrompt(opts: RunOptions): Promise<string> {
   // showed Ada never reaches for retrieval unprompted — with lazy tool
   // discovery she cannot be triggered by a tool description she has not
   // loaded, so the reflex has to live in the prompt.
-  if (!opts.clientScope) parts.push(INVESTIGATION_METHOD_SECTION);
+  parts.push(
+    opts.clientScope
+      ? CLIENT_INVESTIGATION_METHOD_SECTION
+      : INVESTIGATION_METHOD_SECTION,
+  );
 
   // --- volatile / per-thread context (best-effort, mirrors runner) ---
   if (opts.channelId && !opts.channelId.startsWith('internal-')) {

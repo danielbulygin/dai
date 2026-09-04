@@ -4608,6 +4608,10 @@ const SCOPED_BMAD_TOOLS = new Set([
   'get_custom_conversions',
   // Open-ended Graph reads MUST be scoped — the model never picks the tenant.
   'meta_graph_get',
+  // The change log is a per-client silo and the tool takes the code as an
+  // argument, so without this a scoped run could read another client's history
+  // by naming it. Added when the customer door was given this read.
+  'get_account_changes',
 ]);
 
 export async function executeTool(

@@ -72,6 +72,21 @@ export const toolProfiles = {
     'get_pixel_event_stats', 'get_custom_conversions',
     'search_methodology_safe',
     'reply_in_thread',
+    // Investigation reads. Withheld until the tenant boundary was the TOKEN
+    // plus the tool's own pin rather than app code alone; both now hold and
+    // are proven by scripts/tenancy-probe.ts, which reads another client's
+    // account by name and by bare object id and is refused both times.
+    //   meta_graph_get      — already forced-scope, and refuses any account
+    //                         the client was not granted, refuses agency-wide
+    //                         nodes outright, and asks Meta who owns a bare id.
+    //   get_account_changes — what changed and when, the read a "why did this
+    //                         move" question dies without. Forced-scope above.
+    //   run_analysis_script — compute instead of estimate. Safe by
+    //                         construction: no credentials in, no egress out.
+    // Still withheld: look_at_media (pin unverified), search_corpus and
+    // read_corpus_memory (the store holds other clients' knowledge), grep_repo
+    // and read_repo_file (our own source).
+    'meta_graph_get', 'get_account_changes', 'run_analysis_script',
     // Built-ins, declared here the way `readonly`/`standard` declare them: the dai
     // registry holds no entry for either, so getToolsForProfile skips them and this
     // line carries INTENT, not the gate. The gate is guard.ts BUILTIN_READS (allow)

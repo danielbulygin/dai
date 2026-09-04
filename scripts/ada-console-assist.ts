@@ -1003,8 +1003,8 @@ export function mapWriteCapability(rails: {
   }
 
   const where = fence.length === 1
-    ? 'in the one campaign this account has opened to me'
-    : `in the ${fence.length} campaigns this account has opened to me`;
+    ? 'in the one campaign this account has opened to me for changes'
+    : `in the ${fence.length} campaigns this account has opened to me for changes`;
   return {
     canExecute: true,
     reason: 'ok',
@@ -1014,7 +1014,12 @@ export function mapWriteCapability(rails: {
       `Today I can put five kinds of change up for you to approve, ${where}: pausing something, ` +
       'turning something back on, changing a daily budget, creating a new campaign (it lands paused), ' +
       'and copying an ad set into one of those campaigns. Nothing runs until you approve the card, ' +
-      'and I can never delete anything.',
+      'and I can never delete anything. ' +
+      // Case 16: this number is a WRITE permission and was being read back as a
+      // count of the account. Reads are not fenced, so the fix is to say so.
+      'That count is what I may CHANGE. It is not how many campaigns the account has, and it never ' +
+      'limits what I can look at — when you ask how many of anything there are, read the account and ' +
+      'answer with its own number.',
   };
 }
 
