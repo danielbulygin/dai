@@ -195,13 +195,14 @@ async function postSigned(path: string, payload: unknown, timeoutMs: number): Pr
 
 /** One authorized GET against Tinkers' generation seam. The Bearer secret
  *  authenticates us; the audit id in the path is the tenant capability. */
-async function getGeneration(path: string): Promise<unknown> {
+async function getGeneration(path: string, timeoutMs = READ_TIMEOUT_MS): Promise<unknown> {
   const baseUrl = env.TINKERS_BASE_URL;
   const secret = env.TINKERS_AUDIT_SEAM_SECRET;
   if (!baseUrl || !secret) throw new Error('TINKERS_BASE_URL / TINKERS_AUDIT_SEAM_SECRET not configured');
   const resp = await fetch(`${baseUrl.replace(/\/$/, '')}${path}`, {
     headers: { Authorization: `Bearer ${secret}` },
-    signal: AbortSignal.timeout(READ_TIMEOUT_MS),
+    cache: 'no-store',
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!resp.ok) throw new Error(`${path.replace(/\?.*$/, '')} returned ${resp.status}`);
   return resp.json();
@@ -283,7 +284,7 @@ export function toRawAdDay(row: unknown): RawAdDay | null {
 /** Six months of ad-level daily rows, one ≤31-day window per request — their
  *  functions stop at 300 seconds and a window past the cap is REFUSED, so the
  *  slicing is the contract, not an optimization. A failed slice costs that
- *  slice (failedSlices), never the audit — fetchColdAdDays' own posture.
+ *  slice only after retry; an unresolved gap stops the audit.
  *
  *  SIX_MONTH_DAYS in 31-day slices is still six requests, so the wider pull
  *  costs the same round trips as the old 180/30 tiling did. It is ONE pull:
@@ -298,36 +299,59 @@ export async function fetchTinkersAdDays(
   const maxRows = opts.maxRows ?? 150_000;
   const asOf = opts.asOf ?? new Date().toISOString().slice(0, 10);
 
+  if (!Number.isInteger(days) || days < 1 || days > SIX_MONTH_DAYS ||
+      !Number.isInteger(sliceDays) || sliceDays < 1 || sliceDays > 31 ||
+      !Number.isInteger(maxRows) || maxRows < 0) throw new Error('Invalid audit read bounds');
+  const deadline = performance.now() + 180_000;
+  let retainedRows = 0;
   const adDays: RawAdDay[] = [];
-  let truncated = false;
-  let failedSlices = 0;
-
-  for (let offset = 0; offset < days && !truncated; offset += sliceDays) {
+  // Keep recovery bounded: a large account must not turn a partial response
+  // into unbounded provider traffic. No incomplete pull reaches synthesis.
+  let requests = 0;
+  const requestLimit = 64;
+  async function readSlice(offset: number, length: number): Promise<RawAdDay[]> {
     const until = isoDaysAgo(asOf, offset);
-    const since = isoDaysAgo(asOf, Math.min(offset + sliceDays - 1, days));
-    try {
-      const raw = await getGeneration(`/api/generation/${auditId}/ad-days?since=${since}&until=${until}`);
-      const page = parseOrThrow(adDaysSchema, raw, 'ad-days');
-      if (!page.ok) throw new Error(`ad-days window refused: ${page.reason}`);
-      for (const row of page.rows) {
-        const mapped = toRawAdDay(row);
-        if (!mapped) continue;
-        if (adDays.length >= maxRows) {
-          truncated = true;
-          break;
+    const since = isoDaysAgo(asOf, offset + length - 1);
+    let page: z.infer<typeof adDaysSchema> | undefined;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (requests >= requestLimit) throw new Error('audit_data_incomplete: request limit reached');
+      const remaining = deadline - performance.now();
+      if (remaining <= 0) throw new Error('audit_data_incomplete: read deadline reached');
+      requests += 1;
+      try {
+        page = parseOrThrow(adDaysSchema, await getGeneration(`/api/generation/${auditId}/ad-days?since=${since}&until=${until}`, Math.max(1, Math.min(READ_TIMEOUT_MS, Math.floor(remaining)))), 'ad-days');
+        if (!page.ok) throw new Error('ad-days refused');
+        break;
+      } catch {
+        if (attempt === 1) {
+          logger.warn({ auditId, since, until }, 'audit date range could not be verified');
+          throw new Error('audit_data_incomplete: date range could not be verified');
         }
-        adDays.push(mapped);
       }
-    } catch (err) {
-      failedSlices += 1;
-      logger.warn({ err: seamError(err), auditId, since, until }, 'tinkers ad-day window failed (audit continues on partial window)');
     }
+    if (!page?.ok) throw new Error('audit_data_incomplete: date range unavailable');
+    if (page.partial) {
+      if (length === 1) throw new Error('audit_data_incomplete: daily results remain partial');
+      // Discard the partial parent entirely. Child ranges never overlap and
+      // the newest dates are always read first, so rows cannot be double counted.
+      const recentLength = Math.ceil(length / 2);
+      const recent = await readSlice(offset, recentLength);
+      const older = await readSlice(offset + recentLength, length - recentLength);
+      return [...recent, ...older];
+    }
+    if (performance.now() > deadline) throw new Error('audit_data_incomplete: read deadline reached');
+    retainedRows += page.rows.length;
+    if (retainedRows > maxRows) throw new Error('audit_data_incomplete: row limit reached');
+    const mapped = page.rows.map(toRawAdDay);
+    if (mapped.some((row) => row === null)) throw new Error('audit_data_incomplete: invalid insight row');
+    return mapped as RawAdDay[];
   }
-
-  if (truncated) {
-    logger.error({ auditId, rows: adDays.length, maxRows }, 'tinkers pull hit row cap — aggregates incomplete');
+  for (let offset = 0; offset < days; offset += sliceDays) {
+    const rows = await readSlice(offset, Math.min(sliceDays, days - offset));
+    if (adDays.length + rows.length > maxRows) throw new Error('audit_data_incomplete: row limit reached');
+    adDays.push(...rows);
   }
-  return { adDays, truncated, failedSlices };
+  return { adDays, truncated: false, failedSlices: 0 };
 }
 
 /** What the owner has already TOLD us, in the shape the cold knowledge bundle
@@ -840,9 +864,10 @@ async function runBridged(args: {
   );
 
   const asOf = new Date().toISOString().slice(0, 10);
+  // A failed or partial date range throws before any dormancy inference or synthesis.
   let pull = await fetchTinkersAdDays(auditId, { asOf });
   const { destinations, landingUrls } = await fetchTinkersDestinations(auditId);
-  let rows = buildColdRows({ adDays: pull.adDays, destinations });
+  let rows = buildColdRows({ adDays: pull.adDays, destinations, asOf });
   if (rows.rowCount === 0) {
     // Dormant account: the standard six months are empty, but the account may
     // have run ads before them. Walk back for the last day it ever spent, then
@@ -855,7 +880,7 @@ async function runBridged(args: {
         'bridged cold audit: dormant account, re-pulling around its last active day',
       );
       pull = await fetchTinkersAdDays(auditId, { asOf: anchor });
-      rows = buildColdRows({ adDays: pull.adDays, destinations });
+      rows = buildColdRows({ adDays: pull.adDays, destinations, asOf });
     }
   }
   logger.info(

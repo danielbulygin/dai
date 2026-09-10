@@ -300,15 +300,52 @@ describe('fetchTinkersAdDays', () => {
     expect(pull.failedSlices).toBe(0);
   });
 
-  it('a failed window costs that window, never the audit', async () => {
+  it('retries a transient failure without dropping that date range', async () => {
     const good = { json: { ok: true, rows: [insightRow()], partial: false } };
-    state.reads['ad-days'] = [good, { status: 502, json: {} }, good, good, good, good];
-
-    const pull = await fetchTinkersAdDays('aud_1', { asOf: '2026-08-20' });
-    expect(pull.failedSlices).toBe(1);
-    expect(pull.adDays).toHaveLength(5);
-    expect(state.logs.some((l) => l.includes('window failed'))).toBe(true);
+    state.reads['ad-days'] = [{status: 502}, good];
+    const pull = await fetchTinkersAdDays('aud_1', {days: 31, asOf: '2026-09-10'});
+    expect(pull.adDays).toHaveLength(1);
+    expect(pull.failedSlices).toBe(0);
+    expect(state.calls[0]?.url).toBe(state.calls[1]?.url);
   });
+  it('discards partial parents and recovers with non-overlapping smaller ranges', async () => {
+    state.reads['ad-days'] = [
+      {json: {ok: true, partial: true, rows: [insightRow()]}},
+      {json: {ok: true, partial: false, rows: [insightRow()]}},
+      {json: {ok: true, partial: false, rows: [insightRow()]}},
+    ];
+    const pull = await fetchTinkersAdDays('aud_1', {days: 4, asOf: '2026-09-10'});
+    expect(pull.adDays).toHaveLength(2);
+    expect(state.calls.map(c => c.url.split('?')[1])).toEqual([
+      'since=2026-09-07&until=2026-09-10',
+      'since=2026-09-09&until=2026-09-10',
+      'since=2026-09-07&until=2026-09-08',
+    ]);
+  });
+  it('rejects unsafe slice bounds before requesting data', async () => {
+    await expect(fetchTinkersAdDays('aud_1', {sliceDays: 0})).rejects.toThrow('Invalid audit read bounds');
+    expect(state.calls).toHaveLength(0);
+  });
+  it('bounds partial recovery even when every range is incomplete', async () => {
+    state.reads['ad-days'] = {json: {ok: true, partial: true, rows: []}};
+    await expect(fetchTinkersAdDays('aud_1')).rejects.toThrow('daily results remain partial');
+    expect(state.calls.length).toBeLessThanOrEqual(6);
+  });
+  it('refuses a persistently partial day', async () => {
+    state.reads['ad-days'] = {json: {ok: true, partial: true, rows: []}};
+    await expect(fetchTinkersAdDays('aud_1', {days: 1})).rejects.toThrow('daily results remain partial');
+  });
+  it('stops before synthesis or dormant probing when recent data fails', async () => {
+    state.reads['ad-days'] = {status: 502};
+    await expect(runBridgedColdAudit({organizationId: 'org_1', auditId: 'aud_1'})).rejects.toThrow('audit_data_incomplete');
+    expect(state.magicAuditOptions).toBeUndefined();
+    expect(state.calls.filter(c => c.url.includes('/ad-days'))).toHaveLength(2);
+  });
+  it('refuses a truncated row budget instead of presenting it as current coverage', async () => {
+    state.reads['ad-days'] = {json: {ok: true, partial: false, rows: [insightRow()]}};
+    await expect(fetchTinkersAdDays('aud_1', {days: 1, maxRows: 0})).rejects.toThrow('row limit reached');
+  });
+
 });
 
 describe('fetchTinkersDestinations + fetchTinkersStoreMedia', () => {
