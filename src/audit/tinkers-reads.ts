@@ -65,7 +65,7 @@ export interface TinkersSeamReads {
     since: string;
     until: string;
   }): Promise<TinkersRead<unknown[]>>;
-  activity(query: { since: string; until: string }): Promise<TinkersRead<unknown[]>>;
+  activity(query: { since: string; until: string; category?: 'budget' }): Promise<TinkersRead<unknown[]>>;
   targeting(): Promise<TinkersRead<SeamTargeting>>;
   pixels(): Promise<TinkersRead<unknown[]>>;
 }
@@ -116,7 +116,12 @@ export const insightRowsSchema = z.union([
 ]);
 
 export const activitySchema = z.union([
-  z.object({ ok: z.literal(true), changes: z.array(z.unknown()), ...partialField }),
+  z.object({
+    ok: z.literal(true), changes: z.array(z.unknown()), ...partialField,
+    nextCursor: z.string().nullable().optional(),
+    partialReason: z.string().nullable().optional(),
+    unreadableBudgetChanges: z.number().int().nonnegative().optional(),
+  }),
   notReady,
 ]);
 
@@ -598,6 +603,7 @@ export function toChangeReceipts(changes: readonly unknown[]): ChangeReceipt[] {
     const receipt: ChangeReceipt = {
       at,
       kind: RECEIPT_KINDS.has(rawKind) ? (rawKind as ReceiptKind) : 'other',
+      objectId: strOrNull(c.objectId),
       objectName: strOrNull(c.objectName),
       objectType: strOrNull(c.objectType),
       fromBudget: numOrNull(c.fromBudget),

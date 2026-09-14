@@ -468,8 +468,8 @@ export function computeLearningLimited(
     summary:
       starved.length === 0
         ? rows.length === 1
-          ? `The one currently active ad set with spend clears Meta's ~50-events-a-week learning bar — the algorithm has enough signal.${scopeClause}`
-          : `All ${rows.length} currently active ad sets with spend clear Meta's ~50-events-a-week learning bar — the algorithm has enough signal everywhere.${scopeClause}`
+          ? `The one currently active ad set with spend averages at least 50 optimization events a week. This volume alone does not establish its learning status.${scopeClause}`
+          : `All ${rows.length} currently active ad sets with spend average at least 50 optimization events a week. This volume alone does not establish their learning status.${scopeClause}`
         : `${starved.length} of the ${rows.length} currently active ad set${rows.length === 1 ? '' : 's'} with spend run${starved.length === 1 ? 's' : ''} below Meta's ~50-events-a-week learning bar — ` +
           `${starvedSharePct}% of active spend (${money(starvedSpend, currency)}/30d) is optimizing on thin signal.${scopeClause}`,
     // Every ad set clearing the bar is this chapter reading clean. The old
@@ -478,7 +478,7 @@ export function computeLearningLimited(
     ...(starved.length === 0
       ? {}
       : {
-          next_step: `Consolidate: merge the starved ad sets into fewer, broader ones so Meta gets at least 50 events a week per set. Fragmentation is paying learning tax on ${starvedSharePct}% of spend.`,
+          next_step: `Check Meta's actual learning status and recent budget edits for these ad sets. If low event volume persists after budgets have been stable, assess whether compatible ad sets could be consolidated to concentrate optimization events.`,
         }),
     data: {
       window_days: 30,
@@ -494,10 +494,7 @@ export function computeLearningLimited(
       starved_count: starved.length,
       starved_spend_share_pct: starvedSharePct,
     },
-    warnings:
-      starvedSharePct >= 30
-        ? [`${starvedSharePct}% of active spend sits in ad sets that can't exit learning — this is structural, not creative.`]
-        : undefined,
+    warnings: ['Weekly event volume is a screening proxy. It does not confirm learning-limited status, a learning reset, or its cause.'],
     derivation:
       `Population: every ad set that is currently ACTIVE and spent in the last 30 days` +
       (inactiveSpenders > 0

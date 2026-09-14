@@ -109,6 +109,40 @@ beforeEach(() => {
 });
 
 describe('AuditOptions.onRowUpdate', () => {
+  it('shares the focused budget read across learning, activity and root cause even when the general log fails', async () => {
+    const activityQueries: Array<{ since: string; until: string; category?: 'budget' }> = [];
+    const today = new Date().toISOString().slice(0, 10);
+    const changes = [
+      { at: `${today}T01:00:00Z`, fromBudget: 100, toBudget: 200 },
+      { at: `${today}T02:00:00Z`, fromBudget: 200, toBudget: 100 },
+      { at: `${today}T03:00:00Z`, fromBudget: 100, toBudget: 300 },
+    ].map((row, i) => ({ ...row, key: `budget_${i}`, objectId: 'adset_1', objectName: 'Broad', kind: row.toBudget > row.fromBudget ? 'budget_increased' : 'budget_decreased' }));
+    let final: Record<string, unknown> = {};
+    await runMagicAudit('', {
+      cold: { ...cold(), accessToken: '', seam: {
+        adSets: async () => ({ state: 'ok', partial: false, data: [{ adsetId: 'adset_1', name: 'Broad', effectiveStatus: 'ACTIVE', optimizationGoal: 'OFFSITE_CONVERSIONS', promotedObjectEventType: 'PURCHASE', campaignId: 'campaign_1' }] }),
+        adSetInsights: async () => ({ state: 'ok', data: [], partial: false }),
+        breakdown: async () => ({ state: 'ok', data: [], partial: false }),
+        activity: async (query) => {
+          activityQueries.push(query);
+          return query.category === 'budget'
+            ? { state: 'ok', partial: false, data: query.until === today ? changes : [] }
+            : { state: 'failed', reason: 'general history timed out' };
+        },
+        targeting: async () => ({ state: 'ok', partial: false, data: { adSets: [], audiences: [] } }),
+        pixels: async () => ({ state: 'ok', partial: false, data: [] }),
+      } },
+      maxCostUsd: 0,
+      onRowUpdate: (patch, meta) => { if (meta.final) final = patch; },
+    });
+    expect(activityQueries.filter((query) => query.category === 'budget')).toHaveLength(3);
+    const sections = final.sections as Record<string, { status: string; data: Record<string, unknown>; summary: string }>;
+    for (const name of ['learning_limited', 'account_activity']) {
+      expect(sections[name]).toMatchObject({ status: 'complete', data: { signal: true, budget_history: { total_edits: 3, signal: true, learning_resets_confirmed: null } } });
+    }
+    expect(sections.account_activity!.summary).toContain('3 budget edits');
+  }, 60_000);
+
   it('changes nothing about the run when absent, and mirrors every patch when present', async () => {
     await runMagicAudit('', { cold: cold(), maxCostUsd: 0 });
     const withoutOption = [...state.updates];

@@ -664,8 +664,33 @@ export async function fetchTinkersBreakdown(
  */
 export async function fetchTinkersActivity(
   auditId: string,
-  query: { since: string; until: string },
+  query: { since: string; until: string; category?: 'budget' },
 ): Promise<TinkersRead<unknown[]>> {
+  if (query.category === 'budget') {
+    const data: unknown[] = [];
+    const seen = new Set<string>();
+    let after: string | undefined;
+    let incomplete = false;
+    // Each provider page fits a request. A busy status log must not crowd out
+    // the budget receipts, and a later failed page must not erase earlier ones.
+    for (let page = 0; page < 32; page += 1) {
+      const params = new URLSearchParams({ since: query.since, until: query.until, category: 'budget', maxPages: '1' });
+      if (after) params.set('after', after);
+      const read = await seamRead(`/api/generation/${auditId}/activity?${params}`, activitySchema, 'budget activity');
+      if (read.state !== 'ok') return page === 0 ? read : { state: 'ok', data, partial: true };
+      data.push(...read.body.changes);
+      incomplete ||= (read.body.unreadableBudgetChanges ?? 0) > 0 ||
+        (read.body.partial === true && read.body.partialReason !== 'page_limit');
+      const cursor = read.body.nextCursor;
+      if (cursor == null) return { state: 'ok', data, partial: incomplete || partialOf(read.body) };
+      if (!/^[A-Za-z0-9._~+/=-]{1,512}$/.test(cursor) || seen.has(cursor)) {
+        return { state: 'ok', data, partial: true };
+      }
+      seen.add(cursor);
+      after = cursor;
+    }
+    return { state: 'ok', data, partial: true };
+  }
   const read = await seamRead(
     `/api/generation/${auditId}/activity?since=${query.since}&until=${query.until}`,
     activitySchema,

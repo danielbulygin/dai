@@ -806,6 +806,40 @@ describe('runBridgedColdAudit idempotency', () => {
 });
 
 describe('the account-structure reads', () => {
+  it('resumes budget history on the same scoped audit and keeps all receipts', async () => {
+    state.reads.activity = [
+      { json: { ok: true, changes: [{ key: 'one' }], partial: true, nextCursor: 'page_two', partialReason: 'page_limit' } },
+      { json: { ok: true, changes: [{ key: 'two' }], partial: false, nextCursor: null, partialReason: null } },
+    ];
+    const result = await fetchTinkersActivity('aud_1', { since: '2026-08-01', until: '2026-08-30', category: 'budget' });
+    expect(result).toEqual({ state: 'ok', data: [{ key: 'one' }, { key: 'two' }], partial: false });
+    expect(state.calls).toHaveLength(2);
+    for (const call of state.calls) {
+      const url = new URL(call.url);
+      expect(url.pathname).toBe('/api/generation/aud_1/activity');
+      expect(url.searchParams.get('category')).toBe('budget');
+      expect(url.searchParams.get('maxPages')).toBe('1');
+      expect(call.auth).toBe('Bearer seam-secret');
+    }
+    expect(new URL(state.calls[1]!.url).searchParams.get('after')).toBe('page_two');
+  });
+
+  it.each(['repeat', 'unsafe', 'failed', 'unreadable'])('preserves partial budget evidence when continuation is %s', async (failure) => {
+    const first = { ok: true, changes: [{ key: 'one' }], partial: true, nextCursor: 'page_two', partialReason: 'page_limit', unreadableBudgetChanges: failure === 'unreadable' ? 1 : 0 };
+    state.reads.activity = [
+      { json: first },
+      failure === 'failed' ? { status: 502, json: {} } : { json: {
+        ok: true, changes: [], partial: failure !== 'unreadable',
+        nextCursor: failure === 'repeat' ? 'page_two' : failure === 'unsafe' ? 'https://example.com?access_token=secret' : null,
+        partialReason: failure === 'unreadable' ? null : 'page_limit',
+      } },
+    ];
+    const result = await fetchTinkersActivity('aud_1', { since: '2026-08-01', until: '2026-08-30', category: 'budget' });
+    expect(result).toEqual({ state: 'ok', data: [{ key: 'one' }], partial: true });
+    expect(state.calls).toHaveLength(2);
+    expect(state.calls.every((call) => !call.url.includes('access_token'))).toBe(true);
+  });
+
   const adSetsBody = {
     ok: true,
     adSets: [

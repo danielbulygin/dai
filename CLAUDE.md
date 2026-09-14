@@ -1,5 +1,7 @@
 # DAI - Daniel's AI
 
+Tinkers audit budget history: `src/audit/budget-history.ts` measures repeated budget edits by provider identity and dated amounts. Budget-category activity uses three bounded 30-day reads with resumable pages and is shared across learning, activity and root-cause findings. Percentage thresholds are screening heuristics; learning resets remain unconfirmed without state-transition evidence. Deploy the additive Tinkers API first. See `docs/factory/2026-09-15-budget-history.md`.
+
 Multi-agent Slack system powered by Claude. Agents live in Slack, respond to @mentions and DMs, collaborate with each other, and learn from feedback.
 
 ## Stack

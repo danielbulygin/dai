@@ -60,6 +60,8 @@ export interface ChangeReceipt {
   /** ISO-8601 timestamp of the change. */
   at: string;
   kind: ReceiptKind;
+  /** Stable provider identity; names can repeat or change. */
+  objectId?: string | null;
   objectName: string | null;
   objectType: string | null;
   /** Major currency units, budget changes only. */
@@ -80,6 +82,7 @@ export interface RootCauseInputs {
    * collapsing into one is a fabricated receipt.
    */
   changes: ChangeReceipt[] | null;
+  changesPartial?: boolean;
   /** The window's last day. Rows after it belong to a window this does not cover. */
   anchorDate?: string | null;
 }
@@ -476,10 +479,13 @@ export function computeRootCause(inp: RootCauseInputs): PackSection {
     ? `We could not read this account's change log, so nothing here says whether anybody touched the ads around that date.`
     : receipts.length > 0
       ? `Around that date, on the ads side: ${receipts.join('; ')}.` + unquotedLine(near.length - receipts.length)
+      : inp.changesPartial
+        ? `No matching changes were found in the retrieved portion around that date. The change history is incomplete, so changes cannot be ruled out.`
       : `Nothing changed on the ads side around that date: no pauses, no restarts, no budget moves. ` +
         `Worth asking what happened in your own world on ${shortDay(startDate)}: a sale ending, a price change, a site update.`;
 
   const warnings: string[] = [];
+  if (inp.changesPartial) warnings.push('The change history is incomplete. These receipts show observed changes, not every change or proof of causation.');
   if (!changeLogRead) {
     warnings.push(
       `This account's change history could not be read, so this story says what moved and never whether somebody moved it.`,

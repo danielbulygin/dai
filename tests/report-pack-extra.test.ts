@@ -119,12 +119,14 @@ describe('computeLearningLimited', () => {
     const d = s.data as { starved_count: number; starved_spend_share_pct: number };
     expect(d.starved_count).toBe(1); // paused set doesn't count
     expect(d.starved_spend_share_pct).toBe(40);
-    expect(s.next_step).toContain('Consolidate');
+    expect(s.next_step).toContain('actual learning status and recent budget edits');
+    expect(s.warnings?.join(' ')).toContain('does not confirm learning-limited status');
   });
 
   it('clean account reads clean', () => {
     const s = computeLearningLimited([adset('a')], new Map([['a', 120]]), new Map([['a', 5000]]), 'EUR');
-    expect(s.summary).toContain('clear');
+    expect(s.summary).toContain('at least 50');
+    expect(s.summary).toContain('does not establish its learning status');
   });
 });
 

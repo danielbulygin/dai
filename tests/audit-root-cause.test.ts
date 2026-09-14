@@ -1,4 +1,8 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+
+// This is a deterministic audit test, not a Slack integration test. Loading
+// the live registry otherwise starts Bolt authentication as an import effect.
+vi.mock('../src/agents/tool-registry.js', () => ({ executeTool: vi.fn() }));
 import {
   BREAK_RATIO,
   MAX_RECEIPTS,
@@ -401,6 +405,12 @@ describe('an unreadable change log and an empty one are different findings', () 
     expect(section.summary).not.toContain('Nothing changed on the ads side');
     expect((section.warnings ?? []).join(' ')).toContain('change history could not be read');
     expect(section.derivation).toContain('no change is claimed either way');
+  });
+
+  it('does not rule out changes when only part of the log was retrieved', () => {
+    const section = computeRootCause({ days, currency: 'USD', changes: [], changesPartial: true });
+    expect(section.summary).not.toContain('Nothing changed on the ads side');
+    expect(section.summary).toContain('changes cannot be ruled out');
   });
 });
 

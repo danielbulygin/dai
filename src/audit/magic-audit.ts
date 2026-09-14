@@ -18,6 +18,7 @@ import {
 } from './report-pack.js';
 import { buildScorecard, buildComparisonSection, type ScorecardInputs, type ScorecardEntry } from './scorecard.js';
 import { computeRootCause, type ChangeReceipt } from './root-cause.js';
+import { computeBudgetHistory, withBudgetHistory } from './budget-history.js';
 import {
   computePlacementBreakdown, computeAudienceBreakdown, computeTargetingSplit, computeLearningLimited,
   computeSaturation, computeCreativeDiversity, computeCohortWave, computeWhatsWorking, computeLandingPages,
@@ -2993,6 +2994,29 @@ export async function runMagicAudit(
     return activityPromise;
   };
 
+  let budgetHistoryPromise: Promise<ReturnType<typeof computeBudgetHistory>> | undefined;
+  let budgetReceipts: ChangeReceipt[] | null = null;
+  const loadBudgetHistory = () => {
+    budgetHistoryPromise ??= (async () => {
+      const asOf = new Date().toISOString().slice(0, 10);
+      const basis = { asOf, windowDays: ACTIVITY_SLICES * ACTIVITY_SLICE_DAYS, currency: client.currency };
+      if (!seam) return computeBudgetHistory({ ...basis, changes: null, partial: true });
+      const reads = await Promise.all(Array.from({ length: ACTIVITY_SLICES }, (_, slice) => seam.activity({
+        since: shiftISO(asOf, slice * ACTIVITY_SLICE_DAYS + (ACTIVITY_SLICE_DAYS - 1)),
+        until: shiftISO(asOf, slice * ACTIVITY_SLICE_DAYS),
+        category: 'budget',
+      })));
+      const available = reads.filter((read): read is Extract<typeof read, { state: 'ok' }> => read.state === 'ok');
+      budgetReceipts = available.length ? toChangeReceipts(available.flatMap((read) => read.data)) : null;
+      return computeBudgetHistory({
+        ...basis,
+        changes: budgetReceipts,
+        partial: available.length !== ACTIVITY_SLICES || available.some((read) => read.partial),
+      });
+    })();
+    return budgetHistoryPromise;
+  };
+
   const RUNNERS: Record<string, () => Promise<Partial<AuditSection>>> = {
     dataset_health: () => runDatasetHealth(code),
     account_structure: () => runAccountStructure(code),
@@ -3141,13 +3165,14 @@ export async function runMagicAudit(
         // the event each ad set is actually optimizing for rather than whatever
         // the account happens to record: an ad set told to find leads is not
         // starved because the account books few purchases.
-        const [adSets, weekly] = await Promise.all([
+        const [adSets, weekly, history] = await Promise.all([
           seamAdSetsRead(seam),
           seam.adSetInsights({
             since: shiftISO(auditWindow.anchorDate, 27),
             until: auditWindow.anchorDate,
             granularity: 'weekly',
           }),
+          loadBudgetHistory(),
         ]);
         if (adSets.state !== 'ok') return seamGapFor(adSets, 'how this account\'s ad sets are configured');
         if (weekly.state !== 'ok') return seamGapFor(weekly, 'this account\'s week-by-week delivery per ad set');
@@ -3158,7 +3183,7 @@ export async function runMagicAudit(
           await seamSpendByAdset(seam),
           client.currency,
         );
-        return weekly.partial || adSets.partial ? withPartial(section, 'weekly ad set') : section;
+        return withBudgetHistory(weekly.partial || adSets.partial ? withPartial(section, 'weekly ad set') : section, history);
       }
       // Weekly optimization-event rate per ad set over the window's last 28 days.
       const cut = shiftISO(auditWindow.anchorDate, 28);
@@ -3169,7 +3194,7 @@ export async function runMagicAudit(
         weekly.set(String(r.adset_id), (weekly.get(String(r.adset_id)) ?? 0) + events / 4);
       }
       const adsets = adsetConfigsForModel.length ? adsetConfigsForModel : await fetchAdsetConfigs(code, client.adAccountId, coldToken);
-      return computeLearningLimited(adsets, weekly, spendByAdset, client.currency);
+      return withBudgetHistory(computeLearningLimited(adsets, weekly, spendByAdset, client.currency), await loadBudgetHistory());
     },
     targeting_split: async () => {
       const kpiByAdset = new Map<string, { value: number; results: number }>();
@@ -3310,13 +3335,20 @@ export async function runMagicAudit(
       return computeAccountFacts({ rows180: packRows180, adNames, partnershipSpendPct: partnershipPct, currency: client.currency });
     },
     account_activity: async () => {
-      const load = await loadActivity();
-      if (!load.ok) return load.gap!;
+      const [load, history] = await Promise.all([loadActivity(), loadBudgetHistory()]);
+      if (!load.ok) {
+        if (!history.data.available) return load.gap!;
+        return {
+          ...history,
+          data: { signal: history.data.signal, budget_history: history.data, general_activity_available: false },
+          warnings: [...(history.warnings ?? []), 'The general activity log was unavailable. These findings cover the separate budget-history read only.'],
+        };
+      }
       // Monthly retainer is nullable — unknown at audit time. This is the wire
       // point: when a lead states what they pay their manager, thread it here to
       // light up cost-per-change. Until then the section reports counts only.
       const monthlyRetainer: number | null = null;
-      return computeAccountActivity({
+      return withBudgetHistory(computeAccountActivity({
         events: load.events,
         currency: client.currency,
         monthlyRetainer,
@@ -3324,10 +3356,10 @@ export async function runMagicAudit(
         actorsAvailable: load.actorsAvailable,
         ...(load.asOf ? { asOf: load.asOf } : {}),
         ...(load.windowDays ? { windowDays: load.windowDays } : {}),
-      });
+      }), history);
     },
     root_cause: async () => {
-      const load = await loadActivity();
+      const [load, history] = await Promise.all([loadActivity(), loadBudgetHistory()]);
       return computeRootCause({
         days: packAccRows90,
         currency: client.currency,
@@ -3336,7 +3368,8 @@ export async function runMagicAudit(
         // list: "nothing changed on the ads side" is a finding this section
         // publishes, and inventing it out of a read that never answered would
         // be the one fabricated receipt in the report.
-        changes: load.ok ? load.receipts : null,
+        changes: load.ok || budgetReceipts !== null ? [...load.receipts, ...(budgetReceipts ?? [])] : null,
+        changesPartial: !load.ok || load.partial || history.data.partial === true,
       });
     },
     audience_segments: async () => {
