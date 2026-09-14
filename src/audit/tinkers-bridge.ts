@@ -80,7 +80,7 @@ const accountSchema = z.union([
 ]);
 
 const adDaysSchema = z.union([
-  z.object({ ok: z.literal(true), rows: z.array(z.unknown()), partial: z.boolean() }),
+  z.object({ ok: z.literal(true), rows: z.array(z.unknown()), partial: z.boolean(), nextCursor: z.string().nullable().optional() }),
   notReady,
 ]);
 
@@ -115,10 +115,19 @@ const contextSchema = z.union([
         pain_point: z.string().nullish(),
         tried: z.array(z.string()).nullish(),
         agency_fee: z.string().nullish(),
+        what_you_sell: z.string().nullish(),
+        sell_to: z.string().nullish(),
+        customer_value: z.string().nullish(),
+        monthly_budget: z.string().nullish(),
+        judge_results: z.string().nullish(),
+        ada_role: z.string().nullish(),
+        success_target: z.string().nullish(),
+        off_limits: z.array(z.string()).nullish(),
       })
       .nullish(),
     rivals: z.array(z.string()).nullish(),
     accountTarget: targetSchema.nullish(),
+    customerFacts: z.array(z.string()).nullish(),
   }),
   notReady,
 ]);
@@ -281,77 +290,120 @@ export function toRawAdDay(row: unknown): RawAdDay | null {
   };
 }
 
-/** Six months of ad-level daily rows, one ≤31-day window per request — their
- *  functions stop at 300 seconds and a window past the cap is REFUSED, so the
- *  slicing is the contract, not an optimization. A failed slice costs that
- *  slice only after retry; an unresolved gap stops the audit.
+/**
+ * Read complete date windows with bounded, resumable pages. Independent windows
+ * run three at a time; a page retry keeps every earlier page. There is no total
+ * wall-clock deadline that a larger account can consume simply by having more
+ * ads. Per-request timeouts, row limits and page limits still bound the work.
  *
- *  SIX_MONTH_DAYS in 31-day slices is still six requests, so the wider pull
- *  costs the same round trips as the old 180/30 tiling did. It is ONE pull:
- *  every window the audit reads (the anchored 30 and 90 days, the six-month
- *  cohorts, the creative inventory) is a filter over these rows. */
+ * Only an explicitly allowed, contiguous recent window may survive an older
+ * failure. The caller must carry its coverage into every report interpretation.
+ */
 export async function fetchTinkersAdDays(
   auditId: string,
-  opts: { days?: number; sliceDays?: number; maxRows?: number; asOf?: string } = {},
-): Promise<{ adDays: RawAdDay[]; truncated: boolean; failedSlices: number }> {
+  opts: {
+    days?: number; sliceDays?: number; maxRows?: number; asOf?: string;
+    allowShorterHistory?: boolean;
+    onProgress?: (progress: { daysRead: number; totalDays: number; rows: number }) => Promise<void>;
+  } = {},
+): Promise<{
+  adDays: RawAdDay[]; truncated: boolean; failedSlices: number;
+  coverage: { since: string; until: string; requestedSince: string; complete: boolean };
+}> {
   const days = opts.days ?? SIX_MONTH_DAYS;
   const sliceDays = opts.sliceDays ?? 31;
   const maxRows = opts.maxRows ?? 150_000;
   const asOf = opts.asOf ?? new Date().toISOString().slice(0, 10);
-
   if (!Number.isInteger(days) || days < 1 || days > SIX_MONTH_DAYS ||
       !Number.isInteger(sliceDays) || sliceDays < 1 || sliceDays > 31 ||
       !Number.isInteger(maxRows) || maxRows < 0) throw new Error('Invalid audit read bounds');
-  const deadline = performance.now() + 180_000;
-  let retainedRows = 0;
-  const adDays: RawAdDay[] = [];
-  // Keep recovery bounded: a large account must not turn a partial response
-  // into unbounded provider traffic. No incomplete pull reaches synthesis.
-  let requests = 0;
-  const requestLimit = 64;
+
+  let readRows = 0;
+  const maxPagesPerWindow = 64;
+  const concurrency = 3;
   async function readSlice(offset: number, length: number): Promise<RawAdDay[]> {
     const until = isoDaysAgo(asOf, offset);
     const since = isoDaysAgo(asOf, offset + length - 1);
-    let page: z.infer<typeof adDaysSchema> | undefined;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      if (requests >= requestLimit) throw new Error('audit_data_incomplete: request limit reached');
-      const remaining = deadline - performance.now();
-      if (remaining <= 0) throw new Error('audit_data_incomplete: read deadline reached');
-      requests += 1;
-      try {
-        page = parseOrThrow(adDaysSchema, await getGeneration(`/api/generation/${auditId}/ad-days?since=${since}&until=${until}`, Math.max(1, Math.min(READ_TIMEOUT_MS, Math.floor(remaining)))), 'ad-days');
-        if (!page.ok) throw new Error('ad-days refused');
-        break;
-      } catch {
-        if (attempt === 1) {
-          logger.warn({ auditId, since, until }, 'audit date range could not be verified');
-          throw new Error('audit_data_incomplete: date range could not be verified');
+    const rows: RawAdDay[] = [];
+    const seen = new Set<string>();
+    let after: string | undefined;
+    for (let pageNumber = 0; pageNumber < maxPagesPerWindow; pageNumber += 1) {
+      const query = new URLSearchParams({ since, until, maxPages: '1' });
+      if (after) query.set('after', after);
+      let page: z.infer<typeof adDaysSchema> | undefined;
+      const started = performance.now();
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          page = parseOrThrow(adDaysSchema, await getGeneration(`/api/generation/${auditId}/ad-days?${query}`), 'ad-days');
+          if (!page.ok) throw new Error('ad-days refused');
+          break;
+        } catch {
+          if (attempt === 1) throw new Error('audit_data_incomplete: date range could not be verified');
         }
       }
+      if (!page?.ok) throw new Error('audit_data_incomplete: date range unavailable');
+      logger.info({ auditId, since, until, page: pageNumber + 1, elapsedMs: Math.round(performance.now() - started), rows: page.rows.length, partial: page.partial }, 'audit daily-results page read');
+      readRows += page.rows.length;
+      if (readRows > maxRows) throw new Error('audit_data_incomplete: row limit reached');
+      const mapped = page.rows.map(toRawAdDay);
+      if (mapped.some((row) => row === null)) throw new Error('audit_data_incomplete: invalid insight row');
+      rows.push(...mapped as RawAdDay[]);
+      if (!page.partial) return rows;
+      if (page.nextCursor) {
+        if (page.nextCursor.length > 512 || !/^[\w\-+/=%.~:@]+$/.test(page.nextCursor) || page.nextCursor.includes('://') || /access_token/i.test(page.nextCursor) || seen.has(page.nextCursor)) {
+          throw new Error('audit_data_incomplete: unsafe or repeated continuation');
+        }
+        seen.add(page.nextCursor);
+        after = page.nextCursor;
+        continue;
+      }
+      // Compatibility with a not-yet-updated peer only. A new peer explicitly
+      // returning no cursor cannot be treated as a completed page or skipped.
+      if (page.nextCursor === undefined && pageNumber === 0 && length > 1) {
+        const recentLength = Math.ceil(length / 2);
+        const recent = await readSlice(offset, recentLength);
+        const older = await readSlice(offset + recentLength, length - recentLength);
+        return [...recent, ...older];
+      }
+      throw new Error(length === 1
+        ? 'audit_data_incomplete: daily results remain partial'
+        : 'audit_data_incomplete: results cannot be resumed');
     }
-    if (!page?.ok) throw new Error('audit_data_incomplete: date range unavailable');
-    if (page.partial) {
-      if (length === 1) throw new Error('audit_data_incomplete: daily results remain partial');
-      // Discard the partial parent entirely. Child ranges never overlap and
-      // the newest dates are always read first, so rows cannot be double counted.
-      const recentLength = Math.ceil(length / 2);
-      const recent = await readSlice(offset, recentLength);
-      const older = await readSlice(offset + recentLength, length - recentLength);
-      return [...recent, ...older];
+    throw new Error('audit_data_incomplete: window page limit reached');
+  }
+
+  const adDays: RawAdDay[] = [];
+  let daysRead = 0;
+  let failedSlices = 0;
+  for (let offset = 0; offset < days; offset += sliceDays * concurrency) {
+    const wave = Array.from({ length: Math.min(concurrency, Math.ceil((days - offset) / sliceDays)) }, (_, index) => {
+      const start = offset + index * sliceDays;
+      return { offset: start, length: Math.min(sliceDays, days - start) };
+    });
+    const results = await Promise.allSettled(wave.map((slice) => readSlice(slice.offset, slice.length)));
+    for (let i = 0; i < results.length; i += 1) {
+      const result = results[i]!;
+      if (result.status === 'rejected') {
+        // Core 30/90-day calculations require at least 91 inclusive dates.
+        // No older successes beyond this gap may be spliced into the report.
+        if (!opts.allowShorterHistory || daysRead < 91) throw result.reason;
+        failedSlices = results.slice(i).filter((r) => r.status === 'rejected').length;
+        logger.warn({ auditId, daysRead, requestedDays: days, failedSlices }, 'audit history shortened to a verified contiguous window');
+        break;
+      }
+      adDays.push(...result.value);
+      daysRead += wave[i]!.length;
+      await opts.onProgress?.({ daysRead, totalDays: days, rows: adDays.length });
     }
-    if (performance.now() > deadline) throw new Error('audit_data_incomplete: read deadline reached');
-    retainedRows += page.rows.length;
-    if (retainedRows > maxRows) throw new Error('audit_data_incomplete: row limit reached');
-    const mapped = page.rows.map(toRawAdDay);
-    if (mapped.some((row) => row === null)) throw new Error('audit_data_incomplete: invalid insight row');
-    return mapped as RawAdDay[];
+    if (failedSlices) break;
   }
-  for (let offset = 0; offset < days; offset += sliceDays) {
-    const rows = await readSlice(offset, Math.min(sliceDays, days - offset));
-    if (adDays.length + rows.length > maxRows) throw new Error('audit_data_incomplete: row limit reached');
-    adDays.push(...rows);
-  }
-  return { adDays, truncated: false, failedSlices: 0 };
+  return {
+    adDays, truncated: daysRead < days, failedSlices,
+    coverage: {
+      since: isoDaysAgo(asOf, daysRead - 1), until: asOf,
+      requestedSince: isoDaysAgo(asOf, days - 1), complete: daysRead === days,
+    },
+  };
 }
 
 /** What the owner has already TOLD us, in the shape the cold knowledge bundle
@@ -368,10 +420,19 @@ export interface TinkersLeadContext {
     pain_point: string | null;
     tried: string[];
     agency_fee: string | null;
+    what_you_sell?: string | null;
+    sell_to?: string | null;
+    customer_value?: string | null;
+    monthly_budget?: string | null;
+    judge_results?: string | null;
+    ada_role?: string | null;
+    success_target?: string | null;
+    off_limits?: string[] | null;
   } | null;
   /** The handles their rival picker queued. Read and logged; no section on the
    *  tokenless path consumes them yet. */
   rivals: string[];
+  customerFacts?: string[];
 }
 
 /**
@@ -400,6 +461,14 @@ export async function fetchTinkersLeadContext(auditId: string): Promise<TinkersL
           pain_point: iv.pain_point ?? null,
           tried: iv.tried ?? [],
           agency_fee: iv.agency_fee ?? null,
+          ...(iv.what_you_sell ? { what_you_sell: iv.what_you_sell } : {}),
+          ...(iv.sell_to ? { sell_to: iv.sell_to } : {}),
+          ...(iv.customer_value ? { customer_value: iv.customer_value } : {}),
+          ...(iv.monthly_budget ? { monthly_budget: iv.monthly_budget } : {}),
+          ...(iv.judge_results ? { judge_results: iv.judge_results } : {}),
+          ...(iv.ada_role ? { ada_role: iv.ada_role } : {}),
+          ...(iv.success_target ? { success_target: iv.success_target } : {}),
+          ...(iv.off_limits?.length ? { off_limits: iv.off_limits } : {}),
         }
       : null;
     return {
@@ -409,6 +478,7 @@ export async function fetchTinkersLeadContext(auditId: string): Promise<TinkersL
       grossMarginPct: page.grossMarginPct ?? null,
       interview,
       rivals: page.rivals ?? [],
+      ...(page.customerFacts?.length ? { customerFacts: page.customerFacts } : {}),
     };
   } catch (err) {
     logger.warn({ err: seamError(err), auditId }, 'tinkers context read failed (the audit runs without a stated target)');
@@ -845,29 +915,22 @@ async function runBridged(args: {
     'bridged cold audit: account resolved, starting tinkers pull',
   );
 
-  // What the owner already told us. Contained: no context means no target to
-  // cite, never a failed audit.
-  const leadContext = await fetchTinkersLeadContext(auditId);
-  logger.info(
-    {
-      organizationId,
-      auditId,
-      goalMetric: leadContext?.goalMetric ?? null,
-      goalSource: leadContext?.goalSource ?? null,
-      hasMargin: leadContext?.grossMarginPct != null,
-      interviewAnswers: leadContext?.interview
-        ? Object.values(leadContext.interview).filter((v) => (Array.isArray(v) ? v.length > 0 : !!v)).length
-        : 0,
-      rivals: leadContext?.rivals.length ?? 0,
-    },
-    'bridged cold audit: owner context resolved',
-  );
-
   const asOf = new Date().toISOString().slice(0, 10);
   // A failed or partial date range throws before any dormancy inference or synthesis.
-  let pull = await fetchTinkersAdDays(auditId, { asOf });
+  const readingLog: Array<{ at: string; line: string }> = [];
+  let pull = await fetchTinkersAdDays(auditId, {
+    asOf, allowShorterHistory: true,
+    onProgress: async ({ daysRead, totalDays }) => {
+      readingLog.push({ at: new Date().toISOString(), line: `Read complete daily results for ${daysRead} of ${totalDays} days.` });
+      try { await reportAuditUpdate(auditId, { workLog: readingLog }); }
+      catch (err) { logger.warn({ auditId, err: seamError(err) }, 'audit read progress could not be displayed'); }
+    },
+  });
   const { destinations, landingUrls } = await fetchTinkersDestinations(auditId);
-  let rows = buildColdRows({ adDays: pull.adDays, destinations, asOf });
+  let rows = buildColdRows({ adDays: pull.adDays, destinations, asOf, readCoverage: pull.coverage });
+  if (!pull.coverage.complete && (rows.rowCount === 0 || pull.coverage.since > rows.window.ninetyStart)) {
+    throw new Error('audit_data_incomplete: verified history does not cover the account comparison window');
+  }
   if (rows.rowCount === 0) {
     // Dormant account: the standard six months are empty, but the account may
     // have run ads before them. Walk back for the last day it ever spent, then
@@ -880,7 +943,7 @@ async function runBridged(args: {
         'bridged cold audit: dormant account, re-pulling around its last active day',
       );
       pull = await fetchTinkersAdDays(auditId, { asOf: anchor });
-      rows = buildColdRows({ adDays: pull.adDays, destinations, asOf });
+      rows = buildColdRows({ adDays: pull.adDays, destinations, asOf, readCoverage: pull.coverage });
     }
   }
   logger.info(
@@ -945,6 +1008,26 @@ async function runBridged(args: {
       await reportAuditFinalize(auditId);
     });
 
+  // What the owner already told us. Contained: no context means no target to
+  // cite, never a failed audit.
+  const leadContext = await fetchTinkersLeadContext(auditId);
+  logger.info(
+    {
+      organizationId,
+      auditId,
+      goalMetric: leadContext?.goalMetric ?? null,
+      goalSource: leadContext?.goalSource ?? null,
+      hasMargin: leadContext?.grossMarginPct != null,
+      interviewAnswers: leadContext?.interview
+        ? Object.values(leadContext.interview).filter((v) => (Array.isArray(v) ? v.length > 0 : !!v)).length
+        : 0,
+      rivals: leadContext?.rivals.length ?? 0,
+      customerFacts: leadContext?.customerFacts?.length ?? 0,
+      goalValue: leadContext?.goalValue ?? null,
+    },
+    'bridged cold audit: owner context resolved',
+  );
+
   const result = await runMagicAudit('', {
     maxCostUsd: args.maxCostUsd,
     skipSections: args.skipSections,
@@ -967,6 +1050,7 @@ async function runBridged(args: {
       goalSource: leadContext?.goalSource ?? null,
       grossMarginPct: leadContext?.grossMarginPct ?? null,
       interview: leadContext?.interview ?? null,
+      customerFacts: leadContext?.customerFacts ?? [],
       storeMedia,
       landingUrls,
       // The account-structure reads, bound to this audit id. With them the

@@ -1,4 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+
+// These window checks must not initialise a real Slack client via audit imports.
+vi.mock('../src/slack/app.js', () => ({ slackApp: { client: {} } }));
 import {
   ANCHOR_GRACE_DAYS,
   anchoredWindowBrief,

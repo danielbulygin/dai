@@ -18,7 +18,7 @@ const { state } = vi.hoisted(() => ({
      *  per call, so a test can fail one window out of six. */
     reads: {} as Record<
       string,
-      { status?: number; json?: unknown; throws?: Error } | Array<{ status?: number; json?: unknown; throws?: Error }>
+      { status?: number; json?: unknown; throws?: Error } | Array<{ status?: number; json?: unknown; throws?: Error }> | ((url: string) => Promise<{ status?: number; json?: unknown; throws?: Error }>)
     >,
     logs: [] as string[],
     // The real column patches magic-audit writes, in the order it writes them
@@ -92,7 +92,7 @@ vi.stubGlobal('fetch', async (url: string, init?: { method?: string; headers?: R
   if (u.includes('/api/generation/')) {
     const seg = u.match(/\/api\/generation\/[^/]+\/([a-z-]+)/)?.[1] ?? '';
     const handler = state.reads[seg];
-    next = Array.isArray(handler) ? handler.shift() : handler;
+    next = Array.isArray(handler) ? handler.shift() : typeof handler === 'function' ? await handler(u) : handler;
   } else {
     next = state.responses.shift();
   }
@@ -316,12 +316,55 @@ describe('fetchTinkersAdDays', () => {
     ];
     const pull = await fetchTinkersAdDays('aud_1', {days: 4, asOf: '2026-09-10'});
     expect(pull.adDays).toHaveLength(2);
-    expect(state.calls.map(c => c.url.split('?')[1])).toEqual([
+    expect(state.calls.map(c => c.url.split('?')[1]?.replace('&maxPages=1', ''))).toEqual([
       'since=2026-09-07&until=2026-09-10',
       'since=2026-09-09&until=2026-09-10',
       'since=2026-09-07&until=2026-09-08',
     ]);
   });
+  it('retains complete pages and resumes the next page without rereading them', async () => {
+    state.reads['ad-days'] = [
+      { json: { ok: true, rows: [insightRow({ entityId: 'ad_first' })], partial: true, nextCursor: 'next_page' } },
+      { json: { ok: true, rows: [insightRow({ entityId: 'ad_second' })], partial: false, nextCursor: null } },
+    ];
+    const pull = await fetchTinkersAdDays('aud_1', { days: 31, asOf: '2026-09-14' });
+    expect(pull.adDays.map((row) => row.ad_id)).toEqual(['ad_first', 'ad_second']);
+    const queries = state.calls.map((call) => new URL(call.url).searchParams);
+    expect(queries.map((query) => query.get('after'))).toEqual([null, 'next_page']);
+    expect(queries.every((query) => query.get('since') === '2026-08-15' && query.get('maxPages') === '1')).toBe(true);
+    expect(pull.coverage).toEqual({ since: '2026-08-15', until: '2026-09-14', requestedSince: '2026-08-15', complete: true });
+  });
+  it('bounds independent reads to three concurrent windows', async () => {
+    let active = 0; let peak = 0;
+    state.reads['ad-days'] = async () => {
+      active += 1; peak = Math.max(active, peak);
+      await new Promise((resolve) => setTimeout(resolve, 1)); active -= 1;
+      return { json: { ok: true, rows: [insightRow()], partial: false, nextCursor: null } };
+    };
+    await fetchTinkersAdDays('aud_1', { asOf: '2026-09-14' });
+    expect(peak).toBe(3);
+  });
+  it('labels a complete contiguous recent window when older history fails', async () => {
+    state.reads['ad-days'] = async (url) => new URL(url).searchParams.get('since')! >= '2026-06-14'
+      ? { json: { ok: true, rows: [insightRow()], partial: false, nextCursor: null } } : { status: 502 };
+    const pull = await fetchTinkersAdDays('aud_1', { asOf: '2026-09-14', allowShorterHistory: true });
+    expect(pull.adDays).toHaveLength(3);
+    expect(pull.truncated).toBe(true);
+    expect(pull.coverage).toEqual({ since: '2026-06-14', until: '2026-09-14', requestedSince: '2026-03-16', complete: false });
+    expect(pull.failedSlices).toBe(3);
+  });
+  it('rejects a gap in the core even when an older window completed', async () => {
+    state.reads['ad-days'] = async (url) => new URL(url).searchParams.get('since') === '2026-07-15'
+      ? { status: 502 } : { json: { ok: true, rows: [insightRow()], partial: false, nextCursor: null } };
+    await expect(fetchTinkersAdDays('aud_1', { asOf: '2026-09-14', allowShorterHistory: true })).rejects.toThrow('audit_data_incomplete');
+  });
+  it('refuses repeated or absent continuation rather than counting partial data twice', async () => {
+    state.reads['ad-days'] = { json: { ok: true, rows: [insightRow()], partial: true, nextCursor: 'same_page' } };
+    await expect(fetchTinkersAdDays('aud_1', { days: 31 })).rejects.toThrow('repeated continuation');
+    state.reads['ad-days'] = { json: { ok: true, rows: [insightRow()], partial: true, nextCursor: null } };
+    await expect(fetchTinkersAdDays('aud_1', { days: 31 })).rejects.toThrow('cannot be resumed');
+  });
+
   it('rejects unsafe slice bounds before requesting data', async () => {
     await expect(fetchTinkersAdDays('aud_1', {sliceDays: 0})).rejects.toThrow('Invalid audit read bounds');
     expect(state.calls).toHaveLength(0);
@@ -329,7 +372,7 @@ describe('fetchTinkersAdDays', () => {
   it('bounds partial recovery even when every range is incomplete', async () => {
     state.reads['ad-days'] = {json: {ok: true, partial: true, rows: []}};
     await expect(fetchTinkersAdDays('aud_1')).rejects.toThrow('daily results remain partial');
-    expect(state.calls.length).toBeLessThanOrEqual(6);
+    expect(state.calls.length).toBeLessThanOrEqual(18);
   });
   it('refuses a persistently partial day', async () => {
     state.reads['ad-days'] = {json: {ok: true, partial: true, rows: []}};
@@ -339,7 +382,7 @@ describe('fetchTinkersAdDays', () => {
     state.reads['ad-days'] = {status: 502};
     await expect(runBridgedColdAudit({organizationId: 'org_1', auditId: 'aud_1'})).rejects.toThrow('audit_data_incomplete');
     expect(state.magicAuditOptions).toBeUndefined();
-    expect(state.calls.filter(c => c.url.includes('/ad-days'))).toHaveLength(2);
+    expect(state.calls.filter(c => c.url.includes('/ad-days'))).toHaveLength(6);
   });
   it('refuses a truncated row budget instead of presenting it as current coverage', async () => {
     state.reads['ad-days'] = {json: {ok: true, partial: false, rows: [insightRow()]}};
@@ -588,7 +631,7 @@ describe('runBridgedColdAudit reporting', () => {
 
     // Contract v1.1: content is ALL partials — the accumulated row included —
     // and the run ends with the contentless finalize.
-    expect(posted.map((b) => Object.keys(b).filter((k) => k !== 'auditId' && k !== 'partial'))).toEqual([
+    expect(posted.slice(6).map((b) => Object.keys(b).filter((k) => k !== 'auditId' && k !== 'partial'))).toEqual([
       ['recognition'],
       ['workLog'],
       ['sections', 'costUsd'],
@@ -610,6 +653,25 @@ describe('runBridgedColdAudit reporting', () => {
     // Nothing stated yet: the audit runs on its honest defaults.
     expect(cold.goalMetric).toBeNull();
     expect(cold.grossMarginPct).toBeNull();
+  });
+
+  it('reads the latest business answers after all account data and media work', async () => {
+    state.reads['ad-days'] = async () => {
+      state.reads.context = { json: {
+        ok: true, goal: { metric: 'roas', value: 2 }, grossMarginPct: null,
+        interview: { what_you_sell: 'Alcohol-free drinks', judge_results: 'ROAS should be above 2 in Ads Manager.' },
+        customerFacts: ['Customers should buy our products.'], rivals: [], accountTarget: null,
+      } };
+      return { json: { ok: true, rows: [insightRow()], partial: false, nextCursor: null } };
+    };
+    await runBridgedColdAudit({ organizationId: 'org_1', auditId: 'aud_1' });
+    const contextIndex = state.calls.findIndex((call) => call.url.endsWith('/context'));
+    const lastData = state.calls.findLastIndex((call) => call.url.includes('/ad-days') || call.url.includes('/creative-media'));
+    expect(contextIndex).toBeGreaterThan(lastData);
+    expect(state.magicAuditOptions?.cold).toMatchObject({ goalMetric: 'roas', goalValue: 2,
+      interview: { what_you_sell: 'Alcohol-free drinks', judge_results: 'ROAS should be above 2 in Ads Manager.' },
+      customerFacts: ['Customers should buy our products.'],
+    });
   });
 
   it('threads the owner\'s own goal, margin and answers into the audit', async () => {
@@ -651,7 +713,7 @@ describe('runBridgedColdAudit reporting', () => {
     // Five of the six orchestrator patches carry content; the sixth is dropped.
     // The accumulated row then goes out as one more partial.
     const partials = posted.filter((b) => b.partial === true);
-    expect(partials).toHaveLength(state.orchestratorPatches.length - 1 + 1);
+    expect(partials).toHaveLength(6 + state.orchestratorPatches.length - 1 + 1);
     expect(partials.some((b) => Object.keys(b).join() === 'auditId,partial,costUsd')).toBe(false);
     expect(state.logs.some((l) => l.includes('not recorded'))).toBe(false);
   });

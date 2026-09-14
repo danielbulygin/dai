@@ -28,7 +28,16 @@ export const SIX_MONTH_DAYS = 183;
 /** How stale the last spending day may be before the window anchors to it. */
 export const ANCHOR_GRACE_DAYS = 3;
 
+export interface AuditReadCoverage {
+  since: string;
+  until: string;
+  requestedSince: string;
+  complete: boolean;
+}
+
 export interface AuditWindow {
+  /** Verified date coverage from a paginated bridge pull, including empty days. */
+  readCoverage?: AuditReadCoverage;
   /** The calendar day the audit ran (YYYY-MM-DD, UTC). */
   asOf: string;
   /** Newest day the ACCOUNT spent money, or null when it never did. */
@@ -123,11 +132,20 @@ export function shortDay(iso: string): string {
  * 20 Jul" are different claims and only one of them is true here.
  */
 export function anchoredWindowNote(w: AuditWindow): string | null {
-  if (!w.anchored || !w.lastSpendDate) return null;
+  const coverage = readCoverageNote(w);
+  if (!w.anchored || !w.lastSpendDate) return coverage;
   return (
     `This account last spent on ${shortDay(w.lastSpendDate)}. ` +
-    'Every 30-day figure reads the 30 days ending there, not the calendar month just gone.'
+    'Every 30-day figure reads the 30 days ending there, not the calendar month just gone.' +
+    (coverage ? ` ${coverage}` : '')
   );
+}
+
+/** A shortened read is explicit on the report and in every synthesis prompt. */
+export function readCoverageNote(w: AuditWindow): string | null {
+  const coverage = w.readCoverage;
+  if (!coverage || coverage.complete) return null;
+  return `This audit covers complete daily results from ${coverage.since} through ${coverage.until}. Earlier history could not be verified, so six-month comparisons are unavailable.`;
 }
 
 /**
@@ -136,7 +154,9 @@ export function anchoredWindowNote(w: AuditWindow): string | null {
  * is today's, in which case the prompt is byte-identical to before.
  */
 export function anchoredWindowBrief(w: AuditWindow): string | null {
-  if (!w.anchored || !w.lastSpendDate) return null;
+  const coverage = readCoverageNote(w);
+  const coverageRule = coverage ? `${coverage} Treat every longer-history input as the VERIFIED PERIOD only, never as six months, a lifetime, or evidence of when an ad first launched. Missing dates are unknown, not zero. Do not infer results from the unavailable earlier period.` : '';
+  if (!w.anchored || !w.lastSpendDate) return coverageRule || null;
   const label = shortDay(w.anchorDate);
   return (
     `ANCHORED WINDOW (this account is not spending today): its last spending day was ${label}` +
@@ -146,7 +166,8 @@ export function anchoredWindowBrief(w: AuditWindow): string | null {
     `"the 30 days ending ${label}" and "the 90 days ending ${label}". ` +
     `Never write "the last 30 days", "the past month", "currently", "right now" or "today" about these numbers. ` +
     `Write "the 30 days ending ${label}" or "the account's last 30 active days" instead. ` +
-    `Where it matters to the reader, say plainly that the account has not spent since ${label}.`
+    `Where it matters to the reader, say plainly that the account has not spent since ${label}.` +
+    (coverageRule ? ` ${coverageRule}` : '')
   );
 }
 
@@ -159,7 +180,12 @@ export function anchoredWindowBrief(w: AuditWindow): string | null {
  * days" is measured from its own last delivery day and is already anchored.
  */
 export function anchorWindowWords(text: string, w: AuditWindow): string {
-  if (!w.anchored || typeof text !== 'string' || text.length === 0) return text;
+  if (typeof text !== 'string' || text.length === 0) return text;
+  if (w.readCoverage && !w.readCoverage.complete) {
+    text = text.replace(/\b(?:(?:the )?(?:last |past )?)?(?:six|6)[ -]months?\b/gi, 'the verified period')
+      .replace(/\b(?:(?:the )?(?:last |past )?)?(?:180|183)[ -]days?\b/gi, 'the verified period');
+  }
+  if (!w.anchored) return text;
   const label = shortDay(w.anchorDate);
   return (
     text

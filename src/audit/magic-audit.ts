@@ -131,6 +131,7 @@ export interface ColdInjection {
   grossMarginPct?: number | null;
   /** The owner's own answers from the funnel interview, cited as theirs. */
   interview?: OwnerInterview | null;
+  customerFacts?: string[];
   /** Tinkers media store creatives by provider ad id (the tokenless path's
    *  media + copy source for creative_analysis). */
   storeMedia?: Map<string, StoreMediaCandidate> | null;
@@ -1957,6 +1958,7 @@ export function coldRecognition(cold: ColdInjection, currency: string): Recognit
       window_start: w.coreStart,
       window_end: w.anchorDate,
       window_anchored: w.anchored,
+      ...(w.readCoverage ? { history_start: w.readCoverage.since, history_end: w.readCoverage.until, history_complete: w.readCoverage.complete } : {}),
       ...(note ? { window_note: note } : {}),
     },
     totals30: aggregateDaily(cold.rows.accFull30 as unknown as Array<Record<string, unknown>>),
@@ -2405,7 +2407,7 @@ export async function runMagicAudit(
   const windowBrief = anchoredWindowBrief(auditWindow);
   /** The one rewrite that keeps a finished sentence honest about its window. */
   const anchorWords = <T,>(value: T): T =>
-    auditWindow.anchored ? mapDeepStrings(value, (text) => anchorWindowWords(text, auditWindow)) : value;
+    (auditWindow.anchored || auditWindow.readCoverage?.complete === false) ? mapDeepStrings(value, (text) => anchorWindowWords(text, auditWindow)) : value;
 
   // Phase B (context layer): assemble this client's knowledge bundle ONCE
   // (targets/KPI config + client-scoped learnings + the intelligence file) and
@@ -2424,6 +2426,7 @@ export async function runMagicAudit(
       grossMarginPct,
       breakevenRoas,
       interview: cold.interview,
+      customerFacts: cold.customerFacts,
     });
   } else {
     try {

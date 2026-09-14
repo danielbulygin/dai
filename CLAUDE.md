@@ -80,3 +80,7 @@ service. Units checked in at `deploy/systemd/`.
 
 `dai.service` on the droplet (139.59.144.194): `cd /root/dai && git pull --ff-only && pnpm build && systemctl restart dai`.
 Restart bounces ALL agents (Ada/Piper/Maya/Jasmin). Env: `/root/dai/.env`.
+
+## Tinkers signup recovery — 14 September 2026
+
+The bridge resumes bounded daily-result pages, with three independent windows at once and explicit verified coverage for unavailable older history. Current owner context is read just before synthesis. No partial core window reaches synthesis. Deploy the additive Tinkers API first. See `docs/factory/2026-09-14-signup-recovery.md` for measurements, bounds, checks and rollback order.
