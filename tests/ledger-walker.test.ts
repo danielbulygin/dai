@@ -11,6 +11,8 @@
  *      section gets an outcome but no follow-up line, one thread gets one line,
  *      and the section caps at 3 with closures winning the slots.
  *   4. No relative day words. Days are named via dayLabel or not at all.
+ *   5. Monday's rollup judges the whole verified weekend as one window, and a
+ *      window too thin to judge parks the thread instead of killing it.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -392,5 +394,189 @@ describe('follow-up lines', () => {
       // And the day that IS named is named the way the brief names days.
       expect(w!.line).toContain('Wed, Aug 5');
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Monday's weekend rollup — the window is the unit of judgement, not one day
+// ---------------------------------------------------------------------------
+
+describe('the weekend rollup walk', () => {
+  const THU = '2026-08-06'; // the data day the story was flagged on
+  const FRI = '2026-08-07';
+  const SAT = '2026-08-08';
+  const SUN = '2026-08-09'; // Monday's brief reports through here
+  const WEEKEND = [FRI, SAT, SUN];
+
+  /** An explicit calendar for one ad — a weekend fixture needs uneven days. */
+  function days(adId: string, spec: Record<string, DaySpec>): WalkAdDay[] {
+    return Object.entries(spec).map(([date, s]) => ({
+      date,
+      ad_id: adId,
+      spend: s.spend,
+      purchases: s.purchases ?? 0,
+      impressions: 20_000,
+      link_clicks: 300,
+    }));
+  }
+
+  /** Monday's args: the same fixture, judged across the verified weekend. */
+  function weekendArgs(over: Partial<WalkArgs> = {}): WalkArgs {
+    return args({ yesterday: SUN, windowDates: WEEKEND, ...over });
+  }
+
+  /** The identical fixture as the old caller sent it: Sunday alone. */
+  function sundayOnlyArgs(over: Partial<WalkArgs> = {}): WalkArgs {
+    return args({ yesterday: SUN, ...over });
+  }
+
+  describe('cpa_shift across the weekend', () => {
+    const claim = insight('w1', 'cpa_shift', { trailing_cpa: 30, rel_change: 1.5 }, THU);
+    // Weekdays at $300 for 10 purchases → $30 usual. The weekend stays
+    // expensive across Fri+Sat, and Sunday is the thin day that used to decide.
+    const ads = days('w1', {
+      '2026-08-04': { spend: 300, purchases: 10 },
+      '2026-08-05': { spend: 300, purchases: 10 },
+      [THU]: { spend: 300, purchases: 10 },
+      [FRI]: { spend: 300, purchases: 2 },
+      [SAT]: { spend: 300, purchases: 2 },
+      [SUN]: { spend: 100, purchases: 0 },
+    });
+
+    it('judges the pooled weekend, so a thin Sunday no longer kills the thread', () => {
+      // Pooled: $700 on 4 purchases = $175 vs $30 usual.
+      const [w] = walkAdInsights(weekendArgs({ insights: [claim], ads }));
+      expect(w!.outcome).toBe('confirmed');
+      expect(w!.value).toBe(175);
+      expect(w!.line).toContain('still elevated');
+      expect(w!.line).toContain('$175.00');
+      expect(w!.line).toContain('Fri, Aug 7');
+      expect(w!.line).toContain('Sun, Aug 9');
+      expect(w!.evidence.window_spend).toBe(700);
+      expect(w!.evidence.window_purchases).toBe(4);
+    });
+
+    it('the same fixture judged on Sunday alone goes stale — the bug this fixes', () => {
+      const [w] = walkAdInsights(sundayOnlyArgs({ insights: [claim], ads }));
+      expect(w!.outcome).toBe('stale');
+      expect(w!.line).toContain('no longer enough delivery to judge');
+    });
+
+    it('a weekend is never its own comparison — the trail stops at the window', () => {
+      // Two cheap weekdays ($10 CPA) then a heavy $30-CPA weekend. Pooling the
+      // weekend into its own baseline would read $28.75 usual → "resolved".
+      const ads = days('w2', {
+        '2026-08-05': { spend: 30, purchases: 3 },
+        [THU]: { spend: 30, purchases: 3 },
+        [FRI]: { spend: 900, purchases: 30 },
+        [SAT]: { spend: 900, purchases: 30 },
+        [SUN]: { spend: 900, purchases: 30 },
+      });
+      const [w] = walkAdInsights(
+        weekendArgs({
+          insights: [insight('w2', 'cpa_shift', { trailing_cpa: 10, rel_change: 1.5 }, THU)],
+          ads,
+        }),
+      );
+      expect(w!.outcome).toBe('confirmed');
+      expect(w!.evidence.trailing_cpa).toBe(10);
+      expect(w!.evidence.trailing_days).toBe(2);
+    });
+  });
+
+  describe('a weekend too thin to judge', () => {
+    const claim = insight('t1', 'cpa_shift', { trailing_cpa: 30, rel_change: 1.5 }, THU);
+    // Pooled 2 purchases — under the small-numbers floor however you slice it.
+    const ads = days('t1', {
+      '2026-08-05': { spend: 300, purchases: 10 },
+      [THU]: { spend: 300, purchases: 10 },
+      [FRI]: { spend: 120, purchases: 1 },
+      [SAT]: { spend: 100, purchases: 1 },
+      [SUN]: { spend: 80, purchases: 0 },
+    });
+
+    it('a rollup stale keeps the row active — a thin weekend is not an ending', () => {
+      const [w] = walkAdInsights(weekendArgs({ insights: [claim], ads }));
+      expect(w!.outcome).toBe('stale');
+      expect(w!.keepActive).toBe(true);
+    });
+
+    it('a thin single day still closes the row, exactly as it always did', () => {
+      const [w] = walkAdInsights(sundayOnlyArgs({ insights: [claim], ads }));
+      expect(w!.outcome).toBe('stale');
+      expect(w!.keepActive).toBeFalsy();
+    });
+  });
+
+  describe('zero_results_on_spend across the weekend', () => {
+    const claim = insight('z9', 'zero_results_on_spend', { yesterday_spend: 320 }, THU);
+
+    it('spend that persists all weekend with nothing back → confirmed, pooled', () => {
+      // $280/day average against a $320 origin day: the same story, still burning.
+      const ads = days('z9', {
+        '2026-08-05': { spend: 320, purchases: 8 },
+        [THU]: { spend: 320, purchases: 0 },
+        [FRI]: { spend: 300, purchases: 0 },
+        [SAT]: { spend: 280, purchases: 0 },
+        [SUN]: { spend: 260, purchases: 0 },
+      });
+      const [w] = walkAdInsights(weekendArgs({ insights: [claim], ads }));
+      expect(w!.outcome).toBe('confirmed');
+      expect(w!.value).toBe(0);
+      expect(w!.line).toContain('still nothing back on $840');
+      expect(w!.evidence.window_purchases).toBe(0);
+    });
+
+    it("one purchase on Saturday resolves it, though Sunday alone saw none", () => {
+      const ads = days('z9', {
+        '2026-08-05': { spend: 320, purchases: 8 },
+        [THU]: { spend: 320, purchases: 0 },
+        [FRI]: { spend: 300, purchases: 0 },
+        [SAT]: { spend: 280, purchases: 1 },
+        [SUN]: { spend: 260, purchases: 0 },
+      });
+      const [w] = walkAdInsights(weekendArgs({ insights: [claim], ads }));
+      expect(w!.outcome).toBe('resolved');
+      expect(w!.value).toBe(1);
+      expect(w!.line).toContain('converting again, 1 purchase');
+      expect(w!.line).toContain('Sat, Aug 8'); // the day it landed, named
+
+      // Sunday alone never sees Saturday's purchase and re-confirms the claim.
+      const [sundayOnly] = walkAdInsights(sundayOnlyArgs({ insights: [claim], ads }));
+      expect(sundayOnly!.outcome).toBe('confirmed');
+    });
+  });
+
+  describe('spend_share_shift across the weekend', () => {
+    const claim = insight(
+      's9',
+      'spend_share_shift',
+      { yesterday_spend: 400, yesterday_share: 0.4, trailing_share: 0.1 },
+      THU,
+    );
+    // $100/day usual on a $1000/day account → 10% share. The ad takes the
+    // weekend's delivery on Fri+Sat and hands it back on Sunday.
+    const ads = days('s9', {
+      '2026-08-05': { spend: 100, purchases: 3 },
+      [THU]: { spend: 100, purchases: 3 },
+      [FRI]: { spend: 450, purchases: 4 },
+      [SAT]: { spend: 450, purchases: 4 },
+      [SUN]: { spend: 60, purchases: 1 },
+    });
+
+    it("judges the ad's window spend against the account's window spend", () => {
+      // $960 of a $3000 weekend = 32% vs 10% usual.
+      const [w] = walkAdInsights(weekendArgs({ insights: [claim], ads, accountSpendWindow: 3000 }));
+      expect(w!.outcome).toBe('confirmed');
+      expect(w!.value).toBe(0.32);
+      expect(w!.line).toContain('10% → 32%');
+      expect(w!.evidence.account_spend_window).toBe(3000);
+    });
+
+    it('Sunday alone reads 6% of one day and wrongly closes the story', () => {
+      const [w] = walkAdInsights(sundayOnlyArgs({ insights: [claim], ads }));
+      expect(w!.outcome).toBe('resolved');
+      expect(w!.line).toContain('back to its usual share');
+    });
   });
 });

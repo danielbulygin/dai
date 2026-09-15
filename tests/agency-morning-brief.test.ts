@@ -526,6 +526,42 @@ describe("detectNewAds over a weekend window — the Saturday launch that used t
     expect(fresh).toHaveLength(1);
     expect(fresh[0]).toMatchObject({ adId: 'sat-launch', firstSpendDate: '2026-08-08', spend: 120 });
   });
+
+  // The partly verified rollup: Friday failed the honesty gate, so the VERIFIED
+  // window starts Saturday — but a launch that first spent on that unverified
+  // Friday must not be disqualified by its own missing day.
+  describe('an unverified Friday under the seen-before boundary', () => {
+    const VERIFIED = ['2026-08-08', '2026-08-09'];
+    const FRIDAY = '2026-08-07';
+    const withFridayLaunch = [
+      ...ads,
+      row(FRIDAY, 'fri-launch', 90, 0),
+      row('2026-08-08', 'fri-launch', 140, 2),
+      row('2026-08-09', 'fri-launch', 160, 2),
+    ];
+
+    it('this is the bug: with no boundary, the unverified Friday makes its own launch "seen before"', async () => {
+      const fresh = await detectNewAds('client-1', withFridayLaunch, VERIFIED);
+      expect(fresh.map((f) => f.adId)).not.toContain('fri-launch');
+    });
+
+    it('the boundary keeps the launch, names its TRUE Friday, and quotes only verified spend', async () => {
+      const fresh = await detectNewAds('client-1', withFridayLaunch, VERIFIED, FRIDAY);
+      const launch = fresh.find((f) => f.adId === 'fri-launch');
+      expect(launch).toMatchObject({ firstSpendDate: FRIDAY, spend: 300, results: 4 });
+    });
+
+    it('an ad spending before the boundary is still not new', async () => {
+      const fresh = await detectNewAds('client-1', withFridayLaunch, VERIFIED, FRIDAY);
+      expect(fresh.map((f) => f.adId)).not.toContain('veteran');
+    });
+
+    it('a boundary equal to the window start changes nothing', async () => {
+      const withBoundary = await detectNewAds('client-1', ads, WEEKEND, WEEKEND[0]);
+      const without = await detectNewAds('client-1', ads, WEEKEND);
+      expect(withBoundary).toEqual(without);
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

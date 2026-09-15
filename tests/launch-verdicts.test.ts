@@ -300,6 +300,145 @@ describe('evaluateLaunches — the calendar floor', () => {
   });
 });
 
+describe('evaluateLaunches — checkpoints cross the weekend gap', () => {
+  // Monday's brief evaluates as-of Sunday, the last day of the Fri+Sat+Sun
+  // rollup; the last covered morning before it was Friday's, as-of Thursday.
+  // These cases pin the crossing rule: a day-1 or day-3 checkpoint the
+  // weekend swallowed fires on Monday, and only once.
+  const sunday = '2026-08-09';
+  const priorThursday = '2026-08-06';
+
+  it('Thursday launch, day 3 falls on the weekend: Monday fires the checkpoint at day 4', () => {
+    const out = evaluateLaunches(
+      args({
+        expectedCpa: 100,
+        accountTrailingCpa: null,
+        yesterday: sunday,
+        previousReportingDay: priorThursday,
+        watches: [watch('w1', '2026-08-06')],
+        ads: rows('w1', [
+          { date: '2026-08-06', spend: 40 },
+          { date: '2026-08-07', spend: 40 },
+          { date: '2026-08-08', spend: 40 },
+          { date: sunday, spend: 40 },
+        ]),
+      }),
+    );
+    expect(out).toHaveLength(1);
+    const v = out[0]!;
+    expect(v.kind).toBe('checkpoint');
+    expect(v.ageDays).toBe(4);
+    expect(v.line).toContain('day 4');
+    expect(v.evidence.checkpoint_crossed).toBe(3);
+    expect(v.evidence.previous_reporting_day).toBe(priorThursday);
+    expect(v.isFinal).toBe(false);
+  });
+
+  it('Wednesday launch skips 3 → 5 over the rollup and still crosses day 3', () => {
+    const out = evaluateLaunches(
+      args({
+        expectedCpa: 100,
+        accountTrailingCpa: null,
+        yesterday: sunday,
+        previousReportingDay: priorThursday,
+        watches: [watch('w2', '2026-08-05')],
+        ads: rows('w2', [
+          { date: '2026-08-05', spend: 35 },
+          { date: '2026-08-06', spend: 35 },
+          { date: '2026-08-07', spend: 35 },
+          { date: '2026-08-08', spend: 35 },
+          { date: sunday, spend: 35 },
+        ]),
+      }),
+    );
+    expect(out).toHaveLength(1);
+    const v = out[0]!;
+    expect(v.kind).toBe('checkpoint');
+    expect(v.ageDays).toBe(5);
+    expect(v.evidence.checkpoint_crossed).toBe(3);
+  });
+
+  it("Tuesday after the rollup does not fire it again — Monday's brief already covered day 3", () => {
+    const out = evaluateLaunches(
+      args({
+        expectedCpa: 100,
+        accountTrailingCpa: null,
+        yesterday: '2026-08-10',
+        previousReportingDay: sunday,
+        watches: [watch('w3', '2026-08-06')],
+        ads: rows('w3', [
+          { date: '2026-08-06', spend: 35 },
+          { date: '2026-08-07', spend: 35 },
+          { date: '2026-08-08', spend: 35 },
+          { date: '2026-08-09', spend: 35 },
+          { date: '2026-08-10', spend: 35 },
+        ]),
+      }),
+    );
+    expect(out).toHaveLength(0);
+  });
+
+  it('Saturday launch first seen Monday at day 2 still gets its day-1 checkpoint', () => {
+    const out = evaluateLaunches(
+      args({
+        expectedCpa: 100,
+        accountTrailingCpa: null,
+        yesterday: sunday,
+        previousReportingDay: priorThursday,
+        watches: [watch('w4', '2026-08-08')],
+        ads: rows('w4', [
+          { date: '2026-08-08', spend: 40 },
+          { date: sunday, spend: 40 },
+        ]),
+      }),
+    );
+    expect(out).toHaveLength(1);
+    const v = out[0]!;
+    expect(v.kind).toBe('checkpoint');
+    expect(v.ageDays).toBe(2);
+    expect(v.evidence.checkpoint_crossed).toBe(1);
+    expect(v.isFinal).toBe(false);
+  });
+
+  it('without previousReportingDay the daily cadence holds: quiet day 4 stays silent', () => {
+    const out = evaluateLaunches(
+      args({
+        expectedCpa: 100,
+        accountTrailingCpa: null,
+        watches: [watch('w5', '2026-08-03')],
+        ads: rows('w5', [
+          { date: '2026-08-03', spend: 40 },
+          { date: '2026-08-04', spend: 40 },
+          { date: '2026-08-05', spend: 40 },
+          { date: Y, spend: 40 },
+        ]),
+      }),
+    );
+    expect(out).toHaveLength(0);
+  });
+
+  it('without previousReportingDay a quiet day 3 fires exactly as before', () => {
+    const out = evaluateLaunches(
+      args({
+        expectedCpa: 100,
+        accountTrailingCpa: null,
+        watches: [watch('w6', '2026-08-04')],
+        ads: rows('w6', [
+          { date: '2026-08-04', spend: 40 },
+          { date: '2026-08-05', spend: 40 },
+          { date: Y, spend: 40 },
+        ]),
+      }),
+    );
+    expect(out).toHaveLength(1);
+    const v = out[0]!;
+    expect(v.kind).toBe('checkpoint');
+    expect(v.ageDays).toBe(3);
+    expect(v.evidence.checkpoint_crossed).toBe(3);
+    expect(v.evidence.previous_reporting_day).toBeNull();
+  });
+});
+
 describe('evaluateLaunches — priority and house rules', () => {
   it('an ad that qualifies for both gets money_out_nothing_back, not starved', () => {
     const out = evaluateLaunches(
