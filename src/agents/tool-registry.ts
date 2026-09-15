@@ -1679,6 +1679,34 @@ register({
 
 register({
   definition: {
+    name: 'get_learning_state',
+    description:
+      "Meta's OWN verdict on which edits reset the learning phase. The activity log (get_account_changes) records every edit but never says whether one was significant — that lives on the ad set as learning_stage_info.last_sig_edit_ts, and Meta only ever exposes the MOST RECENT one, so we sample it hourly and accumulate the history here. Returns each ad set's current learning status (LEARNING / SUCCESS / LEARNING_LIMITED / FAIL), and every significant edit in the window matched back to the activity log so you can see WHAT was changed and WHO changed it. Use when asked whether a budget or targeting change reset learning, why an ad set is stuck in learning, or whether someone is editing live ad sets too often. IMPORTANT: recording starts 2026-09-15 and covers ACTIVE ad sets only — no rows for an earlier period means NOT RECORDED, never 'no significant edits happened'. Say so rather than implying the account was quiet. Meta has never published what makes an edit significant, so report that one occurred, never why.",
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        clientCode: {
+          type: 'string',
+          description: 'Client code (e.g. BFM, TL, AB)',
+        },
+        days: {
+          type: 'number',
+          description: 'How far back to look for significant edits (default 30)',
+        },
+      },
+      required: ['clientCode'],
+    },
+  },
+  async execute(input) {
+    return await supabaseTools.getLearningState({
+      clientCode: input.clientCode as string,
+      days: input.days as number | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
     name: 'get_weather_daily',
     description:
       'Get daily country-level weather (mean/max/min temperature °C, cloud cover %, sunshine hours, precipitation mm, max wind km/h) from BMAD. Currently populated for DE only (Open-Meteo, population-weighted across top 10 cities). Use to correlate weather with performance for weather-sensitive clients like Laori (non-alcoholic drinks — warmer/sunnier days drive demand). Combine with daily spend/ROAS from get_campaign_performance or get_client_performance (groupBy=date) to compute correlations.',
