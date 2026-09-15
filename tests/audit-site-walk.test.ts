@@ -160,9 +160,22 @@ describe('the guards — a fetch we should not make never leaves', () => {
     expect(isOnPlatformUrl('https://northline.example/')).toBe(false);
     expect(normalizeDestination('https://Northline.example/quote/?utm=x#y')).toBe('https://northline.example/quote');
   });
+
+  it('preserves product queries and unsafe URL components until the fetch guard checks them', () => {
+    expect(normalizeDestination('https://shop.example/?variant=123&utm_source=meta&fbclid=456')).toBe('https://shop.example/?variant=123');
+    expect(guardUrl(normalizeDestination('https://user:secret@shop.example/')!).ok).toBe(false);
+    expect(guardUrl(normalizeDestination('https://shop.example:8443/')!).ok).toBe(false);
+  });
 });
 
 describe('extraction — what the page states outright', () => {
+  it('reads German offers and customer proof without mistaking a language gap for missing evidence', () => {
+    const read = extractPage(`<body><nav>${'Alle Produkte '.repeat(30)}</nav><h1>Alkoholfreie Drinks</h1><p>Über 25.000 Kund*innen lieben unseren Spritz.</p><p>Gratis Versand.</p><button>In den Warenkorb</button></body>`);
+    expect(read.primary_cta).toBe('In den Warenkorb');
+    expect(read.offer_sentence).toBe('Gratis Versand.');
+    expect(read.social_proof).toBe(true);
+    expect(read.social_proof_evidence).toContain('25.000 Kund*innen');
+  });
   it('reads the headline, the offer sentence, the CTA and the proof', () => {
     const read = extractPage(PAGE_HTML);
     expect(read.headline).toBe('Life cover from 12 USD a month');

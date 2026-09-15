@@ -6,6 +6,8 @@ import { buildColdRows, type RawAdDay } from './cold-source.js';
 import { lastSpendDateOf, SIX_MONTH_DAYS } from './audit-window.js';
 import type { StoreMediaCandidate } from './cold-creative-source.js';
 import { runMagicAudit } from './magic-audit.js';
+import type { DestinationCoverage } from './landing-destinations.js';
+import { guardUrl, normalizeDestination } from './site-walk.js';
 import {
   activitySchema,
   adSetsSchema,
@@ -93,8 +95,13 @@ const creativesSchema = z.union([
         adName: z.string().nullish(),
         landingUrl: z.string().nullish(),
         mediaType: z.string().nullish(),
+        effectiveStatus: z.string().nullish(),
       }),
     ),
+    source: z.enum(['live', 'stored']).optional(),
+    partial: z.boolean().optional(),
+    nextCursor: z.string().nullable().optional(),
+    partialReason: z.string().nullable().optional(),
   }),
   notReady,
 ]);
@@ -486,39 +493,65 @@ export async function fetchTinkersLeadContext(auditId: string): Promise<TinkersL
   }
 }
 
-/** Landing destinations from their creatives read — the same map
- *  resolveDestinations built from live Graph creatives, plus the FULL url per
- *  ad, which the site walk needs (a path cannot be fetched). Fail-soft: no
- *  destinations degrades the landing section to unresolved, never the audit. */
+/** A failed later page retains earlier destinations and their coverage. */
 export async function fetchTinkersDestinations(auditId: string): Promise<{
   destinations: Record<string, { market: string | null; path: string | null }>;
   landingUrls: Record<string, string>;
+  activeAdIds: string[];
+  coverage: DestinationCoverage;
 }> {
   const destinations: Record<string, { market: string | null; path: string | null }> = {};
   const landingUrls: Record<string, string> = {};
+  const active = new Set<string>();
+  const ads = new Set<string>();
+  const cursors = new Set<string>();
+  const deadline = Date.now() + 180_000;
+  let pages = 0;
+  let after: string | undefined;
+  const finish = (complete: boolean, reason?: string) => ({
+    destinations, landingUrls, activeAdIds: [...active],
+    coverage: { status: complete ? 'complete' : pages > 0 ? 'partial' : 'unavailable',
+      ...(reason ? { reason } : {}), pages, adsRead: ads.size } as DestinationCoverage,
+  });
   try {
-    const raw = await getGeneration(`/api/generation/${auditId}/creatives`);
-    const page = parseOrThrow(creativesSchema, raw, 'creatives');
-    if (!page.ok) {
-      logger.warn({ auditId, reason: page.reason }, 'tinkers creatives read not ready (landing section degrades)');
-      return { destinations, landingUrls };
-    }
-    for (const c of page.creatives) {
-      const url = c.landingUrl;
-      if (!url || !/^https?:\/\//.test(url)) continue;
-      try {
+    for (; pages < 40;) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return finish(false, 'time_limit');
+      const params = new URLSearchParams({ view: 'destinations' });
+      if (after) params.set('after', after);
+      const raw = await getGeneration(`/api/generation/${auditId}/creatives?${params}`, Math.min(READ_TIMEOUT_MS, remaining));
+      const page = parseOrThrow(creativesSchema, raw, 'creatives');
+      if (!page.ok) return finish(false, page.reason);
+      pages += 1;
+      for (const c of page.creatives) {
+        ads.add(c.adId);
+        active.delete(c.adId);
+        delete destinations[c.adId];
+        delete landingUrls[c.adId];
+        if (!c.landingUrl || !guardUrl(c.landingUrl).ok) continue;
+        const url = normalizeDestination(c.landingUrl);
+        if (!url) continue;
         const parsed = new URL(url);
-        destinations[c.adId] = { market: null, path: parsed.pathname };
-        // Query strings are per-ad tracking, never the page.
-        landingUrls[c.adId] = `${parsed.origin}${parsed.pathname}`;
-      } catch {
-        /* malformed url — leave unresolved */
+        destinations[c.adId] = { market: null, path: `${parsed.pathname}${parsed.search}` };
+        landingUrls[c.adId] = url;
+        if (page.source === 'live' && c.effectiveStatus === 'ACTIVE') active.add(c.adId);
       }
+      if (page.source !== 'live') return finish(false, 'live_read_unavailable');
+      if (page.partial === false && !page.nextCursor) return finish(true);
+      if (page.partialReason && page.partialReason !== 'page_limit') return finish(false, page.partialReason);
+      const cursor = page.nextCursor;
+      if (!cursor) return finish(false, 'missing_cursor');
+      if (cursor.length > 512 || !/^[\w\-+/=%.~:@]+$/.test(cursor) || cursor.includes('://') || /access_token/i.test(cursor) || cursors.has(cursor)) {
+        return finish(false, 'unsafe_or_repeated_cursor');
+      }
+      cursors.add(cursor);
+      after = cursor;
     }
+    return finish(false, 'page_limit');
   } catch (err) {
     logger.warn({ err: seamError(err), auditId }, 'tinkers creatives read failed (landing section degrades)');
+    return finish(false, 'request_failed');
   }
-  return { destinations, landingUrls };
 }
 
 /** The top ads' words + signed media URLs from their store, for the creative
@@ -943,6 +976,7 @@ async function runBridged(args: {
   const asOf = new Date().toISOString().slice(0, 10);
   // A failed or partial date range throws before any dormancy inference or synthesis.
   const readingLog: Array<{ at: string; line: string }> = [];
+  const destinationRead = fetchTinkersDestinations(auditId);
   let pull = await fetchTinkersAdDays(auditId, {
     asOf, allowShorterHistory: true,
     onProgress: async ({ daysRead, totalDays }) => {
@@ -951,7 +985,8 @@ async function runBridged(args: {
       catch (err) { logger.warn({ auditId, err: seamError(err) }, 'audit read progress could not be displayed'); }
     },
   });
-  const { destinations, landingUrls } = await fetchTinkersDestinations(auditId);
+  const { destinations, landingUrls, activeAdIds, coverage: destinationCoverage } = await destinationRead;
+  logger.info({ auditId, ...destinationCoverage, mappedAds: Object.keys(landingUrls).length }, 'audit destination coverage');
   let rows = buildColdRows({ adDays: pull.adDays, destinations, asOf, readCoverage: pull.coverage });
   if (!pull.coverage.complete && (rows.rowCount === 0 || pull.coverage.since > rows.window.ninetyStart)) {
     throw new Error('audit_data_incomplete: verified history does not cover the account comparison window');
@@ -1078,6 +1113,8 @@ async function runBridged(args: {
       customerFacts: leadContext?.customerFacts ?? [],
       storeMedia,
       landingUrls,
+      activeDestinationAdIds: activeAdIds,
+      destinationCoverage,
       // The account-structure reads, bound to this audit id. With them the
       // sections that used to run `planned` on this path (placements, audience
       // delivery, optimization events, the learning bar, targeting, change

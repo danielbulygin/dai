@@ -13,6 +13,7 @@
 
 import type { PackSection, PackAdRow, AdsetConfigLite } from './report-pack.js';
 import type { ChangeReceipt, ReceiptKind } from './root-cause.js';
+import type { DestinationCoverage } from './landing-destinations.js';
 import { kpiMode } from './report-pack.js';
 
 const r1 = (v: number): number => Math.round(v * 10) / 10;
@@ -984,21 +985,44 @@ export function rankDestinationsBySpend(
     .sort((a, b) => b.spend - a.spend);
 }
 
-export function computeLandingPages(rows: LandingAdRow[], checks: DeadUrlCheck[], currency: string, mode: 'roas' | 'cpr', uncheckedUrls = 0): PackSection {
+export function computeLandingPages(
+  rows: LandingAdRow[],
+  checks: DeadUrlCheck[],
+  currency: string,
+  mode: 'roas' | 'cpr',
+  uncheckedUrls = 0,
+  destinationCoverage?: DestinationCoverage,
+): PackSection {
   const total = rows.reduce((s, r) => s + (r.spend || 0), 0);
   const withPath = rows.filter((r) => r.landing_page_path);
   const covered = withPath.reduce((s, r) => s + (r.spend || 0), 0);
   const kpiLabel = mode === 'roas' ? 'Meta ROAS' : 'cost per result';
 
-  const paths = rankDestinationsBySpend(rows, (r) => r.landing_page_path, mode)
-    .map(({ destination, spend, spend_share_pct, ads, kpi }) => ({ path: destination, spend, spend_share_pct, ads, kpi }))
-    .slice(0, 10);
+  const rankedPaths = rankDestinationsBySpend(rows, (r) => r.landing_page_path, mode);
+  const paths = rankedPaths.slice(0, 10)
+    .map(({ destination, spend, spend_share_pct, ads, kpi }) => ({ path: destination, spend, spend_share_pct, ads, kpi }));
+  const coverageWarning = destinationCoverage?.status === 'unavailable'
+    ? 'The live ad-destination read was unavailable. Destination coverage is unknown for this run.'
+    : destinationCoverage?.status === 'partial'
+      ? 'Only part of the live ad-destination data was read. Additional destinations may be missing from this section.'
+      : undefined;
 
   if (paths.length === 0) {
     return {
-      summary: 'No landing-page destinations recorded against spending ads in the window. Destination data is missing from the sync for this account.',
-      data: { paths: [], dead_checks: checks, signal: false },
-      warnings: ['No destination mapping — read suppressed.'],
+      summary: destinationCoverage?.status === 'unavailable'
+        ? 'The ad-destination read was unavailable, so landing-page coverage could not be assessed.'
+        : destinationCoverage?.status === 'partial'
+          ? 'The partial ad-destination read could not map website URLs to spending ads. Landing-page coverage remains incomplete.'
+          : destinationCoverage?.status === 'complete'
+            ? 'The completed ad-destination read returned no website URLs that could be matched to spending ads in this window.'
+            : 'No website destinations could be matched to spending ads in this run. Destination coverage is unknown.',
+      data: {
+        paths: [], dead_checks: checks, signal: false,
+        coverage_pct: pct(covered, total),
+        destination_coverage: destinationCoverage,
+        unchecked_urls: uncheckedUrls,
+      },
+      warnings: [coverageWarning ?? 'No website destination mapping was available for this window.'],
     };
   }
 
@@ -1007,14 +1031,17 @@ export function computeLandingPages(rows: LandingAdRow[], checks: DeadUrlCheck[]
   const dead = checks.filter((c) => c.verdict === 'dead' || c.verdict === 'soft_404');
   const softCount = checks.filter((c) => c.verdict === 'soft_404').length;
   const redirects = checks.filter((c) => c.verdict === 'redirect_home');
+  const inconclusive = checks.filter((c) => c.verdict === 'inconclusive');
+  const healthy = checks.filter((c) => c.verdict === 'ok');
   const burn = dead.reduce((s, c) => s + c.daily_burn, 0);
   const deadAdCount = new Set(dead.flatMap((c) => c.ads)).size;
   const homepage = paths.find((p) => p.path === '/');
 
   const warnings: string[] = [];
+  if (coverageWarning) warnings.push(coverageWarning);
   if (dead.length > 0) {
     warnings.push(
-      `${dead.length} live destination${dead.length > 1 ? 's' : ''} came back DEAD with ~${money(burn, currency)}/day still flowing at ${dead.length > 1 ? 'them' : 'it'} — pause the listed ${deadAdCount === 1 ? 'ad' : 'ads'} first.` +
+      `${dead.length} checked destination${dead.length > 1 ? 's' : ''} came back DEAD. The associated ads averaged ~${money(burn, currency)}/day over the last 30 days. If they are still delivering, pause the listed ${deadAdCount === 1 ? 'ad' : 'ads'} first.` +
         (softCount > 0 ? ` (${softCount} of these ${softCount > 1 ? 'are' : 'is a'} soft-404${softCount > 1 ? 's' : ''}: the server answers 200 but the page itself says "not found".)` : ''),
     );
   }
@@ -1023,8 +1050,13 @@ export function computeLandingPages(rows: LandingAdRow[], checks: DeadUrlCheck[]
   }
   if (uncheckedUrls > 0) {
     warnings.push(
-      `${uncheckedUrls} additional lower-spend destination${uncheckedUrls > 1 ? 's were' : ' was'} not fetched this run (per-audit URL cap) — coverage is top-spend-first, not exhaustive.`,
+      `${uncheckedUrls} additional lower-spend destination${uncheckedUrls > 1 ? 's were' : ' was'} not fetched this run because of the URL or time limit. Checks cover the highest-spend destinations first.`,
     );
+  }
+  if (checks.length === 0) {
+    warnings.push('No website availability checks completed. Page availability is unverified.');
+  } else if (inconclusive.length > 0) {
+    warnings.push(`${inconclusive.length} destination check${inconclusive.length > 1 ? 's were' : ' was'} inconclusive. Blocked, unreadable or timed-out pages are not counted as healthy or broken.`);
   }
   if (homepage && homepage.spend_share_pct >= 5) {
     warnings.push(`${homepage.spend_share_pct}% of mapped spend lands on the homepage — ads should land on the page that closes them, almost never "/".`);
@@ -1037,17 +1069,24 @@ export function computeLandingPages(rows: LandingAdRow[], checks: DeadUrlCheck[]
   // the call to that chapter once it has a verdict, instead of the reader
   // getting "move off the homepage" beside "fix the homepage line".
   const homepageAdvice = !!homepage && homepage.spend_share_pct >= 5 && dead.length === 0;
+  const availabilitySummary = dead.length > 0
+    ? `${dead.length} checked destination${dead.length > 1 ? 's' : ''} failed availability checks. The associated ads averaged ~${money(burn, currency)}/day over the last 30 days; current spend is unverified.`
+    : checks.length === 0
+      ? 'No website availability checks completed, so page availability is unverified.'
+      : inconclusive.length > 0
+        ? `${healthy.length} checked website destination${healthy.length === 1 ? '' : 's'} loaded; ${inconclusive.length} could not be verified.`
+        : redirects.length > 0
+          ? `${redirects.length} checked destination${redirects.length === 1 ? ' redirects' : 's redirect'} to the homepage and ${redirects.length === 1 ? 'needs' : 'need'} review.`
+          : `${healthy.length} checked website destination${healthy.length === 1 ? '' : 's'} loaded.`;
   return {
     summary:
-      (paths.length === 1
+      (rankedPaths.length === 1
         ? `1 destination carries the mapped spend: ${topFigure}. `
-        : `${paths.length} destinations carry the mapped spend — biggest: ${topFigure}. `) +
-      (dead.length > 0
-        ? `${dead.length} spending URL${dead.length > 1 ? 's are' : ' is'} DEAD right now (~${money(burn, currency)}/day burning).`
-        : `Every checked live destination loads.`),
+        : `${rankedPaths.length} destinations carry the mapped spend — biggest: ${topFigure}. `) +
+      availabilitySummary,
     ...(dead.length > 0
       ? {
-          next_step: `Pause the ${deadAdCount === 1 ? 'ad' : 'ads'} pointing at the dead URL${dead.length > 1 ? 's' : ''} today. That is ${money(burn * 30, currency)}/month recovered with zero downside.`,
+          next_step: `Pause the ${deadAdCount === 1 ? 'ad' : 'ads'} pointing at the dead URL${dead.length > 1 ? 's' : ''} if still delivering, then repair the destination and verify it before resuming. Historical spend is not a savings estimate.`,
         }
       : homepageAdvice
         ? {
@@ -1062,20 +1101,27 @@ export function computeLandingPages(rows: LandingAdRow[], checks: DeadUrlCheck[]
       kpi_label: kpiLabel,
       currency,
       coverage_pct: pct(covered, total),
+      destination_coverage: destinationCoverage,
+      mapped_destination_count: rankedPaths.length,
       paths,
       dead_checks: checks,
       dead_count: dead.length,
       soft_404_count: softCount,
       unchecked_urls: uncheckedUrls,
+      inconclusive_count: inconclusive.length,
+      healthy_count: healthy.length,
       daily_burn: Math.round(burn),
+      daily_spend_basis: 'historical_30d_average',
+      current_spend_verified: false,
     },
     warnings: warnings.length ? warnings : undefined,
     derivation:
       `Spend per destination path over the last 30 days, read from ad-level delivery (${pct(covered, total)}% of spend has a mapped ` +
-      `destination). The dead-check does NOT trust stored URLs (they go stale on dynamic creatives — proven 2026-07-01): EVERY ` +
-      `currently-delivering ad with spend has its CURRENT destination resolved live from its Meta creative at audit time, then each ` +
-      `unique URL is fetched and read (soft-404 aware — an HTTP-200 "not found" page counts as dead). Rate-limited or blocked ` +
-      `fetches read "inconclusive", never alarmed.`,
+      `destination). Ads are matched to their resolved destinations; a destination may have changed during that window. ` +
+      `Destination lookup coverage is ${destinationCoverage?.status ?? 'unknown'}. Website availability is based only on ` +
+      `the ${checks.length} listed checks, of which ${inconclusive.length} were inconclusive; ${uncheckedUrls} additional URLs were not checked. ` +
+      `A readable HTTP-200 "not found" page counts as a soft-404. Blocked, empty and timed-out reads are inconclusive. ` +
+      `The daily_spend_basis is the historical 30-day average: neither ACTIVE status nor historical spend proves current delivery or recoverable savings.`,
   };
 }
 

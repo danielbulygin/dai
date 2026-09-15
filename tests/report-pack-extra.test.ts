@@ -259,6 +259,62 @@ describe('computeLandingPages', () => {
     expect((s.data as { unchecked_urls: number }).unchecked_urls).toBe(7);
     expect(s.warnings?.some((w) => w.includes('not fetched'))).toBe(true);
   });
+
+  it('does not call destinations healthy when no website checks completed', () => {
+    const s = computeLandingPages([row('a', '/products/x', 5000)], [], 'EUR', 'roas');
+    expect(s.summary).toContain('page availability is unverified');
+    expect(s.summary).not.toContain('loads');
+    expect(s.warnings?.some((warning) => warning.includes('No website availability checks completed'))).toBe(true);
+    expect(s.derivation).not.toContain('EVERY');
+  });
+
+  it('separates readable pages from inconclusive checks', () => {
+    const s = computeLandingPages([row('a', '/products/x', 5000)], [
+      { url: 'https://x.com/products/x', verdict: 'ok', status: 200, daily_burn: 10, ads: ['a'] },
+      { url: 'https://x.com/products/y', verdict: 'inconclusive', status: 403, daily_burn: 15, ads: ['b'] },
+    ], 'EUR', 'roas');
+    expect(s.summary).toContain('1 checked website destination loaded; 1 could not be verified');
+    expect(s.summary).not.toContain('Every');
+    expect(s.data).toMatchObject({ healthy_count: 1, inconclusive_count: 1, dead_count: 0 });
+  });
+
+  it('states the number of pages actually read when availability checks succeed', () => {
+    const s = computeLandingPages([row('a', '/products/x', 5000)], [
+      { url: 'https://x.com/products/x', verdict: 'ok', status: 200, daily_burn: 10, ads: ['a'] },
+    ], 'EUR', 'roas');
+    expect(s.summary).toContain('1 checked website destination loaded');
+    expect(s.data).toMatchObject({ healthy_count: 1, inconclusive_count: 0 });
+  });
+
+  it.each(['unavailable', 'partial'] as const)('does not mistake %s destination lookup for absent account URLs', (status) => {
+    const coverage = { status, reason: 'provider_timeout', pages: status === 'partial' ? 1 : 0, adsRead: status === 'partial' ? 100 : 0 };
+    const s = computeLandingPages([row('a', null, 5000)], [], 'EUR', 'roas', 0, coverage);
+    expect(s.data).toMatchObject({ destination_coverage: coverage, signal: false });
+    expect(s.summary).not.toContain('missing from the sync');
+    expect(s.summary).not.toContain('No landing-page destinations');
+    expect(s.summary).toMatch(/unavailable|partial/i);
+    expect(s.warnings).toHaveLength(1);
+  });
+
+  it('preserves partial lookup coverage when some destinations and checks succeed', () => {
+    const coverage = { status: 'partial' as const, reason: 'page_limit', pages: 3, adsRead: 300 };
+    const s = computeLandingPages([row('a', '/products/x', 1000), row('b', null, 1000)], [
+      { url: 'https://x.com/products/x', verdict: 'ok', status: 200, daily_burn: 10, ads: ['a'] },
+    ], 'EUR', 'roas', 0, coverage);
+    expect(s.data).toMatchObject({ destination_coverage: coverage, coverage_pct: 50 });
+    expect(s.warnings?.some((warning) => warning.includes('Additional destinations may be missing'))).toBe(true);
+  });
+
+  it('labels historical spend honestly instead of guaranteeing current burn or savings', () => {
+    const s = computeLandingPages([row('a', '/products/x', 3000)], [
+      { url: 'https://x.com/products/x', verdict: 'dead', status: 404, daily_burn: 100, ads: ['a'] },
+    ], 'EUR', 'roas');
+    expect(s.summary).toContain('over the last 30 days; current spend is unverified');
+    expect(s.next_step).toContain('if still delivering');
+    expect(s.next_step).not.toContain('recovered');
+    expect(s.data).toMatchObject({ daily_spend_basis: 'historical_30d_average', current_spend_verified: false });
+    expect(s.warnings?.some((warning) => warning.includes('still flowing'))).toBe(false);
+  });
 });
 
 describe('classifyDestination', () => {

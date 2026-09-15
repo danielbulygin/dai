@@ -221,7 +221,7 @@ describe('the generation reads', () => {
   it('authorizes with the Bearer secret and never signs a read', async () => {
     await fetchTinkersDestinations('aud_1');
     const call = state.calls[0]!;
-    expect(call.url).toBe('https://tinkers.test/api/generation/aud_1/creatives');
+    expect(call.url).toBe('https://tinkers.test/api/generation/aud_1/creatives?view=destinations');
     expect(call.method).toBe('GET');
     expect(call.auth).toBe('Bearer seam-secret');
     expect(call.signature).toBeNull();
@@ -397,10 +397,10 @@ describe('fetchTinkersDestinations + fetchTinkersStoreMedia', () => {
       json: {
         ok: true,
         creatives: [
-          { adId: 'ad_1', adName: 'A', landingUrl: 'https://shop.example/products/hoodie?x=1', mediaType: 'video' },
+          { adId: 'ad_1', adName: 'A', landingUrl: 'https://shop.example/products/hoodie?utm_source=meta', effectiveStatus: 'ACTIVE' },
           { adId: 'ad_2', adName: 'B', landingUrl: 'fb.me/whatever', mediaType: 'image' },
           { adId: 'ad_3', adName: 'C', landingUrl: null, mediaType: null },
-        ],
+        ], source: 'live', partial: false, nextCursor: null,
       },
     };
     // The path feeds the landing chapter; the full url (query dropped, it is
@@ -408,7 +408,60 @@ describe('fetchTinkersDestinations + fetchTinkersStoreMedia', () => {
     await expect(fetchTinkersDestinations('aud_1')).resolves.toEqual({
       destinations: { ad_1: { market: null, path: '/products/hoodie' } },
       landingUrls: { ad_1: 'https://shop.example/products/hoodie' },
+      activeAdIds: ['ad_1'],
+      coverage: { status: 'complete', pages: 1, adsRead: 3 },
     });
+  });
+
+  it('resumes live pages and keeps functional query parameters', async () => {
+    state.reads.creatives = [
+      { json: { ok: true, source: 'live', creatives: [{ adId: 'a', landingUrl: 'https://shop.test/?product=12&utm_source=meta', effectiveStatus: 'ACTIVE' }], partial: true, nextCursor: 'cursor_one', partialReason: 'page_limit' } },
+      { json: { ok: true, source: 'live', creatives: [{ adId: 'b', landingUrl: 'https://shop.test/b', effectiveStatus: 'PAUSED' }], partial: false, nextCursor: null } },
+    ];
+    const read = await fetchTinkersDestinations('aud_1');
+    expect(read.coverage).toEqual({ status: 'complete', pages: 2, adsRead: 2 });
+    expect(read.activeAdIds).toEqual(['a']);
+    expect(read.landingUrls).toEqual({ a: 'https://shop.test/?product=12', b: 'https://shop.test/b' });
+    expect(read.destinations.a?.path).toBe('/?product=12');
+    const requests = state.calls.filter(c => c.url.includes('/creatives')).map(c => new URL(c.url));
+    expect(requests[0]!.searchParams.get('view')).toBe('destinations');
+    expect(requests[1]!.searchParams.get('after')).toBe('cursor_one');
+  });
+
+  it('keeps earlier URLs when a later read fails, and distinguishes a first-page failure', async () => {
+    state.reads.creatives = [
+      { json: { ok: true, source: 'live', creatives: [{ adId: 'a', landingUrl: 'https://shop.test/a' }], partial: true, nextCursor: 'cursor_one' } },
+      { status: 502 },
+    ];
+    const partial = await fetchTinkersDestinations('aud_1');
+    expect(partial.landingUrls).toEqual({ a: 'https://shop.test/a' });
+    expect(partial.coverage).toEqual({ status: 'partial', reason: 'request_failed', pages: 1, adsRead: 1 });
+    state.reads.creatives = { status: 502 };
+    expect((await fetchTinkersDestinations('aud_1')).coverage).toEqual({ status: 'unavailable', reason: 'request_failed', pages: 0, adsRead: 0 });
+  });
+
+  it.each(['https://foreign.test/?access_token=private', 'access_token=private', 'x'.repeat(513)])('never forwards an unsafe destination cursor', async nextCursor => {
+    state.reads.creatives = { json: { ok: true, source: 'live', creatives: [], partial: true, nextCursor } };
+    expect((await fetchTinkersDestinations('aud_1')).coverage.reason).toBe('unsafe_or_repeated_cursor');
+    expect(state.calls).toHaveLength(1);
+  });
+
+  it('stops repeated cursors and refuses to treat stored inventory as current delivery', async () => {
+    state.reads.creatives = { json: { ok: true, source: 'live', creatives: [], partial: true, nextCursor: 'same' } };
+    expect((await fetchTinkersDestinations('aud_1')).coverage).toMatchObject({ status: 'partial', reason: 'unsafe_or_repeated_cursor', pages: 2 });
+    state.reads.creatives = { json: { ok: true, source: 'stored', creatives: [{ adId: 'a', landingUrl: 'https://shop.test/', effectiveStatus: 'ACTIVE' }], partial: true } };
+    const stored = await fetchTinkersDestinations('aud_1');
+    expect(stored.coverage.status).toBe('partial');
+    expect(stored.activeAdIds).toEqual([]);
+  });
+
+  it('does not strip unsafe credentials or ports into a fetchable URL', async () => {
+    state.reads.creatives = { json: { ok: true, source: 'live', partial: false, nextCursor: null, creatives: [
+      { adId: 'a', landingUrl: 'https://user:password@shop.test/' },
+      { adId: 'b', landingUrl: 'https://shop.test:8443/' },
+      { adId: 'c', landingUrl: 'https://127.0.0.1/' },
+    ] } };
+    expect((await fetchTinkersDestinations('aud_1')).landingUrls).toEqual({});
   });
 
   it('store media arrives keyed by ad id; a not-ready answer degrades to null', async () => {

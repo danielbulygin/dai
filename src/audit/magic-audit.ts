@@ -52,6 +52,7 @@ import {
 } from './audit-window.js';
 import { buildWorkLedger, type WorkRow } from './work-ledger.js';
 import { createPageFetch, runSiteWalk, type WalkAd, type WalkDestination } from './site-walk.js';
+import { checkLandingDestinations, type DestinationCoverage } from './landing-destinations.js';
 
 /**
  * Magic Audit orchestrator (master-plan B1, expanded 2026-06-11: creative /
@@ -139,6 +140,8 @@ export interface ColdInjection {
   /** ad id → its FULL landing url. `rows.landing30` carries the path only, and
    *  a path cannot be fetched: the site walk needs the host too. */
   landingUrls?: Record<string, string> | null;
+  activeDestinationAdIds?: string[];
+  destinationCoverage?: DestinationCoverage;
   /**
    * The account-structure reads, INJECTED (tinkers-bridge builds them; that
    * module imports this one, so nothing here may import it back).
@@ -2138,10 +2141,15 @@ export function workLineFor(key: string, s: AuditSection): string | null {
       return n ? `Classified every spending ad set's live targeting (${n} styles found)` : null;
     }
     case 'landing_pages': {
-      const checks = (d.dead_checks as unknown[] | undefined)?.length ?? 0;
-      return checks
-        ? `Resolved every delivering ad's CURRENT destination from Meta and fetched all ${checks} unique URLs live`
-        : `Ranked spend by landing destination`;
+      const checks = (d.dead_checks as Array<{ verdict?: string }> | undefined) ?? [];
+      const loaded = checks.filter(c => c.verdict === 'ok').length;
+      const inconclusive = checks.filter(c => c.verdict === 'inconclusive').length;
+      const failed = checks.filter(c => c.verdict === 'dead' || c.verdict === 'soft_404' || c.verdict === 'redirect_home').length;
+      const coverage = d.destination_coverage as DestinationCoverage | undefined;
+      const scope = coverage?.status === 'partial' ? '; destination lookup was partial' : coverage?.status === 'unavailable' ? '; destination lookup was unavailable' : '';
+      return checks.length
+        ? `Checked ${checks.length} landing destinations: ${loaded} loaded, ${failed} need review, ${inconclusive} inconclusive${scope}`
+        : `Ranked resolved landing destinations; no website availability checks completed${scope}`;
     }
     case 'message_match': {
       const page = d.page as { url?: string } | undefined;
@@ -3245,10 +3253,12 @@ export async function runMagicAudit(
       // ALL ads with spend in the window (Dan 2026-07-06) — the engine drops the
       // no-longer-delivering ones and dedupes by URL, so this stays cheap.
       const spendingAds = [...byAd.values()].filter((a) => a.spend > 0).sort((a, b) => b.spend - a.spend);
-      const { checks, uncheckedUrls, urlByAdId } = await checkAdDestinations(code, spendingAds, coldToken);
+      const { checks, uncheckedUrls, urlByAdId } = cold?.destinationCoverage
+        ? await checkLandingDestinations({ landingUrls: cold.landingUrls ?? {}, activeAdIds: cold.activeDestinationAdIds ?? [], spendingAds })
+        : await checkAdDestinations(code, spendingAds, coldToken);
       // The site walk needs full URLs, and this is where they get resolved live.
       for (const [adId, url] of urlByAdId) landingUrlByAd.set(adId, url);
-      return computeLandingPages(adRows, checks, client.currency, auditKpiMode, uncheckedUrls);
+      return computeLandingPages(adRows, checks, client.currency, auditKpiMode, uncheckedUrls, cold?.destinationCoverage);
     },
     // Runs AFTER landing_pages so it reads the SAME spend-by-destination
     // resolution: one page, the one carrying the most money.

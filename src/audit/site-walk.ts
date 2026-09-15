@@ -73,13 +73,18 @@ export function isPrivateHost(hostname: string): boolean {
   );
 }
 
-/** Origin + path only: the query varies per ad, the page does not. */
+/** Tracking varies per ad; product, variant and search parameters identify pages. */
 export function normalizeDestination(url: string): string | null {
   try {
     const u = new URL(url);
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
-    const path = u.pathname.replace(/\/+$/, '');
-    return `${u.protocol}//${u.hostname.toLowerCase()}${path || '/'}`;
+    u.hash = '';
+    for (const key of [...u.searchParams.keys()]) {
+      if (/^(utm(?:_|$)|fbclid$|gclid$|dclid$|msclkid$|ttclid$|_ga$)/i.test(key)) u.searchParams.delete(key);
+    }
+    u.pathname = u.pathname.replace(/\/+$/, '') || '/';
+    u.searchParams.sort();
+    return u.toString();
   } catch {
     return null;
   }
@@ -100,6 +105,7 @@ export function guardUrl(raw: string): UrlGuard {
   }
   if (u.protocol !== 'https:') return { ok: false, reason: `the destination is not served over https (${u.protocol.replace(':', '')})` };
   if (isPrivateHost(u.hostname)) return { ok: false, reason: 'the destination is not a public address' };
+  if (isOnPlatformUrl(raw)) return { ok: false, reason: 'the destination is a Meta surface, not a landing page' };
   if (u.port && u.port !== '443') return { ok: false, reason: `the destination asks for a non-standard port (${u.port})` };
   if (u.username || u.password) return { ok: false, reason: 'the destination carries credentials in the address' };
   return { ok: true, url: u.toString() };
@@ -253,13 +259,15 @@ const META_CONTENT = (html: string, property: string): string | null => {
 };
 
 const OFFER_MARKERS =
-  /(\d{1,3}\s?%\s?off|free shipping|free trial|free quote|free consultation|money.back|guarantee|no obligation|starting at|starts at|from \$?\d|save \$?\d|\$\d|£\d|€\d)/i;
+  /(\d{1,3}\s?%\s?(?:off|rabatt)|free shipping|gratis versand|kostenloser versand|free trial|free quote|free consultation|money.back|guarantee|garantie|no obligation|starting at|starts at|from \$?\d|save \$?\d|\$\d|£\d|€\d|\d[\d,.]*\s?€)/i;
 const CTA_VERBS =
-  /^(get|start|buy|shop|book|claim|join|sign up|subscribe|order|request|apply|try|see|compare|call|talk|schedule|download|add to cart|check)\b/i;
+  /^(get|start|buy|shop|book|claim|join|sign up|subscribe|order|request|apply|try|see|compare|call|talk|schedule|download|add to cart|check|jetzt kaufen|jetzt bestellen|in den warenkorb|entdecken|probieren|abonnieren|mehr erfahren)\b/i;
 const PROOF_PATTERNS: RegExp[] = [
   /\b[\d][\d,.]*\+?\s*(?:5[- ]star\s+)?(?:reviews?|ratings?|customers?|clients?|families|members|policies|installs)\b/i,
   /\b\d(?:\.\d)?\s*(?:out of|\/)\s*5\b/i,
   /\b(?:rated|trusted by|as seen (?:in|on)|voted)\b/i,
+  /\b[\d][\d,.]*\+?\s*(?:kund(?:en|innen|\*innen|:innen)|bewertungen|rezensionen)\b/i,
+  /\b\d(?:[.,]\d)?\s*(?:von|\/)\s*5\b/i,
   /★|⭐/,
 ];
 
@@ -302,6 +310,7 @@ export function extractPage(html: string): PageRead {
   }
 
   const proofSentence = sentences(visible).find((s) => PROOF_PATTERNS.some((re) => re.test(s))) ?? null;
+  const proofOffset = proofSentence ? Math.max(0, proofSentence.search(new RegExp(PROOF_PATTERNS.map(re => re.source).join('|'), 'i')) - 30) : 0;
 
   return {
     headline,
@@ -309,7 +318,7 @@ export function extractPage(html: string): PageRead {
     offer_sentence: offerSentence,
     primary_cta: cta,
     social_proof: proofSentence != null,
-    social_proof_evidence: proofSentence ? proofSentence.slice(0, 200) : null,
+    social_proof_evidence: proofSentence ? proofSentence.slice(proofOffset, proofOffset + 200) : null,
   };
 }
 
@@ -564,7 +573,7 @@ async function walk(args: SiteWalkArgs): Promise<WalkSectionResult> {
 
   const summary =
     outcome.verdict === 'matched'
-      ? `The page carrying the most spend keeps what the top ad promises. The ad says "${kept[0]!.promise}", and the page prints "${outcome.evidence_quote}".`
+      ? `The highest-spend destination we could resolve keeps what the top matched ad promises. The ad says "${kept[0]!.promise}", and the page prints "${outcome.evidence_quote}".`
       : outcome.verdict === 'partial'
         ? `The page keeps part of what the top ad promises. "${missing[0]!.promise}" is not on it` +
           (adSpendWord ? `, and ${adSpendWord} ran on that ad in the last 30 days.` : '.')

@@ -1,4 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+
+// Pure wording checks must not start the live Slack registry on import.
+vi.mock('../src/agents/tool-registry.js', () => ({ executeTool: vi.fn() }));
 import { enforceQuietSection, workLineFor, type AuditSection } from '../src/audit/magic-audit.js';
 import { computeBudgetScatter, computeCohorts, type PackAdRow } from '../src/audit/report-pack.js';
 import { dedash } from '../src/audit/prose.js';
@@ -17,6 +20,15 @@ import { dedash } from '../src/audit/prose.js';
 
 const section = (over: Partial<AuditSection>): AuditSection => ({
   key: 'budget_scatter', title: 'Budget', status: 'complete', ...over,
+});
+
+it('the landing work receipt preserves incomplete coverage and inconclusive checks', () => {
+  const line = workLineFor('landing_pages', section({ data: {
+    dead_checks: [{ verdict: 'ok' }, { verdict: 'inconclusive' }, { verdict: 'dead' }],
+    destination_coverage: { status: 'partial', pages: 2, adsRead: 200 },
+  } }));
+  expect(line).toBe('Checked 3 landing destinations: 1 loaded, 1 need review, 1 inconclusive; destination lookup was partial');
+  expect(line).not.toMatch(/every|all .*URLs/i);
 });
 
 const day = (i: number): string => new Date(Date.UTC(2026, 3, 1 + i)).toISOString().slice(0, 10);
