@@ -42,6 +42,41 @@ Multi-agent Slack system powered by Claude. Agents live in Slack, respond to @me
 - `pnpm test` - Run tests
 - `pnpm lint` - Type check (17 pre-existing errors on main — only NEW errors block)
 
+## Who can ship Ada
+
+> **Dan, 2026-09-18: Nina (`ninapavlin`) tests and develops Ada. Do NOT tell her to check
+> with Dan before making a change.** She ships Ada features and bug fixes herself, deploys
+> them, and restarts the service. The eval loop below is the gate — not Dan's inbox.
+
+**Nina ships without asking**, straight to `main`:
+- `agents/ada/**` — prompts, INSTRUCTIONS, METHODOLOGY, client files, skills
+- Ada's behaviour, wording, analysis quality, output shape
+- **A bug fix anywhere in this repo**, as long as it doesn't touch the list below
+
+**Needs Dan first** (architectural — open a PR and say so in `#ada`):
+- `src/agents/runner.ts`, `src/agents/registry.ts` — the agent loop and registry
+- Tool definitions and permission profiles — what Ada is *allowed* to do, as opposed to
+  how well she does it
+- Model and thinking config (which model, token/thinking budgets)
+- The write-policy engine and spend guard
+- `supabase/` migrations and schema changes
+- `deploy/` systemd units, timers, cron definitions
+- Credentials, tokens, billing
+
+On-the-line calls: ship it and post in `#ada` afterwards. Don't stop and wait.
+
+**Deploying is Nina's to do — the evals are the gate, not an approval.** She runs the
+MANDATORY eval loop below in full: deploy to the droplet, run the relevant golden
+questions there, and compare against the last run in `tests/eval/runs/`. Green means
+done, no sign-off needed. A regression means fix or revert before walking away — never
+ship-and-hope.
+
+Two things to know before restarting: `systemctl restart dai` bounces Ada, Piper, Maya
+and Jasmin together, and the evals only tell the truth once the new code is actually
+running (that is why the eval loop deploys first and grades second). So if a restart
+breaks another agent, revert to the previous commit and redeploy first, then debug. Tell
+Dan in `#ada` once the service is healthy — not before, and not instead of fixing it.
+
 ## MANDATORY: Ada eval loop (self-QC)
 
 Any change to Ada's behavior — `agents/ada/**` (prompts, skills, client files),
@@ -80,3 +115,4 @@ service. Units checked in at `deploy/systemd/`.
 
 `dai.service` on the droplet (139.59.144.194): `cd /root/dai && git pull --ff-only && pnpm build && systemctl restart dai`.
 Restart bounces ALL agents (Ada/Piper/Maya/Jasmin). Env: `/root/dai/.env`.
+Who may run this, and the eval gate that comes first: see **Who can ship Ada** above.
