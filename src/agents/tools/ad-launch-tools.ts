@@ -158,6 +158,13 @@ export async function previewAdLaunch(params: {
    *  Notion-title / lander-keyword derivation, so only pass it when the concept is the right
    *  ad-set name — never for clients whose ad sets are named from Notion. */
   concept?: string;
+  /** Live destination campaign (customer-destination mode). Must be in the client's
+   *  clients.allowed_campaign_ids fence — the droplet re-checks it at preview AND at
+   *  launch. Everything created lands PAUSED. Omit to use the paused agency bank. */
+  target_campaign_id?: string;
+  /** CBO per-ad-set spend FLOOR in minor units (6000 = $60/day on a USD account).
+   *  Only valid when the destination campaign holds the budget. */
+  daily_min_spend_target?: number;
 }): Promise<string> {
   const body: Record<string, unknown> = {
     client_code: params.client_code.toUpperCase(),
@@ -171,6 +178,10 @@ export async function previewAdLaunch(params: {
   if (params.geo_tier) body.geo_tier = params.geo_tier;
   if (params.scheduled_for) body.scheduled_for = params.scheduled_for;
   if (params.concept) body.concept = params.concept;
+  if (params.target_campaign_id) body.target_campaign_id = params.target_campaign_id;
+  if (params.daily_min_spend_target != null) {
+    body.daily_min_spend_target = params.daily_min_spend_target;
+  }
 
   const { data, error } = await dropletRequest(
     "/api/ada/preview-launch",

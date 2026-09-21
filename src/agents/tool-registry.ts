@@ -719,6 +719,16 @@ register({
           description:
             "REQUIRED for tiered clients (currently BFM only). Three buckets: US (US-only), T1 (16 countries: AE, AT, AU, AX, CA, CH, CZ, DE, DK, GB, IE, NL, NO, NZ, SE, US — wealthy/anglo + DACH + Nordics + ME), T2 (17 countries: BE, CL, ES, FI, FR, GR, IL, IT, JP, MX, PE, PL, PT, RO, SG, TR, TW — LATAM + South Europe + Asia + Israel). Always ASK the user which tier before previewing on BFM — never guess. For non-tiered clients (PL, AOT, MEOW, SLB, URV), omit this; their geo is fixed in CLIENT_CONFIGS.",
         },
+        target_campaign_id: {
+          type: 'string',
+          description:
+            "Optional. The LIVE campaign to create the ad set in, instead of the client's paused agency bank. Only campaigns in that client's clients.allowed_campaign_ids fence are accepted — the droplet re-checks the fence at preview AND again at launch, and refuses anything else. Everything created still lands PAUSED, so nothing can deliver until a human switches it on. Use this when the user names a real campaign ('put these in the main CBO'); omit it for the normal bank flow. If the fence refuses the campaign the user named, say so and stop — do NOT fall back to the bank silently.",
+        },
+        daily_min_spend_target: {
+          type: 'string',
+          description:
+            "Optional CBO per-ad-set spend FLOOR, in MINOR UNITS (cents): 6000 = $60/day on a USD account. Pass the integer as a string or number. This is the 'minimum spend' the team sets by hand on every Brain.fm ad set — BFM's main CBO runs 6000 on effectively every delivering ad set, so '$60 minimum spend, as always' means 6000. Valid ONLY when the destination campaign holds the budget (a CBO); the droplet refuses it on a campaign without a campaign-level budget, refuses it alongside an ad-set daily budget, and refuses it if the campaign's live floors would then exceed the campaign's daily budget. Never convert from dollars yourself without saying so — 60 means sixty CENTS and will be accepted.",
+        },
         scheduled_for: {
           type: 'string',
           description:
