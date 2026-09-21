@@ -90,7 +90,15 @@ async function dropletRequest<T = unknown>(
 // ---------------------------------------------------------------------------
 
 export interface CreativeInput {
-  video_id: string;
+  /** Feed rendition of a VIDEO creative. Required when media_type is "video". */
+  video_id?: string;
+  /** Feed rendition of an IMAGE creative. Required when media_type is "image". */
+  image_hash?: string;
+  /** Optional 9:16 image rendition paired with image_hash via placement asset
+   *  customization: image_hash serves feed, this serves Stories/Reels. Statics only. */
+  story_image_hash?: string;
+  /** Optional 9:16 video rendition paired with video_id. Video only. */
+  story_video_id?: string;
   filename?: string;
   asset_id?: string;
   media_type?: "video" | "image";
