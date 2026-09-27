@@ -40,6 +40,7 @@ import {
   type DeadEndMatchEvent,
 } from './loop-wiring.js';
 import type { GovernorVerdict } from './governor.js';
+import { runCost, type RunCostScope } from './run-cost.js';
 
 /** Where the project skills dir lives (contains `.claude/skills/ada-*`). Spike default. */
 const DEFAULT_SKILLS_CWD = process.env.ADA_SDK_SKILLS_CWD ?? '/root/ada-sdk-spike/skills-root';
@@ -69,8 +70,13 @@ export interface SdkRunExtras {
   streamPartial?: boolean;
   /** Collect every guard decision (for QC evidence). */
   onDecision?: (d: GuardDecision) => void;
-  /** Reports the SDK's authoritative cost + result subtype + tool names used. */
-  onResult?: (r: { costUsd: number; subtype: string; toolsUsed: string[] }) => void;
+  /**
+   * Reports what THIS run cost + result subtype + tool names used. `costScope` says
+   * what `costUsd` measures (see run-cost.ts): `turn` is this run alone;
+   * `session_total` is the resumed session's running total, because the baseline
+   * to subtract is not known yet. Forward it as the done frame's `cost_scope`.
+   */
+  onResult?: (r: { costUsd: number; costScope: RunCostScope; subtype: string; toolsUsed: string[] }) => void;
   /** Ada 2.0: fired on every Governor verdict over a write (decision cards / audit). */
   onGovernorVerdict?: (v: GovernorVerdict) => void;
   /** Ada 2.0: fired when a failed write matches a known ada_dead_ends row. */
@@ -385,6 +391,8 @@ export async function runAgentSDK(options: RunOptions, extras: SdkRunExtras = {}
   let usage: TokenUsage = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
   let turns = 0;
   let claudeSessionId: string | undefined;
+  /** The SDK's running total for claudeSessionId — the next run's baseline. */
+  let sdkTotalUsd: number | undefined;
   const toolsUsed: string[] = [];
 
   for await (const msg of q) {
@@ -430,7 +438,14 @@ export async function runAgentSDK(options: RunOptions, extras: SdkRunExtras = {}
         cacheCreation: u.cache_creation_input_tokens ?? 0,
       };
       if (typeof r.result === 'string' && r.result && !responseText) responseText = r.result as string;
-      extras.onResult?.({ costUsd: (r.total_cost_usd as number) ?? 0, subtype: (r.subtype as string) ?? 'unknown', toolsUsed });
+      sdkTotalUsd = (r.total_cost_usd as number) ?? 0;
+      const cost = runCost({
+        sdkTotalUsd,
+        resumedClaudeSessionId: session.claude_session_id,
+        resultClaudeSessionId: claudeSessionId ?? null,
+        baselineUsd: Number(session.total_cost ?? 0),
+      });
+      extras.onResult?.({ costUsd: cost.costUsd, costScope: cost.scope, subtype: (r.subtype as string) ?? 'unknown', toolsUsed });
       if (r.subtype !== 'success') {
         logger.warn({ subtype: r.subtype, sessionId: session.id }, 'runAgentSDK non-success result');
       }
@@ -441,6 +456,10 @@ export async function runAgentSDK(options: RunOptions, extras: SdkRunExtras = {}
   try {
     if (claudeSessionId && claudeSessionId !== session.claude_session_id) {
       await updateSession(session.id, { claude_session_id: claudeSessionId });
+    }
+    // The running total for claude_session_id, so the next run can subtract it.
+    if (claudeSessionId && sdkTotalUsd !== undefined) {
+      await updateSession(session.id, { total_cost: sdkTotalUsd });
     }
     await updateSession(session.id, { total_turns: session.total_turns + turns });
     await addMessage({ session_id: session.id, role: 'user', content: options.userMessage });

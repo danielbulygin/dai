@@ -47,6 +47,7 @@ import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { runAgentSDK } from '../src/agents/sdk/runAgentSDK.js';
+import type { RunCostScope } from '../src/agents/sdk/run-cost.js';
 import { getAgent } from '../src/agents/registry.js';
 import { buildClientOverlay } from '../src/client-agents/prompt-builder.js';
 import { getSupabase } from '../src/integrations/supabase.js';
@@ -259,6 +260,8 @@ interface AssistResponse {
   recommended_actions: RecommendedAction[];
   renames?: RenameProposal[];
   cost_usd: number;
+  /** What cost_usd measures: this run alone, or the resumed session's running total. */
+  cost_scope: RunCostScope;
   used_skills: string[];
   error?: string;
 }
@@ -488,6 +491,8 @@ async function handleAssist(req: AssistRequest): Promise<AssistResponse> {
   const threadTs = req.session_id || `assist-${randomUUID()}`;
 
   let costUsd = 0;
+  // What costUsd measures — forwarded as cost_scope so the portal never sums running totals.
+  let costScope: RunCostScope = 'turn';
   let subtype = 'unknown';
   let toolsUsed: string[] = [];
 
@@ -504,7 +509,7 @@ async function handleAssist(req: AssistRequest): Promise<AssistResponse> {
       // defaultPolicy() = deny ALL writes — advisory only. We pass no overrides.
       maxBudgetUsd: MAX_BUDGET_USD,
       maxTurns: MAX_TURNS,
-      onResult: (r) => { costUsd = r.costUsd; subtype = r.subtype; toolsUsed = r.toolsUsed; },
+      onResult: (r) => { costUsd = r.costUsd; costScope = r.costScope; subtype = r.subtype; toolsUsed = r.toolsUsed; },
     },
   );
 
@@ -522,7 +527,7 @@ async function handleAssist(req: AssistRequest): Promise<AssistResponse> {
       severity: parsed.severity,
       recommended_actions: parsed.actions,
       renames: parsed.renames,
-      cost_usd: round(costUsd),
+      cost_usd: round(costUsd), cost_scope: costScope,
       used_skills: usedSkills,
     };
   }
@@ -534,7 +539,7 @@ async function handleAssist(req: AssistRequest): Promise<AssistResponse> {
     diagnosis: result.response.trim() || '(empty response)',
     severity: 'info',
     recommended_actions: [{ key: 'manual', label: 'Manual review', detail: 'Ada returned no parseable action block — read the diagnosis above.' }],
-    cost_usd: round(costUsd),
+    cost_usd: round(costUsd), cost_scope: costScope,
     used_skills: usedSkills,
     error: subtype !== 'success' ? `runner subtype=${subtype}` : undefined,
   };
@@ -1651,6 +1656,8 @@ async function handleChatStream(
 
   let fullText = '';
   let costUsd = 0;
+  // What costUsd measures — forwarded as cost_scope so the portal never sums running totals.
+  let costScope: RunCostScope = 'turn';
   let toolsUsed: string[] = [];
   // Honest done (Ada 2.0): the SDK's authoritative result subtype. 'unknown'
   // means the stream died before a result message — NEVER treated as success.
@@ -1726,7 +1733,7 @@ async function handleChatStream(
         streamPartial: true,
         maxBudgetUsd: CHAT_MAX_BUDGET_USD,
         maxTurns: CHAT_MAX_TURNS,
-        onResult: (r) => { costUsd = r.costUsd; toolsUsed = r.toolsUsed; subtype = r.subtype; },
+        onResult: (r) => { costUsd = r.costUsd; costScope = r.costScope; toolsUsed = r.toolsUsed; subtype = r.subtype; },
         // Ada 2.0 decision cards: live Governor verdicts + failure-organ matches
         // stream as `decision` events the moment they happen — the visible 10%
         // of the Governor. These are SERVER truth (from the tool bridge), not
@@ -1767,7 +1774,7 @@ async function handleChatStream(
     // success in the client (the streams-success-on-failure fix, service layer).
     const ok = subtype === 'success';
     safe('done', {
-      session_id: sessionId, cost_usd: round(costUsd),
+      session_id: sessionId, cost_usd: round(costUsd), cost_scope: costScope,
       used_skills: inferUsedSkills(fullText, toolsUsed),
       ok, subtype, ...(ok ? {} : { error: `runner subtype=${subtype}` }),
     });
@@ -1775,7 +1782,7 @@ async function handleChatStream(
     console.error('[ada-console-assist] /chat error:', e);
     const errMsg = (e as Error).message || 'chat failed';
     safe('error', { error: errMsg });
-    safe('done', { session_id: sessionId, cost_usd: round(costUsd), used_skills: [], ok: false, subtype: subtype === 'unknown' ? 'exception' : subtype, error: errMsg });
+    safe('done', { session_id: sessionId, cost_usd: round(costUsd), cost_scope: costScope, used_skills: [], ok: false, subtype: subtype === 'unknown' ? 'exception' : subtype, error: errMsg });
   } finally {
     // Loop 4 evidence: which decisions were in view when this turn was drafted.
     // In `finally` so an errored turn is recorded too; no-ops when the block was
@@ -1862,6 +1869,8 @@ async function handleDiagnoseStream(req: AssistRequest, res: http.ServerResponse
 
   let fullText = '';
   let costUsd = 0;
+  // What costUsd measures — forwarded as cost_scope so the portal never sums running totals.
+  let costScope: RunCostScope = 'turn';
   let errMsg: string | undefined;
   try {
     await runAgentSDK(
@@ -1883,7 +1892,7 @@ async function handleDiagnoseStream(req: AssistRequest, res: http.ServerResponse
         streamPartial: true,
         maxBudgetUsd: Number(process.env.ADA_DIAGNOSE_MAX_BUDGET ?? 3.0),
         maxTurns: Number(process.env.ADA_DIAGNOSE_MAX_TURNS ?? 18),
-        onResult: (r) => { costUsd = r.costUsd; },
+        onResult: (r) => { costUsd = r.costUsd; costScope = r.costScope; },
       },
     );
   } catch (e) {
@@ -1896,7 +1905,7 @@ async function handleDiagnoseStream(req: AssistRequest, res: http.ServerResponse
     if (diag) safe('diagnosis', diag);
     // Only surface the error if we have NOTHING useful (no text + no diagnosis).
     if (errMsg && !diag && !fullText.trim()) safe('error', { error: errMsg });
-    safe('done', { session_id: threadTs, cost_usd: round(costUsd) });
+    safe('done', { session_id: threadTs, cost_usd: round(costUsd), cost_scope: costScope });
     clearInterval(heartbeat);
     if (!closed) { try { res.end(); } catch { /* noop */ } }
   }

@@ -9,6 +9,11 @@ export interface Session {
   user_id: string;
   claude_session_id: string | null;
   summary: string | null;
+  /**
+   * The Agent SDK's running `total_cost_usd` for `claude_session_id` as of the
+   * last run — the baseline runAgentSDK subtracts to get one run's cost. It is
+   * NOT this dai session's lifetime cost: a new Claude session starts it over.
+   */
   total_cost: number;
   total_turns: number;
   status: string;
