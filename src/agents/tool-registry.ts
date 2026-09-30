@@ -573,13 +573,14 @@ register({
   definition: {
     name: 'scan_media_library_folder',
     description:
-      'Scan a Google Drive folder to preview media files before uploading to the Meta Business Media Library. Returns file list with naming status (which files need ad ID prefix), auto-detected client code, and target Business Manager routing. Use this FIRST when someone shares a Google Drive folder link, before calling upload_to_media_library.',
+      'Scan a Google Drive folder OR a Frame.io share link to preview media files before uploading to the Meta Business Media Library. Returns file list with naming status (which files need ad ID prefix), auto-detected client code, target Business Manager routing, and a `source` field of "drive" or "frameio". Use this FIRST when someone shares a Drive folder or a Frame.io review link, before calling upload_to_media_library.',
     input_schema: {
       type: 'object' as const,
       properties: {
         drive_url: {
           type: 'string',
-          description: 'Google Drive folder URL (e.g. https://drive.google.com/drive/folders/abc123)',
+          description:
+            'Google Drive folder URL (e.g. https://drive.google.com/drive/folders/abc123) OR a Frame.io share link (e.g. https://next.frame.io/share/<share-id>/<folder-id>). Frame.io shares are public to anyone holding the link, so an external editor\'s link works with no access request.',
         },
       },
       required: ['drive_url'],
@@ -596,13 +597,13 @@ register({
   definition: {
     name: 'upload_to_media_library',
     description:
-      'Rename files in Google Drive (prepend ad ID prefix) and upload them to the Meta Business Media Library. Routes to the correct Business Manager AND access token based on client code: TL and LA go to Growth Squad, all others go to Ads on Tap. Dedups by content hash and by title — pre-warmed files come back as skipped_title/skipped_hash with their cached video_id/image_hash in seconds. Always call scan_media_library_folder first to preview what will happen. If the result has a top-level `error`, some or all files failed: report the per-file errors and hints and do NOT proceed to preview/launch. This operation can take several minutes for large video files.',
+      'Upload creatives to the Meta Business Media Library from EITHER a Google Drive folder (files are renamed in Drive, prepending the ad ID prefix) OR a Frame.io share link. Routes to the correct Business Manager AND access token based on client code: TL and LA go to Growth Squad, all others go to Ads on Tap. Dedups by content hash and by title — pre-warmed files come back as skipped_title/skipped_hash with their cached video_id/image_hash in seconds. Always call scan_media_library_folder first to preview what will happen. If the result has a top-level `error`, some or all files failed: report the per-file errors and hints and do NOT proceed to preview/launch. This operation can take several minutes for large video files. FRAME.IO SPECIFICS: a share belongs to whoever created it (usually the editor), so it is read-only to us — files are NOT renamed at source and every result comes back with renamed_in_drive=false; that is expected, do not report it as a failure. The normalized name still becomes the Meta library title, which is what matters. Because there is no Drive folder named for the ad set, the ad-set code usually CANNOT be inferred from a Frame.io link (scan returns asset_id: null and often detected_client: null). When that happens, ASK IN-THREAD before uploading — do not guess: either (a) ask which ad set these belong to and pass that code as expected_asset_id, or (b) ask whether the CLIENT supplied these ads themselves, in which case there is no AOT ad-set code and they upload with their names as-is. If the editor happened to name the Frame.io folder for the ad set (e.g. "BFMx1234"), the code is picked up automatically and you do not need to ask.',
     input_schema: {
       type: 'object' as const,
       properties: {
         drive_url: {
           type: 'string',
-          description: 'Google Drive folder URL',
+          description: 'Google Drive folder URL or Frame.io share link',
         },
         client_code: {
           type: 'string',
