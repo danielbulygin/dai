@@ -5,7 +5,7 @@
  * (piper_my_moves_all(), bmad Supabase); this module is pure data → render:
  *   - ONE parent message to #piper: header + one summary line per person +
  *     correction-loop footer + freshness line.
- *   - One THREAD REPLY per person with their ranked move list, every code
+ *   - One independent reply root per person with their ranked move list, every code
  *     hyperlinked to Notion.
  *
  * Calm channel post: bold display names, NO <@…> mentions, no em dashes.
@@ -19,6 +19,9 @@ import { env } from '../env.js';
 import { logger } from '../utils/logger.js';
 import { getSupabase } from '../integrations/supabase.js';
 import { getDedicatedBotClient } from '../slack/dedicated-bots.js';
+import { createSession, updateSession } from '../memory/sessions.js';
+import { addMessage } from '../memory/messages.js';
+import { SCHEDULED_MOVES_MARKER } from '../slack/piper-scheduled-replies.js';
 
 // ---------------------------------------------------------------------------
 // Data layer (shared with the get_my_moves agent tool)
@@ -66,7 +69,7 @@ export async function fetchMyMovesFor(personId: string): Promise<MyMoveRow[]> {
 
 /**
  * Freshness of the derived state behind the list (max piper_task_state.updated_at).
- * Falls back to null — caller substitutes generation time.
+ * Falls back to null — callers preserve unknown freshness.
  */
 export async function fetchDerivedStateFreshness(): Promise<Date | null> {
   try {
@@ -158,7 +161,7 @@ export function renderMoveRow(row: MyMoveRow): string {
   segs.push(bucketLabel(row.bucket));
   // ready*: Notion still says Blocked but the predecessor looks done — say so
   // instead of silently disagreeing with what the doer sees in Notion.
-  if (row.notion_blocked) segs.push("_Notion says Blocked - looks stale; reply 'still blocked' if not_");
+  if (row.notion_blocked) segs.push('_Notion says Blocked; prerequisite completion needs confirmation_');
 
   return `${row.rank}. ${statusIcon(row.derived_status)} ${parts[0]} - ${segs.join(' · ')}`;
 }
@@ -203,7 +206,7 @@ function groupByPerson(rows: MyMoveRow[]): PersonBlock[] {
 export interface MyMovesRender {
   /** The parent channel message. */
   parent: string;
-  /** One thread reply per person, in posting order. */
+  /** One independently threaded channel root per person, in posting order. */
   threads: { personId: string; display: string; text: string }[];
   peopleCount: number;
   moveCount: number;
@@ -219,23 +222,24 @@ export function renderMyMoves(rows: MyMoveRow[], opts: { now?: Date; freshness?:
     return `*${mrkdwnEscape(b.display)}* - ${moves}${held}`;
   });
 
-  const freshness = opts.freshness ?? now;
-  const hh = String(freshness.getUTCHours()).padStart(2, '0');
-  const mm = String(freshness.getUTCMinutes()).padStart(2, '0');
+  const freshness = opts.freshness;
+  const freshnessLine = freshness
+    ? `_derived state as of ${freshness.toISOString()}_`
+    : '_derived state freshness unavailable; recheck before changing tasks_';
 
   const parent = [
     `:dart: *My Real Moves - ${headerDate(now)}*`,
     '',
     ...(summaryLines.length > 0 ? summaryLines : ['No moves on anyone\'s board right now - all clear.']),
     '',
-    "Reply in your thread: 'done', 'not mine', 'still blocked', or 'blocked on client' and I'll update Notion. Full board: https://bmad-lac.vercel.app/pipeline",
-    `_derived state as of ${hh}:${mm} UTC_`,
+    "Reply to your own moves message below with the task name or number and 'done', 'not mine', 'still blocked', or 'blocked on client'. I'll check the exact task before any update. Full board: https://bmad-lac.vercel.app/pipeline",
+    freshnessLine,
   ].join('\n');
 
   const threads = blocks.map((b) => ({
     personId: b.personId,
     display: b.display,
-    text: [`*${mrkdwnEscape(b.display)}'s moves*`, ...b.moves.map(renderMoveRow)].join('\n'),
+    text: [`*${mrkdwnEscape(b.display)}'s moves*`, ...b.moves.map(renderMoveRow), '', 'Reply in this thread with the task name or number and your update.'].join('\n'),
   }));
 
   return { parent, threads, peopleCount: blocks.length, moveCount: rows.length };
@@ -249,6 +253,7 @@ export interface MyMovesResult {
   posted: boolean;
   channel: string | null;
   parentTs?: string;
+  personThreads?: Array<{ personId: string; threadTs: string; sessionId: string }>;
   peopleCount: number;
   moveCount: number;
   /** Full rendered output (parent + every thread) — what a dry-run prints. */
@@ -296,16 +301,39 @@ export async function runPiperMyMoves(
     unfurl_media: false,
   });
   const parentTs = parentMsg.ts;
-  if (!parentTs) throw new Error('Parent my-moves post returned no ts — cannot thread replies.');
+  if (parentMsg.ok !== true || !parentTs) throw new Error('Parent my-moves post was not accepted with a timestamp.');
 
+  const personThreads: NonNullable<MyMovesResult['personThreads']> = [];
   for (const thread of render.threads) {
-    await client.chat.postMessage({
+    const message = await client.chat.postMessage({
       channel,
-      thread_ts: parentTs,
       text: thread.text,
       unfurl_links: false,
       unfurl_media: false,
     });
+    if (message.ok !== true || !message.ts) {
+      throw new Error(`My-moves post for ${thread.personId} failed: no accepted timestamp.`);
+    }
+    // Persist ownership and the exact posted task list. Plain replies use the
+    // existing sessions lookup even after the Slack worker restarts.
+    const personRows = rows.filter(row => row.person_id === thread.personId);
+    const session = await createSession({
+      agent_id: 'piper', channel_id: channel, thread_ts: message.ts,
+      user_id: personRows[0]?.person_slack_id ?? `scheduled:piper:${thread.personId}`,
+    });
+    const mapping = {
+      person_id: thread.personId,
+      tasks: personRows.map(row => ({ rank: row.rank, task_id: row.task_id, task_name: row.task_name, ad_set_code: row.ad_set_code })),
+      parent_ts: parentTs,
+      generated_at: new Date().toISOString(),
+    };
+    await updateSession(session.id, { summary: SCHEDULED_MOVES_MARKER + JSON.stringify(mapping) });
+    await addMessage({ session_id: session.id, role: 'assistant', content: [
+      thread.text,
+      `Scheduled My Moves context: ${JSON.stringify(mapping.tasks)}`,
+      'This is a historical snapshot, not current status proof. Re-read the exact task and prerequisites before a write. A bare done or correction does not identify a task; ask which task. Never treat a report as verified completion.',
+    ].join('\n\n') });
+    personThreads.push({ personId: thread.personId, threadTs: message.ts, sessionId: session.id });
   }
 
   logger.info({ channel, ts: parentTs, threads: render.threads.length }, 'Piper my-moves: posted');
@@ -314,6 +342,7 @@ export async function runPiperMyMoves(
     posted: true,
     channel,
     parentTs,
+    personThreads,
     peopleCount: render.peopleCount,
     moveCount: render.moveCount,
     text,

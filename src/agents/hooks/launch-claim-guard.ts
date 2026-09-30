@@ -24,6 +24,9 @@ import { logger } from "../../utils/logger.js";
 export interface ExecutedToolCall {
   name: string;
   isError: boolean;
+  /** Piper retains exact adapter evidence before any truncation. */
+  input?: Record<string, unknown>;
+  result?: string;
 }
 
 /** Tools whose successful execution is ground truth for a launch claim. */

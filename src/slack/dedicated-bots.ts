@@ -25,6 +25,7 @@ import { registerEmailActions } from './listeners/email-actions.js';
 import { registerTriageActions } from './listeners/triage-actions.js';
 import { slackApp } from './app.js';
 import { transcribeAudioFiles } from './voice.js';
+import { scheduledReplyClarification } from './piper-scheduled-replies.js';
 
 // ---------------------------------------------------------------------------
 // Config
@@ -74,9 +75,9 @@ const runningBots = new Map<string, App>();
 /** Tracks threads each dedicated bot has participated in (agentId → Set<threadTs>) */
 const activeThreads = new Map<string, Set<string>>();
 
-function trackThread(agentId: string, threadTs: string): void {
+function trackThread(agentId: string, channel: string, threadTs: string): void {
   if (!activeThreads.has(agentId)) activeThreads.set(agentId, new Set());
-  activeThreads.get(agentId)!.add(threadTs);
+  activeThreads.get(agentId)!.add(`${channel}:${threadTs}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -171,7 +172,7 @@ function getAdaDmAllowedUsers(): Set<string> | null {
   return new Set(raw.split(',').map((s) => s.trim()).filter(Boolean));
 }
 
-function registerDedicatedBotListeners(app: App, agentId: string): void {
+export function registerDedicatedBotListeners(app: App, agentId: string): void {
   // DMs — all messages route to the agent
   app.message(async ({ message, client }) => {
     const msg = message as unknown as Record<string, unknown>;
@@ -278,12 +279,12 @@ function registerDedicatedBotListeners(app: App, agentId: string): void {
 
     const threadTs = msg.thread_ts as string;
     const threads = activeThreads.get(agentId);
-    if (!threads?.has(threadTs)) {
+    if (!threads?.has(`${msg.channel as string}:${threadTs}`)) {
       // Fallback: check Supabase sessions (survives restarts)
       const owner = await findThreadOwner(msg.channel as string, threadTs);
       if (!owner || !owner.startsWith(agentId)) return;
       // Re-track the thread so future replies skip the DB lookup
-      trackThread(agentId, threadTs);
+      trackThread(agentId, msg.channel as string, threadTs);
     }
 
     const userId = msg.user as string | undefined;
@@ -318,6 +319,15 @@ async function handleDedicatedBotMessage(opts: {
   source: string;
 }): Promise<void> {
   const { client, agentId, text, userId, channel, messageTs, threadTs, source } = opts;
+
+  if (agentId === 'piper' && threadTs) {
+    const clarification = await scheduledReplyClarification(channel, threadTs, text);
+    if (clarification) {
+      const receipt = await client.chat.postMessage({ channel, thread_ts: threadTs, text: clarification });
+      if (receipt.ok !== true || !receipt.ts) throw new Error('Piper clarification delivery was not confirmed.');
+      return;
+    }
+  }
 
   // Check if this is a client-scoped channel (only for Ada bot)
   let clientScope: RunOptions['clientScope'] | undefined;
@@ -374,7 +384,7 @@ async function handleDedicatedBotMessage(opts: {
       } else {
         logger.info({ agentId, channel }, `${displayName} agent-mention run produced no actionable reply — staying silent`);
       }
-      trackThread(agentId, threadTs ?? messageTs);
+      trackThread(agentId, channel, threadTs ?? messageTs);
     } catch (err) {
       logger.error({ err, channel, user: userId, agentId }, `${displayName} agent-mention run failed`);
     }
@@ -398,14 +408,15 @@ async function handleDedicatedBotMessage(opts: {
         userId,
         channelId: channel,
         threadTs: threadTs ?? messageTs,
-        onText: responder.onText,
+        // Piper completion claims are checked before any answer reaches Slack.
+        onText: agentId === 'piper' ? undefined : responder.onText,
         onTurnReset: responder.resetAccumulated,
         clientScope,
       }),
     );
 
     await responder.finalize(result.response, result.usage);
-    trackThread(agentId, threadTs ?? messageTs);
+    trackThread(agentId, channel, threadTs ?? messageTs);
   } catch (err) {
     logger.error({ err, channel, user: userId, agentId }, `${displayName} ${source} agent run failed`);
     await responder.onError(err);
