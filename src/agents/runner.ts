@@ -25,6 +25,8 @@ import type { ExecutedToolCall } from './hooks/launch-claim-guard.js';
 import { extractBatchIds, getBatchStates, buildLaunchStateSection } from './launch-state.js';
 import { detectClientCodes, loadClientContextExtras, loadMethodologyExtra, loadClientTargetsExtra, loadClientLearningsExtra } from './client-context.js';
 import { detectLaunchShaped, loadLaunchWorkflowExtra } from './workflow-context.js';
+import { guardPiperActionResponse, toolEvidenceForAgent, agentTextCallback } from './hooks/piper-action-proof.js';
+import { SCHEDULED_MOVES_MARKER } from '../slack/piper-scheduled-replies.js';
 
 let client: Anthropic | null = null;
 
@@ -500,7 +502,9 @@ async function runWithTools(
           block.input as Record<string, unknown>,
           toolContext,
         );
-        executedTools.push({ name: block.name, isError });
+        const evidence = toolEvidenceForAgent(toolContext.agentId, block.name, isError, block.input as Record<string, unknown>, result);
+        isError = evidence.isError;
+        executedTools.push(evidence);
 
         if (!isError && !DIGEST_SKIP.has(block.name)) {
           const usedChars = toolDigests.reduce((s, d) => s + d.length, 0);
@@ -596,7 +600,7 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
     channelId,
     threadTs,
     sessionId,
-    onText,
+    onText: requestedOnText,
     onTurnReset,
     clientScope,
   } = options;
@@ -611,6 +615,7 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
   const effectiveAgentId = clientScope
     ? `ada_client_${clientScope.clientCode}`
     : agent.config.id;
+  const onText = agentTextCallback(effectiveAgentId, requestedOnText);
 
   // Use client profile for client-scoped runs
   const profile: ToolProfile = clientScope
@@ -681,6 +686,12 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
   // Loaded BEFORE the system prompt is built so launch-state injection below
   // can scan it for batch references.
   const priorMessages = await getMessages(session.id, 20);
+  if (effectiveAgentId === 'piper' && session.summary?.startsWith(SCHEDULED_MOVES_MARKER)) {
+    extras.push({
+      name: 'scheduled-moves-context',
+      content: `Scheduled My Moves mapping (historical snapshot, re-read current state before action):\n${session.summary.slice(SCHEDULED_MOVES_MARKER.length)}\nA bare done or correction does not identify a task. Ask which task before any write.`,
+    });
+  }
 
   // Conditional launch workflow (A10): the full upload/launch playbook loads
   // only when the conversation looks launch-shaped. Internal runs only —
@@ -883,18 +894,22 @@ export async function runAgent(options: RunOptions): Promise<RunResult> {
     // real launch/verify tool call (or a recently-launched batch in the DB). Appends
     // a loud UNCONFIRMED banner otherwise — see hooks/launch-claim-guard.ts and the
     // 2026-06-05 Sweetspot fabricated-launch incident.
-    try {
-      const guard = await runLaunchClaimGuard({
-        responseText: result.responseText,
-        executedTools: result.executedTools ?? [],
-        agentId: effectiveAgentId,
-        sessionId: session.id,
-      });
-      if (guard.flagged && guard.warning) {
-        result.responseText += guard.warning;
+    if (effectiveAgentId === 'piper') {
+      result.responseText = guardPiperActionResponse(result.responseText, result.executedTools ?? []);
+    } else {
+      try {
+        const guard = await runLaunchClaimGuard({
+          responseText: result.responseText,
+          executedTools: result.executedTools ?? [],
+          agentId: effectiveAgentId,
+          sessionId: session.id,
+        });
+        if (guard.flagged && guard.warning) {
+          result.responseText += guard.warning;
+        }
+      } catch (guardErr) {
+        logger.warn({ err: guardErr }, 'launch-claim-guard failed (continuing without it)');
       }
-    } catch (guardErr) {
-      logger.warn({ err: guardErr }, 'launch-claim-guard failed (continuing without it)');
     }
 
     // Persist the user message and assistant response. The stored assistant
