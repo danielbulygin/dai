@@ -693,14 +693,30 @@ register({
           items: {
             type: 'object',
             properties: {
-              video_id: { type: 'string' },
+              video_id: {
+                type: 'string',
+                description: 'Feed rendition of a VIDEO creative. Required when media_type is "video".',
+              },
+              image_hash: {
+                type: 'string',
+                description: 'Feed rendition of an IMAGE creative. Required when media_type is "image".',
+              },
+              story_image_hash: {
+                type: 'string',
+                description:
+                  'Optional. A SECOND image rendition (9:16) paired with image_hash in ONE ad via placement asset customization: image_hash serves feed placements, this serves Stories and Reels. Use it when a concept was delivered in two aspect ratios (e.g. "V4-Get-Sht-Done-1x1" and "V4-Get-Sht-Done-9x16") and the team wants one ad per CONCEPT rather than one ad per file — pass the square/feed hash as image_hash and the vertical as story_image_hash. Statics only. Note this ad then carries ONE copy variant, not two: Meta rejects placement pairing combined with multi-variant copy (error 100/1885878).',
+              },
+              story_video_id: {
+                type: 'string',
+                description:
+                  'Optional. The video twin of story_image_hash: a second 9:16 video rendition paired with video_id, which serves feed. Video only.',
+              },
               filename: { type: 'string' },
               asset_id: { type: 'string' },
               media_type: { type: 'string', enum: ['video', 'image'] },
               transcript: { type: 'string' },
               visual_summary: { type: 'string' },
             },
-            required: ['video_id'],
           },
         },
         mode: { type: 'string', enum: ['new_adset', 'ads_only'] },
@@ -718,6 +734,16 @@ register({
           enum: ['US', 'T1', 'T2'],
           description:
             "REQUIRED for tiered clients (currently BFM only). Three buckets: US (US-only), T1 (16 countries: AE, AT, AU, AX, CA, CH, CZ, DE, DK, GB, IE, NL, NO, NZ, SE, US — wealthy/anglo + DACH + Nordics + ME), T2 (17 countries: BE, CL, ES, FI, FR, GR, IL, IT, JP, MX, PE, PL, PT, RO, SG, TR, TW — LATAM + South Europe + Asia + Israel). Always ASK the user which tier before previewing on BFM — never guess. For non-tiered clients (PL, AOT, MEOW, SLB, URV), omit this; their geo is fixed in CLIENT_CONFIGS.",
+        },
+        target_campaign_id: {
+          type: 'string',
+          description:
+            "Optional. The LIVE campaign to create the ad set in, instead of the client's paused agency bank. Only campaigns in that client's clients.allowed_campaign_ids fence are accepted — the droplet re-checks the fence at preview AND again at launch, and refuses anything else. Everything created still lands PAUSED, so nothing can deliver until a human switches it on. Use this when the user names a real campaign ('put these in the main CBO'); omit it for the normal bank flow. If the fence refuses the campaign the user named, say so and stop — do NOT fall back to the bank silently.",
+        },
+        daily_min_spend_target: {
+          type: 'string',
+          description:
+            "Optional CBO per-ad-set spend FLOOR, in MINOR UNITS (cents): 6000 = $60/day on a USD account. Pass the integer as a string or number. This is the 'minimum spend' the team sets by hand on every Brain.fm ad set — BFM's main CBO runs 6000 on effectively every delivering ad set, so '$60 minimum spend, as always' means 6000. Valid ONLY when the destination campaign holds the budget (a CBO); the droplet refuses it on a campaign without a campaign-level budget, refuses it alongside an ad-set daily budget, and refuses it if the campaign's live floors would then exceed the campaign's daily budget. Never convert from dollars yourself without saying so — 60 means sixty CENTS and will be accepted.",
         },
         scheduled_for: {
           type: 'string',
@@ -1671,6 +1697,34 @@ register({
   },
   async execute(input) {
     return await supabaseTools.getAccountChanges({
+      clientCode: input.clientCode as string,
+      days: input.days as number | undefined,
+    });
+  },
+});
+
+register({
+  definition: {
+    name: 'get_learning_state',
+    description:
+      "Meta's OWN verdict on which edits reset the learning phase. The activity log (get_account_changes) records every edit but never says whether one was significant — that lives on the ad set as learning_stage_info.last_sig_edit_ts, and Meta only ever exposes the MOST RECENT one, so we sample it hourly and accumulate the history here. Returns each ad set's current learning status (LEARNING / SUCCESS / LEARNING_LIMITED / FAIL), and every significant edit in the window matched back to the activity log so you can see WHAT was changed and WHO changed it. Use when asked whether a budget or targeting change reset learning, why an ad set is stuck in learning, or whether someone is editing live ad sets too often. IMPORTANT: recording starts 2026-09-15 and covers ACTIVE ad sets only — no rows for an earlier period means NOT RECORDED, never 'no significant edits happened'. Say so rather than implying the account was quiet. Meta has never published what makes an edit significant, so report that one occurred, never why.",
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        clientCode: {
+          type: 'string',
+          description: 'Client code (e.g. BFM, TL, AB)',
+        },
+        days: {
+          type: 'number',
+          description: 'How far back to look for significant edits (default 30)',
+        },
+      },
+      required: ['clientCode'],
+    },
+  },
+  async execute(input) {
+    return await supabaseTools.getLearningState({
       clientCode: input.clientCode as string,
       days: input.days as number | undefined,
     });

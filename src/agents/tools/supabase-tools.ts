@@ -756,6 +756,125 @@ export async function getAccountChanges(params: {
   }
 }
 
+export async function getLearningState(params: {
+  clientCode: string;
+  days?: number;
+}): Promise<string> {
+  try {
+    const days = params.days ?? 30;
+    const since = daysAgoISO(days);
+
+    logger.debug({ clientCode: params.clientCode, days }, "Querying learning state");
+
+    const resolved = await resolveClientId(params.clientCode);
+    if ("error" in resolved) return JSON.stringify(resolved);
+
+    const supabase = getSupabase();
+
+    // adset_learning_state holds one row per DISTINCT state an ad set has been
+    // observed in, so several rows per ad set is the history, not duplication.
+    const { data: states, error: stateErr } = await supabase
+      .from("adset_learning_state")
+      .select(
+        "adset_id, adset_name, campaign_id, status, last_sig_edit_ts, last_sig_edit_at, conversions, effective_status, first_seen_at, last_seen_at",
+      )
+      .eq("client_id", resolved.id)
+      .order("last_seen_at", { ascending: false })
+      .limit(2000);
+
+    if (stateErr) {
+      logger.error({ error: stateErr }, "Failed to get learning state");
+      return JSON.stringify({ error: stateErr.message });
+    }
+    if (!states || states.length === 0) {
+      return JSON.stringify({
+        note: `No learning state recorded for ${params.clientCode}. The hourly sync samples ACTIVE ad sets only, and the table starts from 2026-09-15 — there is no history before that.`,
+        current: [],
+        significant_edits: [],
+      });
+    }
+
+    // Newest row per ad set = where it stands now.
+    const current = new Map<string, Record<string, unknown>>();
+    for (const s of states) {
+      const key = s.adset_id as string;
+      if (!current.has(key)) current.set(key, s);
+    }
+
+    // Every significant edit observed inside the window, across all history rows.
+    const sigEdits = states
+      .filter(
+        (s) =>
+          (s.last_sig_edit_ts as number) > 0 &&
+          typeof s.last_sig_edit_at === "string" &&
+          (s.last_sig_edit_at as string).slice(0, 10) >= since,
+      )
+      .sort((a, b) =>
+        String(b.last_sig_edit_at).localeCompare(String(a.last_sig_edit_at)),
+      );
+
+    // Name the edit. Meta reports WHEN it deemed an edit significant but never
+    // WHAT it was, so match the timestamp back to the activity log (±2 min) to
+    // recover the event types and the person who made them.
+    let changes: Array<Record<string, unknown>> = [];
+    if (sigEdits.length > 0) {
+      const adsetIds = [...new Set(sigEdits.map((s) => s.adset_id as string))];
+      const oldest = String(sigEdits[sigEdits.length - 1]?.last_sig_edit_at ?? since);
+      const { data: ch } = await supabase
+        .from("account_changes")
+        .select("event_time, event_type, object_id, actor_name, translated_event_type")
+        .eq("client_id", resolved.id)
+        .in("object_id", adsetIds.slice(0, 200))
+        .gte("event_time", oldest)
+        .limit(2000);
+      changes = ch ?? [];
+    }
+
+    const attributed = sigEdits.map((s) => {
+      const t = new Date(s.last_sig_edit_at as string).getTime();
+      const matched = changes
+        .filter(
+          (c) =>
+            c.object_id === s.adset_id &&
+            Math.abs(new Date(c.event_time as string).getTime() - t) <= 120_000,
+        )
+        .map((c) => ({
+          event_type: c.event_type,
+          actor: c.actor_name,
+          label: c.translated_event_type,
+        }));
+      return {
+        adset_id: s.adset_id,
+        adset_name: s.adset_name,
+        status_after: s.status,
+        significant_edit_at: s.last_sig_edit_at,
+        edits: matched.length
+          ? matched
+          : "not in the activity log (ad-level edits log against the AD id, and the log only syncs 24h at a time)",
+      };
+    });
+
+    const byStatus: Record<string, number> = {};
+    for (const c of current.values()) {
+      const k = String(c.status);
+      byStatus[k] = (byStatus[k] ?? 0) + 1;
+    }
+
+    return JSON.stringify({
+      what_this_is:
+        "Meta's own record of which edits it counted as SIGNIFICANT (learning-phase resetting). last_sig_edit_ts is only ever the most recent one per ad set, so this table accumulates the history hourly. Absence of an edit before 2026-09-15 means not recorded, NOT that none happened.",
+      window: `${days} days (since ${since})`,
+      current_status_counts: byStatus,
+      current: [...current.values()],
+      significant_edits: attributed,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ error: msg }, "getLearningState failed");
+    return JSON.stringify({ error: msg });
+  }
+}
+
 export async function getWeatherDaily(params: {
   countryCode?: string;
   days?: number;

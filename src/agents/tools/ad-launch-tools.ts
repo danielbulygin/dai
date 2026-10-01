@@ -90,7 +90,15 @@ async function dropletRequest<T = unknown>(
 // ---------------------------------------------------------------------------
 
 export interface CreativeInput {
-  video_id: string;
+  /** Feed rendition of a VIDEO creative. Required when media_type is "video". */
+  video_id?: string;
+  /** Feed rendition of an IMAGE creative. Required when media_type is "image". */
+  image_hash?: string;
+  /** Optional 9:16 image rendition paired with image_hash via placement asset
+   *  customization: image_hash serves feed, this serves Stories/Reels. Statics only. */
+  story_image_hash?: string;
+  /** Optional 9:16 video rendition paired with video_id. Video only. */
+  story_video_id?: string;
   filename?: string;
   asset_id?: string;
   media_type?: "video" | "image";
@@ -158,6 +166,13 @@ export async function previewAdLaunch(params: {
    *  Notion-title / lander-keyword derivation, so only pass it when the concept is the right
    *  ad-set name — never for clients whose ad sets are named from Notion. */
   concept?: string;
+  /** Live destination campaign (customer-destination mode). Must be in the client's
+   *  clients.allowed_campaign_ids fence — the droplet re-checks it at preview AND at
+   *  launch. Everything created lands PAUSED. Omit to use the paused agency bank. */
+  target_campaign_id?: string;
+  /** CBO per-ad-set spend FLOOR in minor units (6000 = $60/day on a USD account).
+   *  Only valid when the destination campaign holds the budget. */
+  daily_min_spend_target?: number;
 }): Promise<string> {
   const body: Record<string, unknown> = {
     client_code: params.client_code.toUpperCase(),
@@ -171,6 +186,10 @@ export async function previewAdLaunch(params: {
   if (params.geo_tier) body.geo_tier = params.geo_tier;
   if (params.scheduled_for) body.scheduled_for = params.scheduled_for;
   if (params.concept) body.concept = params.concept;
+  if (params.target_campaign_id) body.target_campaign_id = params.target_campaign_id;
+  if (params.daily_min_spend_target != null) {
+    body.daily_min_spend_target = params.daily_min_spend_target;
+  }
 
   const { data, error } = await dropletRequest(
     "/api/ada/preview-launch",

@@ -61,6 +61,10 @@ When you've identified WHERE the funnel breaks, determine WHY using the Four For
 - Cross-account check: if 3+ accounts show the same metric dip on the same day → it's Meta. Do nothing for 24-48h.
 - Check for policy changes, algorithm updates, iOS signal issues
 - Attribution window shifts: ROAS drops but conversion volume and CPA stable → likely attribution model change, not real performance decline
+- **Click vs view check (run it before believing ANY ROAS trend, up or down).** Meta's default counts a sale if the buyer clicked the ad within 7 days OR only saw it within 1 day. Split them: `meta_graph_get` on `act_<id>/insights` with `params: {time_increment: "monthly", fields: "spend,actions,action_values", action_attribution_windows: ["1d_click","7d_click","1d_view"]}` (add `level: "ad"` to split by format or creative). For `offsite_conversion.fb_pixel_purchase` report per month: the 1d_view share of purchases and the 7d_click ROAS next to the default ROAS.
+  - A **step change in the view share** (e.g. 25–30% for a year, then 40–55%) with no matching rise in click-only ROAS is measurement, not performance. Typical cause: a tracking change that sends email/phone with every order server-side, so Meta matches more buyers to people who only saw an ad. Check `<pixel_id>/stats?aggregation=event_source` (server vs browser, last ~28 days only).
+  - Say it in plain words: "Meta counts people who only saw an ad and bought within a day. Counting only people who clicked, the return was X."
+  - The truth sits between the two lines; never present click-only as the real number, only as the check. Precedent: a prospect whose "recovery" from 2.0 to 3.9 was 1.4–2.6 on clicks (terminal case 42, 2026-09-26).
 
 **4. Market (External)**
 - Seasonality patterns (Laori peaks in December for dry January; BFCM changes everything)
