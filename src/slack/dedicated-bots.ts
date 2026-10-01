@@ -26,6 +26,7 @@ import { registerTriageActions } from './listeners/triage-actions.js';
 import { slackApp } from './app.js';
 import { transcribeAudioFiles } from './voice.js';
 import { scheduledReplyClarification } from './piper-scheduled-replies.js';
+import { isPiperPilotCommand, tryPiperPilotCommand } from './piper-coordinator-bridge.js';
 
 // ---------------------------------------------------------------------------
 // Config
@@ -279,7 +280,7 @@ export function registerDedicatedBotListeners(app: App, agentId: string): void {
 
     const threadTs = msg.thread_ts as string;
     const threads = activeThreads.get(agentId);
-    if (!threads?.has(`${msg.channel as string}:${threadTs}`)) {
+    if (!(agentId === 'piper' && isPiperPilotCommand(text)) && !threads?.has(`${msg.channel as string}:${threadTs}`)) {
       // Fallback: check Supabase sessions (survives restarts)
       const owner = await findThreadOwner(msg.channel as string, threadTs);
       if (!owner || !owner.startsWith(agentId)) return;
@@ -319,6 +320,10 @@ async function handleDedicatedBotMessage(opts: {
   source: string;
 }): Promise<void> {
   const { client, agentId, text, userId, channel, messageTs, threadTs, source } = opts;
+
+  if (agentId === 'piper' && await tryPiperPilotCommand(opts)) {
+    return;
+  }
 
   if (agentId === 'piper' && threadTs) {
     const clarification = await scheduledReplyClarification(channel, threadTs, text);
