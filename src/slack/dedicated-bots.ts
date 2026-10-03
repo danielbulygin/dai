@@ -27,6 +27,7 @@ import { slackApp } from './app.js';
 import { transcribeAudioFiles } from './voice.js';
 import { scheduledReplyClarification } from './piper-scheduled-replies.js';
 import { isPiperPilotCommand, tryPiperPilotCommand } from './piper-coordinator-bridge.js';
+import { tryAceHandoffCommand } from './ace-handoff-bridge.js';
 
 // ---------------------------------------------------------------------------
 // Config
@@ -320,6 +321,8 @@ async function handleDedicatedBotMessage(opts: {
   source: string;
 }): Promise<void> {
   const { client, agentId, text, userId, channel, messageTs, threadTs, source } = opts;
+
+  if (await tryAceHandoffCommand(opts)) return;
 
   if (agentId === 'piper' && await tryPiperPilotCommand(opts)) {
     return;
