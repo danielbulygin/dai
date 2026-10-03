@@ -8,7 +8,7 @@
  * Reusable across agents (Piper now, Cora and others later).
  */
 
-import { type PageObjectResponse } from '@notionhq/client';
+import { type Client, type PageObjectResponse } from '@notionhq/client';
 import { getNotion } from '../../integrations/notion.js';
 import { getSupabase } from '../../integrations/supabase.js';
 import { env } from '../../env.js';
@@ -1078,8 +1078,9 @@ export interface UpdateTaskStatusResult {
 async function readBackProperty(
   pageId: string,
   extract: (props: Record<string, unknown>) => string | null,
+  suppliedNotion?: Client,
 ): Promise<string | null> {
-  const notion = getNotion();
+  const notion = suppliedNotion ?? getNotion();
   const page = (await notion.pages.retrieve({ page_id: pageId })) as PageObjectResponse;
   return extract(page.properties as Record<string, unknown>);
 }
@@ -1092,8 +1093,12 @@ async function readBackProperty(
 export async function updateAotTaskStatus(params: {
   task_id: string;
   new_status: string;
-}): Promise<UpdateTaskStatusResult> {
-  const notion = getNotion();
+}, options: { expectedStatus?: string; beforeWrite?: () => Promise<void>; notion?: Client; propertyId?: 'vdOD' } = {}): Promise<UpdateTaskStatusResult> {
+  const notion = options.notion ?? getNotion();
+  const statusValue = (props: Record<string, unknown>): string | null => {
+    const value = props[options.propertyId ?? 'Status'] ?? (options.propertyId ? Object.values(props).find(v => (v as {id?:string})?.id === options.propertyId) : undefined);
+    return (value as {status?:{name:string}} | undefined)?.status?.name ?? null;
+  };
   const pageId = normalizePageId(params.task_id);
 
   if (!(ALLOWED_TASK_STATUS_WRITES as readonly string[]).includes(params.new_status)) {
@@ -1106,21 +1111,26 @@ export async function updateAotTaskStatus(params: {
   try {
     const page = (await notion.pages.retrieve({ page_id: pageId })) as PageObjectResponse;
     const props = page.properties as Record<string, unknown>;
-    const before = (props['Status'] as { status?: { name: string } } | undefined)?.status?.name ?? null;
+    const before = statusValue(props);
     const nameProp = props['Task name '] as { title?: Array<{ plain_text?: string }> } | undefined;
     const taskName = (nameProp?.title ?? []).map((t) => t.plain_text ?? '').join('').trim();
 
+    if (options.expectedStatus !== undefined && before !== options.expectedStatus) {
+      return { ok: false, task_id: pageId, before, verified: false, error: 'Task precondition changed; no write.' };
+    }
     if (before !== params.new_status) {
+      await options.beforeWrite?.();
       await notion.pages.update({
         page_id: pageId,
-        properties: { Status: { status: { name: params.new_status } } },
+        properties: { [options.propertyId ?? 'Status']: { status: { name: params.new_status } } },
       });
     }
 
     // QC read-back: never report a write that Notion doesn't show.
     const readBack = await readBackProperty(
       pageId,
-      (props) => (props['Status'] as { status?: { name: string } } | undefined)?.status?.name ?? null,
+      statusValue,
+      notion,
     );
     if (readBack !== params.new_status) {
       return {
